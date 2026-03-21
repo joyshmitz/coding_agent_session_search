@@ -12108,11 +12108,6 @@ fn read_session_paths(source: &str) -> Result<std::collections::HashSet<String>,
 const OWNER: &str = "Dicklesworthstone";
 const REPO: &str = "coding_agent_session_search";
 
-#[derive(Debug, Deserialize)]
-struct ReleaseInfo {
-    tag_name: String,
-}
-
 async fn maybe_prompt_for_update(once: bool) -> Result<()> {
     if once
         || dotenvy::var("CI").is_ok()
@@ -12123,22 +12118,19 @@ async fn maybe_prompt_for_update(once: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Use spawn_blocking so the network I/O doesn't block the async worker.
-    // reqwest's async client requires a tokio reactor we no longer have.
-    let update_result = asupersync::runtime::spawn_blocking(latest_release_version_blocking).await;
-
-    let Some((latest_tag, latest_ver)) = update_result else {
+    let Some(update_info) = crate::update_check::check_for_updates(env!("CARGO_PKG_VERSION")).await
+    else {
         return Ok(());
     };
 
-    let current_ver =
-        Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| Version::new(0, 1, 0));
-    if latest_ver <= current_ver {
+    if !update_info.should_show() {
         return Ok(());
     }
 
     println!(
-        "A newer version is available: current v{current_ver}, latest {latest_tag}. Update now? (y/N): "
+        "A newer version is available: current v{}, latest {}. Update now? (y/N): ",
+        env!("CARGO_PKG_VERSION"),
+        update_info.tag_name
     );
     print!("> ");
     io::stdout().flush().ok();
@@ -12151,8 +12143,8 @@ async fn maybe_prompt_for_update(once: bool) -> Result<()> {
         return Ok(());
     }
 
-    info!(target: "update", "starting self-update to {}", latest_tag);
-    match run_self_update(&latest_tag) {
+    info!(target: "update", "starting self-update to {}", update_info.tag_name);
+    match run_self_update(&update_info.tag_name) {
         Ok(true) => {
             println!("Update complete. Please restart cass.");
             std::process::exit(0);
@@ -12167,25 +12159,6 @@ async fn maybe_prompt_for_update(once: bool) -> Result<()> {
 
     Ok(())
 }
-
-fn latest_release_version_blocking() -> Option<(String, Version)> {
-    let url = format!("https://api.github.com/repos/{OWNER}/{REPO}/releases/latest");
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("coding-agent-search (update-check)")
-        .timeout(Duration::from_secs(3))
-        .build()
-        .ok()?;
-    let resp = client.get(url).send().ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let info: ReleaseInfo = resp.json().ok()?;
-    let tag = info.tag_name;
-    let version_str = tag.trim_start_matches('v');
-    let version = Version::parse(version_str).ok()?;
-    Some((tag, version))
-}
-
 #[cfg(windows)]
 fn run_self_update(tag: &str) -> Result<bool> {
     // Download the install script to a temp file and invoke it with parameters.
