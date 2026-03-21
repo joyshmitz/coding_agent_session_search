@@ -10,6 +10,7 @@ use coding_agent_search::model::types::{Agent, AgentKind, Conversation, Message,
 use coding_agent_search::search::tantivy::TantivyIndex;
 use coding_agent_search::sources::provenance::Source;
 use coding_agent_search::storage::sqlite::SqliteStorage;
+use frankensqlite::compat::{ConnectionExt, RowExt};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -203,17 +204,17 @@ fn index_local_and_remote_sources_preserves_provenance() {
     // Verify total count
     let total: i64 = storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get_typed(0))
         .unwrap();
     assert_eq!(total, 8, "should have 8 total conversations");
 
     // Verify local count
     let local_count: i64 = storage
         .raw()
-        .query_row(
+        .query_row_map(
             "SELECT COUNT(*) FROM conversations WHERE source_id = 'local'",
-            [],
-            |r| r.get(0),
+            &[],
+            |r| r.get_typed(0),
         )
         .unwrap();
     assert_eq!(local_count, 3, "should have 3 local conversations");
@@ -221,10 +222,10 @@ fn index_local_and_remote_sources_preserves_provenance() {
     // Verify remote count (all non-local)
     let remote_count: i64 = storage
         .raw()
-        .query_row(
+        .query_row_map(
             "SELECT COUNT(*) FROM conversations WHERE source_id != 'local'",
-            [],
-            |r| r.get(0),
+            &[],
+            |r| r.get_typed(0),
         )
         .unwrap();
     assert_eq!(remote_count, 5, "should have 5 remote conversations");
@@ -232,20 +233,20 @@ fn index_local_and_remote_sources_preserves_provenance() {
     // Verify specific source counts
     let laptop_count: i64 = storage
         .raw()
-        .query_row(
+        .query_row_map(
             "SELECT COUNT(*) FROM conversations WHERE source_id = 'laptop'",
-            [],
-            |r| r.get(0),
+            &[],
+            |r| r.get_typed(0),
         )
         .unwrap();
     assert_eq!(laptop_count, 2, "should have 2 laptop conversations");
 
     let workstation_count: i64 = storage
         .raw()
-        .query_row(
+        .query_row_map(
             "SELECT COUNT(*) FROM conversations WHERE source_id = 'workstation'",
-            [],
-            |r| r.get(0),
+            &[],
+            |r| r.get_typed(0),
         )
         .unwrap();
     assert_eq!(
@@ -256,12 +257,12 @@ fn index_local_and_remote_sources_preserves_provenance() {
     // Verify origin_host is preserved for remote conversations
     let remote_with_host: Vec<(String, Option<String>)> = storage
         .raw()
-        .prepare("SELECT source_id, origin_host FROM conversations WHERE source_id != 'local'")
-        .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .query_map_collect(
+            "SELECT source_id, origin_host FROM conversations WHERE source_id != 'local'",
+            &[],
+            |r| Ok((r.get_typed(0)?, r.get_typed(1)?)),
+        )
+        .unwrap();
 
     for (source_id, origin_host) in remote_with_host {
         assert!(
@@ -320,14 +321,12 @@ fn persist_conversation_extracts_provenance_from_metadata() {
     // Verify provenance was extracted correctly
     let results: Vec<(String, String, Option<String>)> = storage
         .raw()
-        .prepare(
+        .query_map_collect(
             "SELECT external_id, source_id, origin_host FROM conversations ORDER BY external_id",
+            &[],
+            |r| Ok((r.get_typed(0)?, r.get_typed(1)?, r.get_typed(2)?)),
         )
-        .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .unwrap();
 
     assert_eq!(results.len(), 2);
 
@@ -425,14 +424,12 @@ fn filter_conversations_local_only() {
     // Query local only
     let local_results: Vec<String> = storage
         .raw()
-        .prepare(
+        .query_map_collect(
             "SELECT external_id FROM conversations WHERE source_id = 'local' ORDER BY external_id",
+            &[],
+            |r| r.get_typed(0),
         )
-        .unwrap()
-        .query_map([], |r| r.get(0))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .unwrap();
 
     assert_eq!(local_results.len(), 2);
     assert!(local_results.contains(&"c1".to_string()));
@@ -514,14 +511,12 @@ fn filter_conversations_remote_only() {
     // Query remote only (source_id != 'local')
     let remote_results: Vec<String> = storage
         .raw()
-        .prepare(
+        .query_map_collect(
             "SELECT external_id FROM conversations WHERE source_id != 'local' ORDER BY external_id",
+            &[],
+            |r| r.get_typed(0),
         )
-        .unwrap()
-        .query_map([], |r| r.get(0))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .unwrap();
 
     assert_eq!(remote_results.len(), 2);
     assert!(remote_results.contains(&"c2".to_string()));
@@ -603,14 +598,12 @@ fn filter_conversations_specific_source() {
     // Query laptop only
     let laptop_results: Vec<String> = storage
         .raw()
-        .prepare(
+        .query_map_collect(
             "SELECT external_id FROM conversations WHERE source_id = 'laptop' ORDER BY external_id",
+            &[],
+            |r| r.get_typed(0),
         )
-        .unwrap()
-        .query_map([], |r| r.get(0))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .unwrap();
 
     assert_eq!(laptop_results.len(), 2);
     assert!(laptop_results.contains(&"c2".to_string()));
@@ -619,14 +612,12 @@ fn filter_conversations_specific_source() {
     // Query server only
     let server_results: Vec<String> = storage
         .raw()
-        .prepare(
+        .query_map_collect(
             "SELECT external_id FROM conversations WHERE source_id = 'server' ORDER BY external_id",
+            &[],
+            |r| r.get_typed(0),
         )
-        .unwrap()
-        .query_map([], |r| r.get(0))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .unwrap();
 
     assert_eq!(server_results.len(), 1);
     assert!(server_results.contains(&"c3".to_string()));
@@ -679,7 +670,7 @@ fn incremental_index_new_remote_source() {
 
     let initial_count: i64 = storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get_typed(0))
         .unwrap();
     assert_eq!(initial_count, 2, "should have 2 initial conversations");
 
@@ -710,7 +701,7 @@ fn incremental_index_new_remote_source() {
 
     let final_count: i64 = storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get_typed(0))
         .unwrap();
     assert_eq!(
         final_count,
@@ -721,18 +712,18 @@ fn incremental_index_new_remote_source() {
     // Verify source distribution
     let local_count: i64 = storage
         .raw()
-        .query_row(
+        .query_row_map(
             "SELECT COUNT(*) FROM conversations WHERE source_id = 'local'",
-            [],
-            |r| r.get(0),
+            &[],
+            |r| r.get_typed(0),
         )
         .unwrap();
     let laptop_count: i64 = storage
         .raw()
-        .query_row(
+        .query_row_map(
             "SELECT COUNT(*) FROM conversations WHERE source_id = 'laptop'",
-            [],
-            |r| r.get(0),
+            &[],
+            |r| r.get_typed(0),
         )
         .unwrap();
 
@@ -779,7 +770,7 @@ fn incremental_append_to_remote_conversation() {
 
     let initial_msg_count: i64 = storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM messages", &[], |r| r.get_typed(0))
         .unwrap();
     assert_eq!(initial_msg_count, 2, "should have 2 initial messages");
 
@@ -800,24 +791,24 @@ fn incremental_append_to_remote_conversation() {
 
     let final_msg_count: i64 = storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM messages", &[], |r| r.get_typed(0))
         .unwrap();
     assert_eq!(final_msg_count, 3, "should have 3 messages after append");
 
     // Verify conversation count didn't change (still 1)
     let conv_count: i64 = storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get_typed(0))
         .unwrap();
     assert_eq!(conv_count, 1, "should still have 1 conversation");
 
     // Verify provenance is preserved
     let (source_id, origin_host): (String, Option<String>) = storage
         .raw()
-        .query_row(
+        .query_row_map(
             "SELECT source_id, origin_host FROM conversations WHERE external_id = 'remote-conv'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            &[],
+            |r| Ok((r.get_typed(0)?, r.get_typed(1)?)),
         )
         .unwrap();
     assert_eq!(source_id, "laptop");
@@ -903,12 +894,12 @@ fn stats_reflect_source_distribution() {
     // Query source distribution stats
     let distribution: Vec<(String, i64)> = storage
         .raw()
-        .prepare("SELECT source_id, COUNT(*) as count FROM conversations GROUP BY source_id ORDER BY source_id")
-        .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .query_map_collect(
+            "SELECT source_id, COUNT(*) as count FROM conversations GROUP BY source_id ORDER BY source_id",
+            &[],
+            |r| Ok((r.get_typed(0)?, r.get_typed(1)?)),
+        )
+        .unwrap();
 
     assert_eq!(distribution.len(), 3, "should have 3 sources");
 
@@ -927,18 +918,18 @@ fn stats_reflect_source_distribution() {
     // Verify local vs remote split
     let local_total: i64 = storage
         .raw()
-        .query_row(
+        .query_row_map(
             "SELECT COUNT(*) FROM conversations WHERE source_id = 'local'",
-            [],
-            |r| r.get(0),
+            &[],
+            |r| r.get_typed(0),
         )
         .unwrap();
     let remote_total: i64 = storage
         .raw()
-        .query_row(
+        .query_row_map(
             "SELECT COUNT(*) FROM conversations WHERE source_id != 'local'",
-            [],
-            |r| r.get(0),
+            &[],
+            |r| r.get_typed(0),
         )
         .unwrap();
 
@@ -987,17 +978,15 @@ fn source_kind_available_via_join() {
     // Query with JOIN to get source kind
     let results: Vec<(String, String, String)> = storage
         .raw()
-        .prepare(
+        .query_map_collect(
             "SELECT c.external_id, c.source_id, s.kind
              FROM conversations c
              LEFT JOIN sources s ON c.source_id = s.id
              ORDER BY c.external_id",
+            &[],
+            |r| Ok((r.get_typed(0)?, r.get_typed(1)?, r.get_typed(2)?)),
         )
-        .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .unwrap();
 
     assert_eq!(results.len(), 2);
 
@@ -1055,7 +1044,7 @@ fn resync_same_conversation_updates_not_duplicates() {
 
     let count_after_first: i64 = storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get_typed(0))
         .unwrap();
     assert_eq!(
         count_after_first, 1,
@@ -1079,7 +1068,7 @@ fn resync_same_conversation_updates_not_duplicates() {
 
     let count_after_second: i64 = storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get_typed(0))
         .unwrap();
     assert_eq!(
         count_after_second, 1,
@@ -1089,7 +1078,7 @@ fn resync_same_conversation_updates_not_duplicates() {
     // Verify messages were appended
     let msg_count: i64 = storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM messages", &[], |r| r.get_typed(0))
         .unwrap();
     assert_eq!(msg_count, 3, "should have 3 messages after update");
 }
@@ -1162,10 +1151,10 @@ fn same_id_different_sources_are_distinct() {
     // Should have THREE entries (distinguished by source_id)
     let total: i64 = storage
         .raw()
-        .query_row(
+        .query_row_map(
             "SELECT COUNT(*) FROM conversations WHERE external_id = 'session-001'",
-            [],
-            |r| r.get(0),
+            &[],
+            |r| r.get_typed(0),
         )
         .unwrap();
     assert_eq!(
@@ -1176,17 +1165,15 @@ fn same_id_different_sources_are_distinct() {
     // Verify each source has one entry
     let by_source: Vec<(String, i64)> = storage
         .raw()
-        .prepare(
+        .query_map_collect(
             "SELECT source_id, COUNT(*) FROM conversations
              WHERE external_id = 'session-001'
              GROUP BY source_id
              ORDER BY source_id",
+            &[],
+            |r| Ok((r.get_typed(0)?, r.get_typed(1)?)),
         )
-        .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .unwrap();
 
     assert_eq!(by_source.len(), 3, "should have 3 sources");
     for (source_id, count) in by_source {
@@ -1236,7 +1223,7 @@ fn dedup_within_source_not_across() {
 
     let initial_count: i64 = storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get_typed(0))
         .unwrap();
     assert_eq!(initial_count, 3, "should have 3 conversations initially");
 
@@ -1260,7 +1247,7 @@ fn dedup_within_source_not_across() {
     // Should still have same count (deduplicated within source)
     let final_count: i64 = storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get_typed(0))
         .unwrap();
     assert_eq!(
         final_count, initial_count,
@@ -1319,10 +1306,10 @@ fn composite_key_unique_constraint() {
     // Verify both exist
     let count: i64 = storage
         .raw()
-        .query_row(
+        .query_row_map(
             "SELECT COUNT(*) FROM conversations WHERE external_id = 'unique-test'",
-            [],
-            |r| r.get(0),
+            &[],
+            |r| r.get_typed(0),
         )
         .unwrap();
     assert_eq!(
@@ -1333,22 +1320,20 @@ fn composite_key_unique_constraint() {
     // Verify composite uniqueness via SQL
     let unique_pairs: Vec<(String, String, String)> = storage
         .raw()
-        .prepare(
+        .query_map_collect(
             "SELECT source_id, agent_id, external_id FROM conversations
              WHERE external_id = 'unique-test'
              ORDER BY source_id",
+            &[],
+            |r| {
+                Ok((
+                    r.get_typed::<String>(0)?,
+                    r.get_typed::<i64>(1)?.to_string(),
+                    r.get_typed::<String>(2)?,
+                ))
+            },
         )
-        .unwrap()
-        .query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, i64>(1)?.to_string(),
-                r.get::<_, String>(2)?,
-            ))
-        })
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .unwrap();
 
     assert_eq!(unique_pairs.len(), 2);
     // Local and laptop should both have unique-test
@@ -1396,10 +1381,10 @@ fn update_conversation_preserves_metadata() {
     // Get initial ended_at
     let initial_ended_at: i64 = storage
         .raw()
-        .query_row(
+        .query_row_map(
             "SELECT ended_at FROM conversations WHERE external_id = 'meta-test'",
-            [],
-            |r| r.get(0),
+            &[],
+            |r| r.get_typed(0),
         )
         .unwrap();
     assert_eq!(
@@ -1426,10 +1411,10 @@ fn update_conversation_preserves_metadata() {
     // Verify ended_at was updated
     let final_ended_at: i64 = storage
         .raw()
-        .query_row(
+        .query_row_map(
             "SELECT ended_at FROM conversations WHERE external_id = 'meta-test'",
-            [],
-            |r| r.get(0),
+            &[],
+            |r| r.get_typed(0),
         )
         .unwrap();
     assert_eq!(
@@ -1441,10 +1426,10 @@ fn update_conversation_preserves_metadata() {
     // Verify provenance is still correct
     let (source_id, origin_host): (String, Option<String>) = storage
         .raw()
-        .query_row(
+        .query_row_map(
             "SELECT source_id, origin_host FROM conversations WHERE external_id = 'meta-test'",
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            &[],
+            |r| Ok((r.get_typed(0)?, r.get_typed(1)?)),
         )
         .unwrap();
     assert_eq!(source_id, "laptop");

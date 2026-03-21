@@ -156,7 +156,6 @@ fn index_handles_existing_schema_13_db() {
         .raw()
         .execute(
             "UPDATE meta SET value = '13' WHERE key = 'schema_version'",
-            [],
         )
         .expect("set schema_version to 13");
     drop(storage);

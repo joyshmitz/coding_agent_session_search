@@ -10,6 +10,7 @@
 
 use assert_cmd::cargo::cargo_bin_cmd;
 use coding_agent_search::storage::sqlite::SqliteStorage;
+use frankensqlite::compat::{ConnectionExt, RowExt};
 use std::fs;
 use std::path::Path;
 
@@ -106,7 +107,7 @@ fn count_messages(db_path: &Path) -> i64 {
     let storage = SqliteStorage::open(db_path).expect("open sqlite");
     storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM messages", &[], |r| r.get_typed(0))
         .expect("count messages")
 }
 
@@ -114,7 +115,7 @@ fn count_conversations(db_path: &Path) -> i64 {
     let storage = SqliteStorage::open(db_path).expect("open sqlite");
     storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get_typed(0))
         .expect("count conversations")
 }
 

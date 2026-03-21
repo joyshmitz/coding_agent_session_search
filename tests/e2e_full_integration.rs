@@ -10,6 +10,7 @@
 
 use assert_cmd::cargo::cargo_bin_cmd;
 use coding_agent_search::storage::sqlite::SqliteStorage;
+use frankensqlite::compat::{ConnectionExt, RowExt};
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
@@ -53,7 +54,7 @@ fn count_messages(db_path: &Path) -> i64 {
     let storage = SqliteStorage::open(db_path).expect("open sqlite");
     storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM messages", &[], |r| r.get_typed(0))
         .expect("count messages")
 }
 
@@ -62,7 +63,7 @@ fn count_conversations(db_path: &Path) -> i64 {
     let storage = SqliteStorage::open(db_path).expect("open sqlite");
     storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get_typed(0))
         .expect("count conversations")
 }
 
@@ -71,7 +72,7 @@ fn count_agents(db_path: &Path) -> i64 {
     let storage = SqliteStorage::open(db_path).expect("open sqlite");
     storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM agents", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM agents", &[], |r| r.get_typed(0))
         .expect("count agents")
 }
 
@@ -399,31 +400,31 @@ fn e2e_database_integrity() {
 
     // Every message should reference a valid conversation
     let orphan_msgs: i64 = conn
-        .query_row(
+        .query_row_map(
             "SELECT COUNT(*) FROM messages m
              LEFT JOIN conversations c ON m.conversation_id = c.id
              WHERE c.id IS NULL",
-            [],
-            |r| r.get(0),
+            &[],
+            |r| r.get_typed(0),
         )
         .expect("orphan check");
     assert_eq!(orphan_msgs, 0, "No orphan messages should exist");
 
     // Every conversation should reference a valid agent
     let orphan_convs: i64 = conn
-        .query_row(
+        .query_row_map(
             "SELECT COUNT(*) FROM conversations c
              LEFT JOIN agents a ON c.agent_id = a.id
              WHERE a.id IS NULL",
-            [],
-            |r| r.get(0),
+            &[],
+            |r| r.get_typed(0),
         )
         .expect("orphan conv check");
     assert_eq!(orphan_convs, 0, "No orphan conversations should exist");
 
     // FTS table should have entries for indexed messages
     let fts_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM fts_messages", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM fts_messages", &[], |r| r.get_typed(0))
         .expect("fts count");
     let msg_count = count_messages(&db_path);
     assert!(fts_count > 0, "FTS should have entries after indexing");

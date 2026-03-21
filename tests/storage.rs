@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use coding_agent_search::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
 use coding_agent_search::sources::provenance::{LOCAL_SOURCE_ID, Source, SourceKind};
 use coding_agent_search::storage::sqlite::SqliteStorage;
+use frankensqlite::compat::{ConnectionExt, ParamValue, RowExt};
 
 fn sample_agent() -> Agent {
     Agent {
@@ -57,7 +58,7 @@ fn schema_version_created_on_open() {
     );
 
     // If meta row is removed, the getter surfaces an error.
-    storage.raw().execute("DELETE FROM meta", []).unwrap();
+    storage.raw().execute("DELETE FROM meta").unwrap();
     assert!(
         storage.schema_version().is_err(),
         "schema_version should return error after meta table is deleted, got: {:?}",
@@ -83,11 +84,11 @@ fn rebuild_fts_repopulates_rows() {
 
     let count_messages: i64 = storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM messages", &[], |r| r.get_typed(0))
         .unwrap();
     let mut fts_count: i64 = storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM fts_messages", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM fts_messages", &[], |r| r.get_typed(0))
         .unwrap();
     assert_eq!(fts_count, count_messages);
 
@@ -95,19 +96,18 @@ fn rebuild_fts_repopulates_rows() {
         .raw()
         .execute(
             "INSERT INTO fts_messages(fts_messages) VALUES('delete-all')",
-            [],
         )
         .unwrap();
     fts_count = storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM fts_messages", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM fts_messages", &[], |r| r.get_typed(0))
         .unwrap();
     assert_eq!(fts_count, 0);
 
     storage.rebuild_fts().unwrap();
     fts_count = storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM fts_messages", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM fts_messages", &[], |r| r.get_typed(0))
         .unwrap();
     assert_eq!(fts_count, count_messages);
 }
@@ -128,11 +128,11 @@ fn transaction_rolls_back_on_duplicate_idx() {
 
     let conv_count: i64 = storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM conversations", [], |c| c.get(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |c| c.get_typed(0))
         .unwrap();
     let msg_count: i64 = storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM messages", [], |c| c.get(0))
+        .query_row_map("SELECT COUNT(*) FROM messages", &[], |c| c.get_typed(0))
         .unwrap();
 
     assert_eq!(conv_count, 0);
@@ -148,7 +148,7 @@ fn insert_conversation_tree_rolls_back_when_fts_insert_fails() {
     let agent_id = storage.ensure_agent(&sample_agent()).unwrap();
     storage
         .raw()
-        .execute("DROP TABLE fts_messages", [])
+        .execute("DROP TABLE fts_messages")
         .unwrap();
 
     let conv = sample_conv(None, vec![msg(0, 1)]);
@@ -160,11 +160,11 @@ fn insert_conversation_tree_rolls_back_when_fts_insert_fails() {
 
     let conv_count: i64 = storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get_typed(0))
         .unwrap();
     let msg_count: i64 = storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM messages", &[], |r| r.get_typed(0))
         .unwrap();
 
     assert_eq!(conv_count, 0, "conversation insert should roll back");
@@ -187,7 +187,7 @@ fn insert_conversations_batched_rolls_back_when_fts_insert_fails() {
 
     storage
         .raw()
-        .execute("DROP TABLE fts_messages", [])
+        .execute("DROP TABLE fts_messages")
         .unwrap();
 
     let result = storage.insert_conversations_batched(&refs);
@@ -198,11 +198,11 @@ fn insert_conversations_batched_rolls_back_when_fts_insert_fails() {
 
     let conv_count: i64 = storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM conversations", &[], |r| r.get_typed(0))
         .unwrap();
     let msg_count: i64 = storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM messages", &[], |r| r.get_typed(0))
         .unwrap();
 
     assert_eq!(conv_count, 0, "batched conversations should roll back");
@@ -232,22 +232,18 @@ fn append_only_updates_existing_conversation() {
 
     let rows: Vec<(i64, i64)> = storage
         .raw()
-        .prepare("SELECT idx, created_at FROM messages ORDER BY idx")
-        .unwrap()
-        .query_map([], |r| {
-            Ok((r.get(0)?, r.get::<_, Option<i64>>(1)?.unwrap()))
+        .query_map_collect("SELECT idx, created_at FROM messages ORDER BY idx", &[], |r| {
+            Ok((r.get_typed(0)?, r.get_typed::<Option<i64>>(1)?.unwrap()))
         })
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .unwrap();
     assert_eq!(rows, vec![(0, 100), (1, 200), (2, 300)]);
 
     let ended_at: i64 = storage
         .raw()
-        .query_row(
+        .query_row_map(
             "SELECT ended_at FROM conversations WHERE id = ?",
-            [outcome1.conversation_id],
-            |r| r.get(0),
+            &[ParamValue::from(outcome1.conversation_id)],
+            |r| r.get_typed(0),
         )
         .unwrap();
     assert_eq!(ended_at, 300);
@@ -275,11 +271,11 @@ fn large_batch_insert_keeps_fts_in_sync() {
 
     let msg_count: i64 = storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM messages", &[], |r| r.get_typed(0))
         .unwrap();
     let fts_count: i64 = storage
         .raw()
-        .query_row("SELECT COUNT(*) FROM fts_messages", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM fts_messages", &[], |r| r.get_typed(0))
         .unwrap();
 
     assert_eq!(msg_count, 200);
@@ -288,14 +284,10 @@ fn large_batch_insert_keeps_fts_in_sync() {
     // Spot check a few message rows for correct ordering and timestamps
     let rows: Vec<(i64, i64)> = storage
         .raw()
-        .prepare("SELECT idx, created_at FROM messages ORDER BY idx LIMIT 3 OFFSET 197")
-        .unwrap()
-        .query_map([], |r| {
-            Ok((r.get(0)?, r.get::<_, Option<i64>>(1)?.unwrap()))
+        .query_map_collect("SELECT idx, created_at FROM messages ORDER BY idx LIMIT 3 OFFSET 197", &[], |r| {
+            Ok((r.get_typed(0)?, r.get_typed::<Option<i64>>(1)?.unwrap()))
         })
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .unwrap();
     assert_eq!(
         rows,
         vec![(197, 1_197), (198, 1_198), (199, 1_199)],
@@ -344,7 +336,6 @@ fn unsupported_schema_version_errors() {
         .raw()
         .execute(
             "UPDATE meta SET value = '999' WHERE key = 'schema_version'",
-            [],
         )
         .unwrap();
     drop(storage); // Close connection before reopening
@@ -370,12 +361,8 @@ fn fresh_db_creates_all_tables() {
     // Query sqlite_master for table names
     let tables: Vec<String> = storage
         .raw()
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-        .unwrap()
-        .query_map([], |r| r.get(0))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .query_map_collect("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name", &[], |r| r.get_typed(0))
+        .unwrap();
 
     assert!(tables.contains(&"meta".to_string()), "meta table exists");
     assert!(
@@ -423,12 +410,8 @@ fn fresh_db_creates_all_indexes() {
 
     let indexes: Vec<String> = storage
         .raw()
-        .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%' ORDER BY name")
-        .unwrap()
-        .query_map([], |r| r.get(0))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .query_map_collect("SELECT name FROM sqlite_master WHERE type='index' AND name NOT LIKE 'sqlite_%' ORDER BY name", &[], |r| r.get_typed(0))
+        .unwrap();
 
     assert!(
         indexes.contains(&"idx_conversations_agent_started".to_string()),
@@ -452,12 +435,8 @@ fn agents_table_has_correct_columns() {
 
     let columns: Vec<String> = storage
         .raw()
-        .prepare("PRAGMA table_info(agents)")
-        .unwrap()
-        .query_map([], |r| r.get::<_, String>(1))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .query_map_collect("PRAGMA table_info(agents)", &[], |r| r.get_typed::<String>(1))
+        .unwrap();
 
     let missing: Vec<&str> = [
         "id",
@@ -488,12 +467,8 @@ fn conversations_table_has_correct_columns() {
 
     let columns: Vec<String> = storage
         .raw()
-        .prepare("PRAGMA table_info(conversations)")
-        .unwrap()
-        .query_map([], |r| r.get::<_, String>(1))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .query_map_collect("PRAGMA table_info(conversations)", &[], |r| r.get_typed::<String>(1))
+        .unwrap();
 
     let expected = [
         "id",
@@ -528,12 +503,8 @@ fn messages_table_has_correct_columns() {
 
     let columns: Vec<String> = storage
         .raw()
-        .prepare("PRAGMA table_info(messages)")
-        .unwrap()
-        .query_map([], |r| r.get::<_, String>(1))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .query_map_collect("PRAGMA table_info(messages)", &[], |r| r.get_typed::<String>(1))
+        .unwrap();
 
     assert!(columns.contains(&"id".to_string()));
     assert!(columns.contains(&"conversation_id".to_string()));
@@ -554,10 +525,10 @@ fn fts_messages_is_fts5_virtual_table() {
     // Check that fts_messages is an FTS5 virtual table
     let sql: String = storage
         .raw()
-        .query_row(
+        .query_row_map(
             "SELECT sql FROM sqlite_master WHERE name='fts_messages' AND type='table'",
-            [],
-            |r| r.get(0),
+            &[],
+            |r| r.get_typed(0),
         )
         .expect("fts_messages should exist");
 
@@ -684,12 +655,8 @@ fn migration_from_v1_applies_v2_and_v3() {
     // Verify FTS5 table was created
     let tables: Vec<String> = storage
         .raw()
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='fts_messages'")
-        .unwrap()
-        .query_map([], |r| r.get(0))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .query_map_collect("SELECT name FROM sqlite_master WHERE type='table' AND name='fts_messages'", &[], |r| r.get_typed(0))
+        .unwrap();
 
     assert_eq!(tables.len(), 1, "fts_messages should exist after migration");
 }
@@ -811,7 +778,6 @@ fn foreign_keys_are_enforced() {
     // Try to insert a conversation with non-existent agent_id
     let result = storage.raw().execute(
         "INSERT INTO conversations(agent_id, source_path) VALUES(999, '/test')",
-        [],
     );
 
     assert!(
@@ -831,14 +797,12 @@ fn unique_constraints_work() {
         .raw()
         .execute(
             "INSERT INTO agents(slug, name, kind, created_at, updated_at) VALUES('test', 'Test', 'cli', 0, 0)",
-            [],
         )
         .expect("first insert");
 
     // Try to insert duplicate slug
     let result = storage.raw().execute(
         "INSERT INTO agents(slug, name, kind, created_at, updated_at) VALUES('test', 'Test2', 'cli', 0, 0)",
-        [],
     );
 
     assert!(
@@ -856,14 +820,14 @@ fn pragmas_are_applied() {
     // Check journal_mode is WAL
     let journal_mode: String = storage
         .raw()
-        .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+        .query_row_map("PRAGMA journal_mode", &[], |r| r.get_typed(0))
         .unwrap();
     assert_eq!(journal_mode, "wal", "journal_mode should be WAL");
 
     // Check foreign_keys is ON
     let fk: i64 = storage
         .raw()
-        .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+        .query_row_map("PRAGMA foreign_keys", &[], |r| r.get_typed(0))
         .unwrap();
     assert_eq!(fk, 1, "foreign_keys should be ON");
 }
@@ -1043,12 +1007,8 @@ fn sources_table_has_correct_columns() {
 
     let columns: Vec<String> = storage
         .raw()
-        .prepare("PRAGMA table_info(sources)")
-        .unwrap()
-        .query_map([], |r| r.get::<_, String>(1))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .query_map_collect("PRAGMA table_info(sources)", &[], |r| r.get_typed::<String>(1))
+        .unwrap();
 
     assert!(columns.contains(&"id".to_string()));
     assert!(columns.contains(&"kind".to_string()));
@@ -1212,7 +1172,7 @@ fn current_schema_version_matches_internal() {
 }
 
 #[test]
-fn create_backup_creates_timestamped_copy() {
+fn create_backup_creates_named_copy() {
     let tmp = tempfile::TempDir::new().unwrap();
     let db_path = tmp.path().join("backup_test.db");
 
@@ -1555,16 +1515,14 @@ fn timeline_source_filter_local_only() {
     // Query with source_id = 'local' filter
     let local_only: Vec<String> = storage
         .raw()
-        .prepare(
+        .query_map_collect(
             "SELECT c.external_id FROM conversations c
              WHERE c.source_id = 'local'
              ORDER BY c.started_at DESC",
+            &[],
+            |row| row.get_typed(0),
         )
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .unwrap();
 
     assert_eq!(local_only.len(), 2, "should return 2 local conversations");
     assert!(local_only.contains(&"local-1".to_string()));
@@ -1622,16 +1580,14 @@ fn timeline_source_filter_remote_only() {
     // Query with source_id != 'local' (remote filter)
     let remote_only: Vec<String> = storage
         .raw()
-        .prepare(
+        .query_map_collect(
             "SELECT c.external_id FROM conversations c
              WHERE c.source_id != 'local'
              ORDER BY c.started_at DESC",
+            &[],
+            |row| row.get_typed(0),
         )
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .unwrap();
 
     assert_eq!(remote_only.len(), 2, "should return 2 remote conversations");
     assert!(remote_only.contains(&"laptop-1".to_string()));
@@ -1696,16 +1652,14 @@ fn timeline_source_filter_specific_source() {
     // Query with source_id = 'laptop' (specific source)
     let laptop_only: Vec<String> = storage
         .raw()
-        .prepare(
+        .query_map_collect(
             "SELECT c.external_id FROM conversations c
              WHERE c.source_id = 'laptop'
              ORDER BY c.started_at DESC",
+            &[],
+            |row| row.get_typed(0),
         )
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .unwrap();
 
     assert_eq!(laptop_only.len(), 2, "should return 2 laptop conversations");
     assert!(laptop_only.contains(&"laptop-1".to_string()));
@@ -1753,15 +1707,13 @@ fn timeline_json_includes_source_id_field() {
     // Query with source_id field selection (simulates timeline JSON output)
     let result: Vec<(i64, String)> = storage
         .raw()
-        .prepare(
+        .query_map_collect(
             "SELECT c.id, c.source_id FROM conversations c
              WHERE c.source_id IS NOT NULL",
+            &[],
+            |row| Ok((row.get_typed(0)?, row.get_typed(1)?)),
         )
-        .unwrap()
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .unwrap();
 
     assert!(!result.is_empty(), "should have at least one conversation");
     let (_, source_id) = &result[0];
@@ -1812,24 +1764,22 @@ fn timeline_json_includes_origin_kind_field() {
     // Query with origin_kind from sources table (matches timeline SQL)
     let results: Vec<(String, String, String)> = storage
         .raw()
-        .prepare(
+        .query_map_collect(
             "SELECT c.source_id, c.origin_host, s.kind as origin_kind
              FROM conversations c
              LEFT JOIN sources s ON c.source_id = s.id
              ORDER BY c.source_id",
+            &[],
+            |row| {
+                Ok((
+                    row.get_typed::<String>(0)?,
+                    row.get_typed::<Option<String>>(1)?.unwrap_or_default(),
+                    row.get_typed::<Option<String>>(2)?
+                        .unwrap_or_else(|| "local".into()),
+                ))
+            },
         )
-        .unwrap()
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                row.get::<_, Option<String>>(2)?
-                    .unwrap_or_else(|| "local".into()),
-            ))
-        })
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .unwrap();
 
     assert_eq!(results.len(), 2, "should have 2 conversations");
 
@@ -1890,12 +1840,12 @@ fn timeline_json_includes_origin_host_field() {
     // Query origin_host field
     let results: Vec<(String, Option<String>)> = storage
         .raw()
-        .prepare("SELECT c.source_id, c.origin_host FROM conversations c ORDER BY c.source_id")
-        .unwrap()
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .query_map_collect(
+            "SELECT c.source_id, c.origin_host FROM conversations c ORDER BY c.source_id",
+            &[],
+            |row| Ok((row.get_typed(0)?, row.get_typed(1)?)),
+        )
+        .unwrap();
 
     assert_eq!(results.len(), 2, "should have 2 conversations");
 
@@ -1965,23 +1915,21 @@ fn timeline_json_grouped_output_includes_provenance() {
     // Query all provenance fields as timeline JSON would
     let results: Vec<(i64, String, Option<String>, Option<String>)> = storage
         .raw()
-        .prepare(
+        .query_map_collect(
             "SELECT c.id, c.source_id, c.origin_host, s.kind as origin_kind
              FROM conversations c
              LEFT JOIN sources s ON c.source_id = s.id",
+            &[],
+            |row| {
+                Ok((
+                    row.get_typed::<i64>(0)?,
+                    row.get_typed::<String>(1)?,
+                    row.get_typed::<Option<String>>(2)?,
+                    row.get_typed::<Option<String>>(3)?,
+                ))
+            },
         )
-        .unwrap()
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-            ))
-        })
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .unwrap();
 
     // All entries should have source_id
     for (id, source_id, _, _) in &results {
@@ -2018,24 +1966,16 @@ fn daily_stats_table_created_on_fresh_db() {
     // Check that daily_stats table exists
     let tables: Vec<String> = storage
         .raw()
-        .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='daily_stats'")
-        .unwrap()
-        .query_map([], |r| r.get(0))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .query_map_collect("SELECT name FROM sqlite_master WHERE type='table' AND name='daily_stats'", &[], |r| r.get_typed(0))
+        .unwrap();
 
     assert_eq!(tables.len(), 1, "daily_stats table should exist");
 
     // Check columns
     let columns: Vec<String> = storage
         .raw()
-        .prepare("PRAGMA table_info(daily_stats)")
-        .unwrap()
-        .query_map([], |r| r.get::<_, String>(1))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .query_map_collect("PRAGMA table_info(daily_stats)", &[], |r| r.get_typed::<String>(1))
+        .unwrap();
 
     assert!(columns.contains(&"day_id".to_string()));
     assert!(columns.contains(&"agent_slug".to_string()));
@@ -2394,12 +2334,8 @@ fn daily_stats_null_timestamp_consistency() {
     // Check that the session was placed at day_id=0, not a negative day_id
     let day_ids: Vec<i64> = storage
         .raw()
-        .prepare("SELECT DISTINCT day_id FROM daily_stats WHERE agent_slug = 'all' AND source_id = 'all'")
-        .unwrap()
-        .query_map([], |r| r.get(0))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .query_map_collect("SELECT DISTINCT day_id FROM daily_stats WHERE agent_slug = 'all' AND source_id = 'all'", &[], |r| r.get_typed(0))
+        .unwrap();
 
     assert_eq!(day_ids.len(), 1, "should have exactly 1 day_id");
     assert_eq!(
@@ -2410,10 +2346,10 @@ fn daily_stats_null_timestamp_consistency() {
     // Verify the count at day_id=0
     let count_at_zero: i64 = storage
         .raw()
-        .query_row(
+        .query_row_map(
             "SELECT session_count FROM daily_stats WHERE day_id = 0 AND agent_slug = 'all' AND source_id = 'all'",
-            [],
-            |r| r.get(0),
+            &[],
+            |r| r.get_typed(0),
         )
         .expect("query day_id=0");
     assert_eq!(count_at_zero, 1, "day_id=0 should have 1 session");
@@ -2541,21 +2477,17 @@ use coding_agent_search::storage::sqlite::IndexingCache;
 fn dump_agent_workspace_state(storage: &SqliteStorage) -> (Vec<(i64, String)>, Vec<(i64, String)>) {
     let agents: Vec<(i64, String)> = storage
         .raw()
-        .prepare("SELECT id, slug FROM agents ORDER BY slug")
-        .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .query_map_collect("SELECT id, slug FROM agents ORDER BY slug", &[], |r| {
+            Ok((r.get_typed(0)?, r.get_typed(1)?))
+        })
+        .unwrap();
 
     let workspaces: Vec<(i64, String)> = storage
         .raw()
-        .prepare("SELECT id, path FROM workspaces ORDER BY path")
-        .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect();
+        .query_map_collect("SELECT id, path FROM workspaces ORDER BY path", &[], |r| {
+            Ok((r.get_typed(0)?, r.get_typed(1)?))
+        })
+        .unwrap();
 
     (agents, workspaces)
 }

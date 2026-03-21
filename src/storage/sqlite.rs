@@ -592,7 +592,7 @@ pub(crate) fn rebuild_fts_on_connection(conn: &FrankenConnection) -> Result<()> 
     result
 }
 
-/// Create a timestamped backup of the database file.
+/// Create a uniquely named backup of the database file.
 ///
 /// Returns the path to the backup file, or None if the source doesn't exist.
 pub fn create_backup(db_path: &Path) -> Result<Option<std::path::PathBuf>, MigrationError> {
@@ -600,18 +600,7 @@ pub fn create_backup(db_path: &Path) -> Result<Option<std::path::PathBuf>, Migra
         return Ok(None);
     }
 
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-
-    let backup_name = format!(
-        "{}.backup.{}",
-        db_path.file_name().and_then(|n| n.to_str()).unwrap_or("db"),
-        timestamp
-    );
-
-    let backup_path = db_path.with_file_name(&backup_name);
+    let backup_path = unique_backup_path(db_path);
 
     // Try to use SQLite's VACUUM INTO command first, which safely handles WAL files
     // and produces a clean, minimized backup.
@@ -720,6 +709,37 @@ pub enum SchemaCheck {
     NeedsMigration,
     /// Schema is incompatible and needs a full rebuild (with reason).
     NeedsRebuild(String),
+}
+
+fn schema_check_error_requires_rebuild(err: &frankensqlite::FrankenError) -> bool {
+    // Only on-disk corruption classes justify destructive rebuild.
+    // Locking, open, and generic I/O failures are often transient and must
+    // surface as errors rather than deleting the database under the caller.
+    matches!(
+        err,
+        frankensqlite::FrankenError::DatabaseCorrupt { .. }
+            | frankensqlite::FrankenError::WalCorrupt { .. }
+            | frankensqlite::FrankenError::NotADatabase { .. }
+            | frankensqlite::FrankenError::ShortRead { .. }
+    )
+}
+
+fn unique_backup_path(path: &Path) -> PathBuf {
+    static NEXT_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let nonce = NEXT_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("db");
+
+    path.with_file_name(format!(
+        "{file_name}.backup.{}.{}.{}",
+        std::process::id(),
+        timestamp,
+        nonce
+    ))
 }
 
 /// Check schema compatibility without modifying the database.
@@ -1619,15 +1639,16 @@ impl FrankenStorage {
                         backup_path,
                     });
                 }
-                Err(_) => {
+                Err(err) if schema_check_error_requires_rebuild(&err) => {
                     let backup_path = create_backup(path)?;
                     cleanup_old_backups(path, MAX_BACKUPS)?;
                     remove_database_files(path)?;
                     return Err(MigrationError::RebuildRequired {
-                        reason: "Database appears corrupted".to_string(),
+                        reason: format!("Database appears corrupted: {err}"),
                         backup_path,
                     });
                 }
+                Err(err) => return Err(MigrationError::Database(err)),
             }
         }
 
@@ -5368,14 +5389,6 @@ pub struct DailyStatsHealth {
     pub drift: i64,
 }
 
-
-
-
-
-
-
-
-
 // -------------------------------------------------------------------------
 // FTS5 Batch Insert (P2 Opt 2.1)
 // -------------------------------------------------------------------------
@@ -5415,16 +5428,6 @@ impl FtsEntry {
         }
     }
 }
-
-
-
-
-
-
-
-
-
-
 
 fn path_to_string<P: AsRef<Path>>(p: P) -> String {
     p.as_ref().to_string_lossy().into_owned()
@@ -5502,7 +5505,7 @@ mod tests {
     }
 
     #[test]
-    fn create_backup_creates_timestamped_file() {
+    fn create_backup_creates_named_file() {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("test.db");
         std::fs::write(&db_path, b"test data").unwrap();
@@ -5519,6 +5522,60 @@ mod tests {
                 .unwrap()
                 .contains("backup")
         );
+    }
+
+    #[test]
+    fn create_backup_paths_are_unique() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        std::fs::write(&db_path, b"test data").unwrap();
+
+        let first = create_backup(&db_path).unwrap().unwrap();
+        let second = create_backup(&db_path).unwrap().unwrap();
+
+        assert_ne!(first, second);
+        assert!(first.exists());
+        assert!(second.exists());
+    }
+
+    #[test]
+    fn schema_check_rebuild_classification_ignores_transient_errors() {
+        assert!(!schema_check_error_requires_rebuild(
+            &frankensqlite::FrankenError::Busy
+        ));
+        assert!(!schema_check_error_requires_rebuild(
+            &frankensqlite::FrankenError::CannotOpen {
+                path: PathBuf::from("/tmp/test.db"),
+            }
+        ));
+        assert!(!schema_check_error_requires_rebuild(
+            &frankensqlite::FrankenError::Io(std::io::Error::other("disk hiccup"))
+        ));
+    }
+
+    #[test]
+    fn schema_check_rebuild_classification_keeps_corruption_errors() {
+        assert!(schema_check_error_requires_rebuild(
+            &frankensqlite::FrankenError::DatabaseCorrupt {
+                detail: "bad header".to_string(),
+            }
+        ));
+        assert!(schema_check_error_requires_rebuild(
+            &frankensqlite::FrankenError::WalCorrupt {
+                detail: "bad wal".to_string(),
+            }
+        ));
+        assert!(schema_check_error_requires_rebuild(
+            &frankensqlite::FrankenError::NotADatabase {
+                path: PathBuf::from("/tmp/test.db"),
+            }
+        ));
+        assert!(schema_check_error_requires_rebuild(
+            &frankensqlite::FrankenError::ShortRead {
+                expected: 4096,
+                actual: 64,
+            }
+        ));
     }
 
     #[test]

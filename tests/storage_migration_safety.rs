@@ -1,11 +1,12 @@
 use coding_agent_search::storage::sqlite::{CURRENT_SCHEMA_VERSION, MigrationError, SqliteStorage};
-use rusqlite::Connection;
+use frankensqlite::Connection;
+use frankensqlite::compat::{ConnectionExt, RowExt};
 use std::path::Path;
 use tempfile::TempDir;
 
 // Helper to create a V1 database with some data
 fn create_v1_db(path: &Path) {
-    let conn = Connection::open(path).expect("create v1 db");
+    let conn = Connection::open(path.to_string_lossy().as_ref()).expect("create v1 db");
     conn.execute_batch(
         r"
         PRAGMA foreign_keys = ON;
@@ -104,35 +105,35 @@ fn test_migration_v1_to_current_preserves_data() {
 
     // Check Agent
     let agent_name: String = conn
-        .query_row("SELECT name FROM agents WHERE slug = 'claude'", [], |r| {
-            r.get(0)
+        .query_row_map("SELECT name FROM agents WHERE slug = 'claude'", &[], |r| {
+            r.get_typed(0)
         })
         .unwrap();
     assert_eq!(agent_name, "Claude");
 
     // Check Conversation
     let title: String = conn
-        .query_row(
+        .query_row_map(
             "SELECT title FROM conversations WHERE source_path = '/logs/v1.jsonl'",
-            [],
-            |r| r.get(0),
+            &[],
+            |r| r.get_typed(0),
         )
         .unwrap();
     assert_eq!(title, "V1 Conversation");
 
     // Check Message
     let content: String = conn
-        .query_row(
+        .query_row_map(
             "SELECT content FROM messages WHERE content = 'Hello from V1'",
-            [],
-            |r| r.get(0),
+            &[],
+            |r| r.get_typed(0),
         )
         .unwrap();
     assert_eq!(content, "Hello from V1");
 
     // Verify V2+ features (FTS)
     let fts_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM fts_messages", [], |r| r.get(0))
+        .query_row_map("SELECT COUNT(*) FROM fts_messages", &[], |r| r.get_typed(0))
         .unwrap();
     // V1 migration should populate FTS?
     // The migration V2 script does: INSERT INTO fts_messages SELECT ... FROM messages ...
@@ -141,18 +142,18 @@ fn test_migration_v1_to_current_preserves_data() {
 
     // Verify V4 features (Sources)
     let source_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM sources WHERE id = 'local'", [], |r| {
-            r.get(0)
+        .query_row_map("SELECT COUNT(*) FROM sources WHERE id = 'local'", &[], |r| {
+            r.get_typed(0)
         })
         .unwrap();
     assert_eq!(source_count, 1, "Local source should be created");
 
     // Verify V5 features (source_id)
     let source_id: String = conn
-        .query_row(
+        .query_row_map(
             "SELECT source_id FROM conversations WHERE source_path = '/logs/v1.jsonl'",
-            [],
-            |r| r.get(0),
+            &[],
+            |r| r.get_typed(0),
         )
         .unwrap();
     assert_eq!(
@@ -162,10 +163,10 @@ fn test_migration_v1_to_current_preserves_data() {
 
     // Verify V7 features (binary columns) - should be NULL for legacy rows
     let metadata_bin: Option<Vec<u8>> = conn
-        .query_row(
+        .query_row_map(
             "SELECT metadata_bin FROM conversations WHERE source_path = '/logs/v1.jsonl'",
-            [],
-            |r| r.get(0),
+            &[],
+            |r| r.get_typed::<Option<Vec<u8>>>(0),
         )
         .unwrap();
     assert!(
@@ -174,10 +175,10 @@ fn test_migration_v1_to_current_preserves_data() {
     );
 
     let extra_bin: Option<Vec<u8>> = conn
-        .query_row(
+        .query_row_map(
             "SELECT extra_bin FROM messages WHERE content = 'Hello from V1'",
-            [],
-            |r| r.get(0),
+            &[],
+            |r| r.get_typed::<Option<Vec<u8>>>(0),
         )
         .unwrap();
     assert!(
@@ -229,8 +230,8 @@ fn test_missing_meta_triggers_rebuild() {
 
     // Create a valid SQLite DB but without meta table (simulating very old or broken state)
     {
-        let conn = Connection::open(&db_path).unwrap();
-        conn.execute("CREATE TABLE some_table (id INTEGER)", [])
+        let conn = Connection::open(db_path.to_string_lossy().as_ref()).unwrap();
+        conn.execute("CREATE TABLE some_table (id INTEGER)")
             .unwrap();
     }
 
@@ -249,10 +250,10 @@ fn test_future_schema_triggers_rebuild() {
     let db_path = tmp.path().join("future.db");
 
     {
-        let conn = Connection::open(&db_path).unwrap();
-        conn.execute("CREATE TABLE meta (key TEXT, value TEXT)", [])
+        let conn = Connection::open(db_path.to_string_lossy().as_ref()).unwrap();
+        conn.execute("CREATE TABLE meta (key TEXT, value TEXT)")
             .unwrap();
-        conn.execute("INSERT INTO meta VALUES ('schema_version', '9999')", [])
+        conn.execute("INSERT INTO meta VALUES ('schema_version', '9999')")
             .unwrap();
     }
 
