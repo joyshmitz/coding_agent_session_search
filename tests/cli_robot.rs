@@ -1848,6 +1848,80 @@ fn status_missing_db_reports_not_found() {
 }
 
 #[test]
+fn status_json_reports_open_error_for_unopenable_db_path() {
+    let tmp = TempDir::new().unwrap();
+    let data_dir = tmp.path();
+    fs::create_dir_all(data_dir.join("index").join("v4")).unwrap();
+    fs::create_dir_all(data_dir.join("agent_search.db")).unwrap();
+
+    let mut cmd = base_cmd();
+    cmd.args(["status", "--json", "--data-dir"])
+        .arg(data_dir)
+        .timeout(std::time::Duration::from_secs(10));
+
+    let output = cmd.output().unwrap();
+    assert!(
+        output.status.success(),
+        "status should succeed even when the db path is unopenable"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert_eq!(json["healthy"], Value::Bool(false));
+    assert_eq!(json["status"], Value::String("degraded".to_string()));
+    assert_eq!(json["database"]["exists"], Value::Bool(true));
+    assert_eq!(json["database"]["opened"], Value::Bool(false));
+    assert!(
+        json["database"]["open_error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Failed to open")
+            || json["database"]["open_error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("open"),
+        "status should surface the open failure: {json}"
+    );
+}
+
+#[test]
+fn health_json_reports_open_error_for_unopenable_db_path() {
+    let tmp = TempDir::new().unwrap();
+    let data_dir = tmp.path();
+    fs::create_dir_all(data_dir.join("index").join("v4")).unwrap();
+    fs::create_dir_all(data_dir.join("agent_search.db")).unwrap();
+
+    let mut cmd = base_cmd();
+    cmd.args(["health", "--json", "--data-dir"])
+        .arg(data_dir)
+        .timeout(std::time::Duration::from_secs(10));
+
+    let output = cmd.output().unwrap();
+    assert!(
+        !output.status.success(),
+        "health should fail when the db exists but cannot be opened"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim()).expect("valid JSON");
+    assert_eq!(json["healthy"], Value::Bool(false));
+    assert_eq!(json["status"], Value::String("degraded".to_string()));
+    assert_eq!(json["db"]["exists"], Value::Bool(true));
+    assert_eq!(json["db"]["opened"], Value::Bool(false));
+    assert!(
+        json["db"]["open_error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Failed to open")
+            || json["db"]["open_error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("open"),
+        "health should surface the open failure: {json}"
+    );
+}
+
+#[test]
 fn status_human_readable_output() {
     // rob.state.status: status without --json should produce human-readable output
     let mut cmd = base_cmd();

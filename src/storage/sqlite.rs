@@ -534,9 +534,13 @@ pub const FTS5_DELETE_ALL_SQL: &str =
 /// Register the `fts_messages` FTS5 virtual table on a frankensqlite
 /// [`Connection`](FrankenConnection).
 ///
-/// This is idempotent (`IF NOT EXISTS`) and safe to call on every open.
-/// Returns `Ok(())` on success or if the table already exists.  On failure
-/// the error is returned so callers can decide whether to log or propagate.
+/// WARNING: this is schema-mutating. On migrated databases whose legacy
+/// `fts_messages` entry still lives at `rootpage=0`, frankensqlite may not see
+/// that table during schema load, and `CREATE VIRTUAL TABLE IF NOT EXISTS ...`
+/// can persist an extra sqlite_master row instead of behaving like a no-op.
+///
+/// Only call this from deliberate repair or rebuild flows, never from routine
+/// read/open paths.
 pub fn register_fts5_on_connection(
     conn: &FrankenConnection,
 ) -> std::result::Result<(), frankensqlite::FrankenError> {

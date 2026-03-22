@@ -2257,14 +2257,6 @@ impl SearchClient {
             let path_str = path.to_string_lossy().to_string();
             match Connection::open(&path_str) {
                 Ok(conn) => {
-                    // Fix #26: Register FTS5 virtual table so FrankenSQLite can
-                    // see it (rootpage=0 entries are skipped on stock-SQLite DBs).
-                    if let Err(e) = crate::storage::sqlite::register_fts5_on_connection(&conn) {
-                        tracing::debug!(
-                            error = %e,
-                            "fts_messages virtual table registration failed (non-fatal)"
-                        );
-                    }
                     *guard = Some(SendConnection(conn));
                 }
                 Err(e) => {
@@ -5082,6 +5074,7 @@ mod tests {
     use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
     use crate::search::tantivy::TantivyIndex;
     use crate::storage::sqlite::FrankenStorage;
+    use rusqlite::Connection as LegacyConnection;
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -6973,6 +6966,90 @@ mod tests {
         assert_eq!(hits[0].workspace, "/legacy");
         assert_eq!(hits[0].line_number, Some(5));
         assert_eq!(hits[0].content, "legacy auth token failure");
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_guard_does_not_persist_duplicate_fts_rows_on_legacy_schema() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let db_path = temp_dir.path().join("legacy-fts.db");
+
+        {
+            let conn = LegacyConnection::open(&db_path)?;
+            conn.execute_batch(
+                "CREATE TABLE sources (id TEXT PRIMARY KEY, kind TEXT);
+                 CREATE TABLE agents (id INTEGER PRIMARY KEY, slug TEXT NOT NULL UNIQUE);
+                 CREATE TABLE workspaces (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE);
+                 CREATE TABLE conversations (
+                    id INTEGER PRIMARY KEY,
+                    agent_id INTEGER,
+                    workspace_id INTEGER,
+                    source_id TEXT,
+                    origin_host TEXT,
+                    title TEXT,
+                    source_path TEXT
+                 );
+                 CREATE TABLE messages (
+                    id INTEGER PRIMARY KEY,
+                    conversation_id INTEGER,
+                    idx INTEGER,
+                    content TEXT,
+                    created_at INTEGER
+                 );
+                 CREATE VIRTUAL TABLE fts_messages USING fts5(
+                    content,
+                    title,
+                    agent,
+                    workspace,
+                    source_path,
+                    created_at UNINDEXED,
+                    message_id UNINDEXED,
+                    tokenize='porter'
+                 );",
+            )?;
+        }
+
+        let legacy_count_before: i64 = LegacyConnection::open(&db_path)?.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'fts_messages'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            legacy_count_before, 1,
+            "legacy fixture should start with one sqlite_master entry"
+        );
+
+        let client = SearchClient {
+            reader: None,
+            sqlite: Mutex::new(None),
+            sqlite_path: Some(db_path.clone()),
+            prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
+            last_reload: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch: Arc::new(AtomicU64::new(0)),
+            warm_tx: None,
+            _warm_handle: None,
+            _shared_filters: Arc::new(Mutex::new(())),
+            metrics: Metrics::default(),
+            cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
+            semantic: Mutex::new(None),
+        };
+
+        let guard = client.sqlite_guard()?;
+        assert!(guard.is_some(), "sqlite guard should open the legacy db");
+        drop(guard);
+
+        let legacy_count_after: i64 = LegacyConnection::open(&db_path)?.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'fts_messages'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            legacy_count_after, 1,
+            "opening the legacy db must not persist duplicate fts_messages schema rows"
+        );
+
         Ok(())
     }
 

@@ -4180,6 +4180,90 @@ async fn import_chatgpt_export(
 }
 
 /// Compute lightweight state snapshot (index/db freshness) for robot meta and state command reuse
+const STATE_DB_OPEN_TIMEOUT: Duration = Duration::from_secs(2);
+const STATUS_COUNT_SCAN_MAX_DB_BYTES: u64 = 256 * 1024 * 1024;
+
+#[derive(Debug, Default)]
+struct StateDbSnapshot {
+    conversation_count: i64,
+    message_count: i64,
+    last_indexed_at: Option<i64>,
+    opened: bool,
+    open_error: Option<String>,
+    counts_skipped: bool,
+}
+
+fn probe_state_db(
+    db_path: &Path,
+    reason: &str,
+    timeout: Duration,
+    include_counts: bool,
+) -> StateDbSnapshot {
+    if !db_path.exists() {
+        return StateDbSnapshot::default();
+    }
+
+    let path = db_path.to_path_buf();
+    let reason = reason.to_string();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut snapshot = StateDbSnapshot {
+            counts_skipped: !include_counts,
+            ..StateDbSnapshot::default()
+        };
+        let lazy = crate::storage::sqlite::LazyFrankenDb::new(path);
+        match lazy.get(&reason) {
+            Ok(conn) => {
+                use frankensqlite::compat::{ConnectionExt, RowExt};
+                use frankensqlite::params;
+
+                snapshot.opened = true;
+                snapshot.last_indexed_at = conn
+                    .query_row_map(
+                        "SELECT value FROM meta WHERE key = 'last_indexed_at'",
+                        params![],
+                        |r| r.get_typed::<String>(0),
+                    )
+                    .ok()
+                    .and_then(|s| s.parse::<i64>().ok());
+                if include_counts {
+                    snapshot.conversation_count = conn
+                        .query_row_map("SELECT COUNT(*) FROM conversations", params![], |r| {
+                            r.get_typed(0)
+                        })
+                        .unwrap_or(0);
+                    snapshot.message_count = conn
+                        .query_row_map("SELECT COUNT(*) FROM messages", params![], |r| {
+                            r.get_typed(0)
+                        })
+                        .unwrap_or(0);
+                }
+            }
+            Err(err) => {
+                snapshot.open_error = Some(err.to_string());
+            }
+        }
+        let _ = tx.send(snapshot);
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(snapshot) => snapshot,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => StateDbSnapshot {
+            open_error: Some(format!(
+                "database state probe timed out after {}s",
+                timeout.as_secs()
+            )),
+            counts_skipped: !include_counts,
+            ..StateDbSnapshot::default()
+        },
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => StateDbSnapshot {
+            open_error: Some("database state probe worker disconnected unexpectedly".to_string()),
+            counts_skipped: !include_counts,
+            ..StateDbSnapshot::default()
+        },
+    }
+}
+
 fn state_meta_json(
     data_dir: &Path,
     db_path: &Path,
@@ -4201,109 +4285,17 @@ fn state_meta_json(
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let mut conversation_count: i64 = 0;
-    let mut message_count: i64 = 0;
-    let mut last_indexed_at: Option<i64> = None;
-    let mut db_opened = false;
-    let mut db_open_error: Option<String> = None;
-
-    // Use LazyFrankenDb to get timing/logging for state snapshot DB access
-    let lazy = crate::storage::sqlite::LazyFrankenDb::new(db_path.to_path_buf());
-    if allow_db_open && db_exists {
-        match lazy.get("state-meta") {
-            Ok(conn) => {
-                use frankensqlite::compat::{ConnectionExt, RowExt};
-                use frankensqlite::params;
-                db_opened = true;
-                conversation_count = conn
-                    .query_row_map("SELECT COUNT(*) FROM conversations", params![], |r| {
-                        r.get_typed(0)
-                    })
-                    .unwrap_or(0);
-                message_count = conn
-                    .query_row_map("SELECT COUNT(*) FROM messages", params![], |r| {
-                        r.get_typed(0)
-                    })
-                    .unwrap_or(0);
-                last_indexed_at = conn
-                    .query_row_map(
-                        "SELECT value FROM meta WHERE key = 'last_indexed_at'",
-                        params![],
-                        |r| r.get_typed::<String>(0),
-                    )
-                    .ok()
-                    .and_then(|s| s.parse::<i64>().ok());
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                let is_wal_corruption = msg.contains("salt")
-                    || msg.contains("WAL")
-                    || msg.contains("wal")
-                    || msg.contains("corrupt")
-                    || msg.contains("Corrupt");
-
-                // Auto-repair: attempt a frankensqlite checkpoint, then retry the open.
-                if is_wal_corruption {
-                    tracing::warn!(
-                        "WAL corruption detected, attempting auto-repair via checkpoint"
-                    );
-                    let repaired = (|| -> Result<(), Box<dyn std::error::Error>> {
-                        let repair_path = db_path.to_string_lossy().to_string();
-                        let repair_conn = frankensqlite::Connection::open(&repair_path)?;
-                        repair_conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-                        drop(repair_conn);
-                        Ok(())
-                    })();
-                    match repaired {
-                        Ok(()) => {
-                            tracing::info!("WAL checkpoint repair succeeded, retrying open");
-                            match lazy.get("state-meta-retry") {
-                                Ok(conn) => {
-                                    use frankensqlite::compat::{ConnectionExt, RowExt};
-                                    use frankensqlite::params;
-                                    db_opened = true;
-                                    conversation_count = conn
-                                        .query_row_map(
-                                            "SELECT COUNT(*) FROM conversations",
-                                            params![],
-                                            |r| r.get_typed(0),
-                                        )
-                                        .unwrap_or(0);
-                                    message_count = conn
-                                        .query_row_map(
-                                            "SELECT COUNT(*) FROM messages",
-                                            params![],
-                                            |r| r.get_typed(0),
-                                        )
-                                        .unwrap_or(0);
-                                    last_indexed_at = conn
-                                        .query_row_map(
-                                            "SELECT value FROM meta WHERE key = 'last_indexed_at'",
-                                            params![],
-                                            |r| r.get_typed::<String>(0),
-                                        )
-                                        .ok()
-                                        .and_then(|s| s.parse::<i64>().ok());
-                                }
-                                Err(retry_e) => {
-                                    db_open_error = Some(format!(
-                                        "WAL auto-repair succeeded but retry failed: {retry_e}"
-                                    ));
-                                }
-                            }
-                        }
-                        Err(repair_e) => {
-                            db_open_error = Some(format!(
-                                "WAL corruption detected and auto-repair failed: {msg} (repair error: {repair_e})"
-                            ));
-                        }
-                    }
-                } else {
-                    db_open_error = Some(msg);
-                }
-            }
-        }
-    }
+    let db_snapshot = if allow_db_open && db_exists {
+        probe_state_db(db_path, "state-meta", STATE_DB_OPEN_TIMEOUT, false)
+    } else {
+        StateDbSnapshot::default()
+    };
+    let conversation_count = db_snapshot.conversation_count;
+    let message_count = db_snapshot.message_count;
+    let mut last_indexed_at = db_snapshot.last_indexed_at;
+    let db_opened = db_snapshot.opened;
+    let db_open_error = db_snapshot.open_error;
+    let counts_skipped = db_snapshot.counts_skipped;
 
     if last_indexed_at.is_none() && index_exists {
         let meta_path = index_path.join("meta.json");
@@ -4361,7 +4353,8 @@ fn state_meta_json(
             "opened": db_opened,
             "conversations": conversation_count,
             "messages": message_count,
-            "open_error": db_open_error
+            "open_error": db_open_error,
+            "counts_skipped": counts_skipped
         },
         "pending": {
             "sessions": pending_sessions,
@@ -8081,9 +8074,6 @@ fn run_status(
     stale_threshold: u64,
     _robot_meta: bool,
 ) -> CliResult<()> {
-    use frankensqlite::Connection;
-    use frankensqlite::compat::{ConnectionExt, RowExt};
-    use frankensqlite::params;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let data_dir = data_dir_override.clone().unwrap_or_else(default_data_dir);
@@ -8104,33 +8094,21 @@ fn run_status(
         .unwrap_or(0);
 
     // Default values if db doesn't exist
-    let mut conversation_count: i64 = 0;
-    let mut message_count: i64 = 0;
-    let mut last_indexed_at: Option<i64> = None;
-
-    if db_exists && let Ok(conn) = Connection::open(db_path.to_string_lossy().into_owned()) {
-        // Get counts
-        conversation_count = conn
-            .query_row_map("SELECT COUNT(*) FROM conversations", params![], |r| {
-                r.get_typed(0)
-            })
-            .unwrap_or(0);
-        message_count = conn
-            .query_row_map("SELECT COUNT(*) FROM messages", params![], |r| {
-                r.get_typed(0)
-            })
-            .unwrap_or(0);
-
-        // Get last indexed timestamp from meta table
-        last_indexed_at = conn
-            .query_row_map(
-                "SELECT value FROM meta WHERE key = 'last_indexed_at'",
-                params![],
-                |r| r.get_typed::<String>(0),
-            )
-            .ok()
-            .and_then(|s| s.parse::<i64>().ok());
-    }
+    let db_size_bytes = std::fs::metadata(&db_path).map(|m| m.len()).ok();
+    let include_counts = db_size_bytes
+        .map(|size| size <= STATUS_COUNT_SCAN_MAX_DB_BYTES)
+        .unwrap_or(false);
+    let db_snapshot = if db_exists {
+        probe_state_db(&db_path, "status", STATE_DB_OPEN_TIMEOUT, include_counts)
+    } else {
+        StateDbSnapshot::default()
+    };
+    let conversation_count = db_snapshot.conversation_count;
+    let message_count = db_snapshot.message_count;
+    let last_indexed_at = db_snapshot.last_indexed_at;
+    let db_opened = db_snapshot.opened;
+    let db_open_error = db_snapshot.open_error;
+    let counts_skipped = db_snapshot.counts_skipped;
 
     // Calculate index age and staleness
     let index_age_secs = last_indexed_at.map(|ts| {
@@ -8154,11 +8132,20 @@ fn run_status(
     };
 
     // Determine overall health
-    let healthy = db_exists && index_exists && !is_stale;
+    let healthy = db_exists && db_opened && index_exists && !is_stale;
+    let status = if healthy {
+        "healthy"
+    } else if db_exists && !db_opened {
+        "degraded"
+    } else {
+        "unhealthy"
+    };
 
     // Build recommended action
     let recommended_action = if !db_exists {
         Some("Run 'cass index --full' to create the database".to_string())
+    } else if !db_opened {
+        Some("Run 'cass doctor --fix' or 'cass index --full' to recover the database".to_string())
     } else if !index_exists {
         Some("Run 'cass index --full' to rebuild the search index".to_string())
     } else if is_stale || pending_sessions > 0 {
@@ -8192,6 +8179,7 @@ fn run_status(
             .unwrap_or_else(chrono::Utc::now)
             .to_rfc3339();
         let payload = serde_json::json!({
+            "status": status,
             "healthy": healthy,
             "index": {
                 "exists": index_exists,
@@ -8206,9 +8194,12 @@ fn run_status(
             },
             "database": {
                 "exists": db_exists,
+                "opened": db_opened,
                 "conversations": conversation_count,
                 "messages": message_count,
                 "path": db_path.display().to_string(),
+                "open_error": db_open_error,
+                "counts_skipped": counts_skipped,
             },
             "pending": {
                 "sessions": pending_sessions,
@@ -8261,8 +8252,19 @@ fn run_status(
     println!();
     println!("Database:");
     if db_exists {
-        println!("  Conversations: {conversation_count}");
-        println!("  Messages: {message_count}");
+        if db_opened {
+            if counts_skipped {
+                println!("  Counts skipped for fast status on large database");
+            } else {
+                println!("  Conversations: {conversation_count}");
+                println!("  Messages: {message_count}");
+            }
+        } else {
+            println!("  Exists, but could not be opened");
+            if let Some(err) = &db_open_error {
+                println!("  Error: {err}");
+            }
+        }
     } else {
         println!("  Not found");
     }
@@ -8389,7 +8391,12 @@ fn run_health(
                 "opened": db_opened,
                 "conversations": state.get("database").and_then(|d| d.get("conversations")).cloned().unwrap_or(serde_json::Value::Null),
                 "messages": state.get("database").and_then(|d| d.get("messages")).cloned().unwrap_or(serde_json::Value::Null),
-                "open_error": db_open_error
+                "open_error": db_open_error,
+                "counts_skipped": state
+                    .get("database")
+                    .and_then(|d| d.get("counts_skipped"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Bool(false))
             },
             "state": state
         });
@@ -9006,17 +9013,6 @@ fn run_doctor(
             Ok(conn) => {
                 use frankensqlite::compat::{ConnectionExt as _, RowExt as _};
 
-                // Fix #115: Register the FTS5 virtual table so FrankenSQLite
-                // can see it.  Without this, databases created by C SQLite
-                // have rootpage=0 for virtual tables and FrankenSQLite's
-                // sqlite_master parsing silently skips them.
-                if let Err(e) = crate::storage::sqlite::register_fts5_on_connection(&conn) {
-                    tracing::debug!(
-                        error = %e,
-                        "doctor: fts_messages virtual table registration failed (non-fatal)"
-                    );
-                }
-
                 let conv_count: Option<i64> = conn
                     .query_row_map(
                         "SELECT COUNT(*) FROM conversations",
@@ -9046,10 +9042,11 @@ fn run_doctor(
                         false
                     );
 
-                    // Check for FTS table (fts_messages) - this can be missing if table was
-                    // dropped after migrations completed. Probe it via frankensqlite after the
-                    // virtual table registration above so the repair/reporting path stays on the
-                    // same backend as the live search fallback.
+                    // Check whether the FTS table is visible through
+                    // frankensqlite on this connection. Do not auto-register
+                    // it here: on migrated databases with legacy rootpage=0
+                    // FTS schema entries, CREATE VIRTUAL TABLE IF NOT EXISTS
+                    // can persist duplicate sqlite_master rows.
                     let fts_exists = conn
                         .query_row_map("SELECT COUNT(*) FROM fts_messages LIMIT 1", &[], |r| {
                             r.get_typed::<i64>(0)
@@ -9064,45 +9061,25 @@ fn run_doctor(
                             false
                         );
                     } else {
-                        // FTS table missing - attempt to recreate it if --fix is set
+                        // Don't auto-recreate here: legacy sqlite databases can
+                        // already contain a rootpage=0 fts_messages entry that
+                        // frankensqlite skips during schema load. Re-running
+                        // CREATE VIRTUAL TABLE IF NOT EXISTS from this probe path
+                        // can persist duplicate sqlite_master rows.
                         if fix {
-                            let create_result = (|| -> Result<()> {
-                                crate::storage::sqlite::register_fts5_on_connection(&conn)?;
-                                crate::storage::sqlite::rebuild_fts_on_connection(&conn)?;
-                                Ok(())
-                            })();
-                            match create_result {
-                                Ok(_) => {
-                                    checks.push(Check {
-                                        name: "fts_table".to_string(),
-                                        status: "pass".to_string(),
-                                        message: "FTS search table (fts_messages) recreated"
-                                            .to_string(),
-                                        fix_available: true,
-                                        fix_applied: true,
-                                    });
-                                    auto_fix_actions
-                                        .push("Recreated missing FTS search table".to_string());
-                                    auto_fix_applied = true;
-                                }
-                                Err(e) => {
-                                    add_check!(
-                                        "fts_table",
-                                        "fail",
-                                        format!("FTS table missing and recreation failed: {}", e),
-                                        true
-                                    );
-                                    // Don't trigger full rebuild solely on FTS failure (#123)
-                                }
-                            }
+                            add_check!(
+                                "fts_table",
+                                "warn",
+                                "FTS search table (fts_messages) is not accessible via frankensqlite; doctor skipped auto-recreate to avoid duplicating legacy sqlite_master entries",
+                                false
+                            );
                         } else {
                             add_check!(
                                 "fts_table",
                                 "warn",
-                                "FTS search table (fts_messages) missing - run with --fix to recreate",
-                                true
+                                "FTS search table (fts_messages) is not accessible via frankensqlite; auto-recreate is intentionally disabled on this probe path to avoid duplicating legacy sqlite_master entries",
+                                false
                             );
-                            // Don't trigger full rebuild solely on FTS probe failure (#123)
                         }
                     }
                 } else {
