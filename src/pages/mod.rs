@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use frankensqlite::Connection;
 use frankensqlite::compat::OpenFlags;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub mod analytics;
 pub mod archive_config;
@@ -28,6 +28,23 @@ pub mod size;
 pub mod summary;
 pub mod verify;
 pub mod wizard;
+
+pub(crate) fn resolve_site_dir(path: &Path) -> Result<PathBuf> {
+    if !path.exists() {
+        bail!("path does not exist: {}", path.display());
+    }
+
+    if path.file_name().map(|name| name == "site").unwrap_or(false) {
+        return Ok(path.to_path_buf());
+    }
+
+    let site_subdir = path.join("site");
+    if site_subdir.is_dir() {
+        return Ok(site_subdir);
+    }
+
+    Ok(path.to_path_buf())
+}
 
 pub(crate) fn open_existing_sqlite_db(path: &Path) -> Result<Connection> {
     if !path.exists() {

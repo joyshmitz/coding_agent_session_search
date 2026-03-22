@@ -335,7 +335,13 @@ impl BundleBuilder {
                 let enc_config = archive_config
                     .as_encrypted()
                     .context("Encrypted config missing")?;
-                write_private_artifacts_encrypted(&private_dir, &self.config, enc_config)?;
+                write_private_artifacts_encrypted(
+                    &private_dir,
+                    enc_config,
+                    self.config.recovery_secret.as_deref(),
+                    self.config.generate_qr,
+                    true,
+                )?;
             } else {
                 write_private_unencrypted_notice(&private_dir)?;
             }
@@ -542,7 +548,7 @@ fn copy_blobs_directory(src_dir: &Path, dest_dir: &Path) -> Result<usize> {
 }
 
 /// Generate integrity manifest for all files in a directory
-fn generate_integrity_manifest(dir: &Path) -> Result<IntegrityManifest> {
+pub(crate) fn generate_integrity_manifest(dir: &Path) -> Result<IntegrityManifest> {
     let mut files = BTreeMap::new();
 
     collect_file_hashes(dir, dir, &mut files)?;
@@ -609,7 +615,7 @@ fn collect_file_hashes(
 }
 
 /// Compute a short fingerprint from the integrity manifest
-fn compute_fingerprint(manifest: &IntegrityManifest) -> String {
+pub(crate) fn compute_fingerprint(manifest: &IntegrityManifest) -> String {
     // Compute a fingerprint by hashing the sorted list of file hashes
     let mut hasher = Sha256::new();
 
@@ -625,7 +631,7 @@ fn compute_fingerprint(manifest: &IntegrityManifest) -> String {
 }
 
 /// Write private artifacts that should never be deployed
-fn write_private_fingerprint(private_dir: &Path, fingerprint: &str) -> Result<()> {
+pub(crate) fn write_private_fingerprint(private_dir: &Path, fingerprint: &str) -> Result<()> {
     let fingerprint_content = format!(
         "Integrity Fingerprint: {}\n\n\
         Generated: {}\n\n\
@@ -642,13 +648,19 @@ fn write_private_fingerprint(private_dir: &Path, fingerprint: &str) -> Result<()
     Ok(())
 }
 
-fn write_private_artifacts_encrypted(
+pub(crate) fn write_private_artifacts_encrypted(
     private_dir: &Path,
-    config: &BundleConfig,
     enc_config: &EncryptionConfig,
+    recovery_secret: Option<&[u8]>,
+    generate_qr: bool,
+    cleanup_missing_recovery: bool,
 ) -> Result<()> {
+    let recovery_secret_path = private_dir.join("recovery-secret.txt");
+    let qr_png_path = private_dir.join("qr-code.png");
+    let qr_svg_path = private_dir.join("qr-code.svg");
+
     // Write recovery secret if provided
-    if let Some(secret) = &config.recovery_secret {
+    if let Some(secret) = recovery_secret {
         let recovery_b64 = BASE64_STANDARD.encode(secret);
         let recovery_content = format!(
             "Recovery Secret\n\
@@ -665,12 +677,19 @@ fn write_private_artifacts_encrypted(
             enc_config.export_id,
             Utc::now().to_rfc3339()
         );
-        fs::write(private_dir.join("recovery-secret.txt"), recovery_content)?;
+        fs::write(&recovery_secret_path, recovery_content)?;
 
         // Generate QR code if requested
-        if config.generate_qr {
+        if generate_qr {
             generate_qr_codes(private_dir, &recovery_b64)?;
+        } else {
+            remove_file_if_exists(&qr_png_path)?;
+            remove_file_if_exists(&qr_svg_path)?;
         }
+    } else if cleanup_missing_recovery {
+        remove_file_if_exists(&recovery_secret_path)?;
+        remove_file_if_exists(&qr_png_path)?;
+        remove_file_if_exists(&qr_svg_path)?;
     }
 
     // Write master key backup (encrypted DEK wrapped with KEK)
@@ -685,6 +704,14 @@ fn write_private_artifacts_encrypted(
     serde_json::to_writer_pretty(BufWriter::new(master_key_file), &master_key_backup)?;
 
     Ok(())
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
 }
 
 fn write_private_unencrypted_notice(private_dir: &Path) -> Result<()> {

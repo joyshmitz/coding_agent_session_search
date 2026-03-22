@@ -699,3 +699,68 @@ fn integration_build_and_preview() -> Result<()> {
     tracker.complete();
     Ok(())
 }
+
+/// Full integration: preview accepts the bundle root and resolves site/ automatically.
+#[test]
+fn integration_preview_accepts_bundle_root() -> Result<()> {
+    use coding_agent_search::pages::bundle::BundleBuilder;
+    use coding_agent_search::pages::encrypt::EncryptionEngine;
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    let tracker = tracker_for("integration_preview_accepts_bundle_root");
+    let _trace_guard = tracker.trace_env_guard();
+
+    let phase_start = tracker.start("build_bundle", Some("Build encrypted bundle"));
+    let temp = tempfile::TempDir::new()?;
+    let encrypted_dir = temp.path().join("encrypted");
+    let bundle_dir = temp.path().join("bundle");
+
+    std::fs::create_dir_all(&encrypted_dir)?;
+    let test_file = temp.path().join("test.db");
+    std::fs::write(&test_file, b"Bundle-root preview test")?;
+
+    let mut engine = EncryptionEngine::default();
+    engine.add_password_slot("integration-test-password")?;
+    engine.encrypt_file(&test_file, &encrypted_dir, |_, _| {})?;
+    std::fs::remove_file(&test_file)?;
+
+    let builder = BundleBuilder::new()
+        .title("Bundle Root Preview Test")
+        .description("Preview should resolve bundle root to site/");
+    let _result = builder.build(&encrypted_dir, &bundle_dir, |_, _| {})?;
+    tracker.end("build_bundle", Some("Build encrypted bundle"), phase_start);
+
+    let phase_start = tracker.start("start_preview", Some("Start preview from bundle root"));
+    let port = get_ephemeral_port();
+    let _server_handle = start_preview_server_background(&bundle_dir, port);
+    std::thread::sleep(Duration::from_millis(250));
+    tracker.end(
+        "start_preview",
+        Some("Start preview from bundle root"),
+        phase_start,
+    );
+
+    let phase_start = tracker.start("fetch_index", Some("Fetch index.html from bundle root"));
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))?;
+    stream.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")?;
+
+    let mut response = vec![0u8; 8192];
+    let n = stream.read(&mut response)?;
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+    let response_str = String::from_utf8_lossy(&response[..n]);
+
+    assert!(
+        response_str.contains("HTTP/1.1 200 OK"),
+        "bundle-root preview should serve the site index: {}",
+        &response_str[..200.min(n)]
+    );
+    tracker.end(
+        "fetch_index",
+        Some("Fetch index.html from bundle root"),
+        phase_start,
+    );
+
+    tracker.complete();
+    Ok(())
+}

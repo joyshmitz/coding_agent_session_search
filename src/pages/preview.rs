@@ -85,6 +85,12 @@ impl Default for PreviewConfig {
     }
 }
 
+/// Resolve the deployable site directory from either a bundle root or site path.
+fn resolve_site_dir(path: &std::path::Path) -> Result<PathBuf, PreviewError> {
+    super::resolve_site_dir(path)
+        .map_err(|_| PreviewError::SiteDirectoryNotFound(path.to_path_buf()))
+}
+
 /// Guess MIME type from file extension.
 fn guess_mime_type(path: &std::path::Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()) {
@@ -392,14 +398,10 @@ fn handle_connection(mut stream: std::net::TcpStream, site_dir: &std::path::Path
 ///
 /// Returns `Ok(())` on graceful shutdown, or an error if the server fails to start.
 pub async fn start_preview_server(config: PreviewConfig) -> Result<(), PreviewError> {
-    // Verify site directory exists
-    if !config.site_dir.exists() {
-        return Err(PreviewError::SiteDirectoryNotFound(config.site_dir));
-    }
+    let resolved_site_dir = resolve_site_dir(&config.site_dir)?;
 
     let site_dir = Arc::new(
-        config
-            .site_dir
+        resolved_site_dir
             .canonicalize()
             .map_err(|_| PreviewError::SiteDirectoryNotFound(config.site_dir.clone()))?,
     );
@@ -560,6 +562,16 @@ mod tests {
         let config = PreviewConfig::default();
         assert_eq!(config.port, 8080);
         assert!(config.open_browser);
+    }
+
+    #[test]
+    fn test_resolve_site_dir_accepts_bundle_root() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let bundle_root = temp_dir.path();
+        std::fs::create_dir(bundle_root.join("site")).expect("create site dir");
+
+        let resolved = resolve_site_dir(bundle_root).expect("resolve bundle root");
+        assert_eq!(resolved, bundle_root.join("site"));
     }
 
     #[test]

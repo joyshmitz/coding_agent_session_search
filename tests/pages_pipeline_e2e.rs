@@ -98,15 +98,15 @@ fn build_pipeline(temp_dir: &TempDir) -> PipelineArtifacts {
 fn test_pages_export_pipeline_e2e() {
     let temp_dir = TempDir::new().unwrap();
     let artifacts = build_pipeline(&temp_dir);
+    let bundle_root = artifacts.bundle.site_dir.parent().expect("bundle root");
 
     // Verify (CLI)
-    // Run `cass pages --verify <site_dir>` to validate the bundle integrity and structure
-    let site_dir = &artifacts.bundle.site_dir;
+    // Run `cass pages --verify <bundle_root>` to validate the bundle integrity and structure
     let mut cmd = cargo_bin_cmd!("cass");
     let assert = cmd
         .arg("pages")
         .arg("--verify")
-        .arg(site_dir)
+        .arg(bundle_root)
         .arg("--json")
         .assert();
 
@@ -117,14 +117,15 @@ fn test_pages_export_pipeline_e2e() {
 fn test_pages_pipeline_decrypt_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
     let artifacts = build_pipeline(&temp_dir);
+    let bundle_root = artifacts.bundle.site_dir.parent().expect("bundle root");
 
     // Unlock with password and decrypt
-    let config = load_config(&artifacts.bundle.site_dir).expect("load config");
+    let config = load_config(bundle_root).expect("load config");
     let decryptor =
         DecryptionEngine::unlock_with_password(config, TEST_PASSWORD).expect("unlock password");
     let decrypted_path = temp_dir.path().join("decrypted.db");
     decryptor
-        .decrypt_to_file(&artifacts.bundle.site_dir, &decrypted_path, |_, _| {})
+        .decrypt_to_file(bundle_root, &decrypted_path, |_, _| {})
         .expect("decrypt with password");
 
     assert_eq!(
@@ -133,16 +134,12 @@ fn test_pages_pipeline_decrypt_roundtrip() {
     );
 
     // Unlock with recovery secret and decrypt
-    let config = load_config(&artifacts.bundle.site_dir).expect("load config");
+    let config = load_config(bundle_root).expect("load config");
     let decryptor = DecryptionEngine::unlock_with_recovery(config, TEST_RECOVERY_SECRET)
         .expect("unlock recovery");
     let decrypted_recovery_path = temp_dir.path().join("decrypted_recovery.db");
     decryptor
-        .decrypt_to_file(
-            &artifacts.bundle.site_dir,
-            &decrypted_recovery_path,
-            |_, _| {},
-        )
+        .decrypt_to_file(bundle_root, &decrypted_recovery_path, |_, _| {})
         .expect("decrypt with recovery");
 
     assert_eq!(
@@ -205,30 +202,33 @@ fn test_pages_config_validate_cli() {
 fn test_pages_bundle_key_add_revoke_cycle() {
     let temp_dir = TempDir::new().unwrap();
     let artifacts = build_pipeline(&temp_dir);
-    let site_dir = &artifacts.bundle.site_dir;
+    let bundle_root = artifacts.bundle.site_dir.parent().expect("bundle root");
 
     // Add second password slot
-    let slot_id = key_add_password(site_dir, TEST_PASSWORD, TEST_PASSWORD_2).unwrap();
+    let slot_id = key_add_password(bundle_root, TEST_PASSWORD, TEST_PASSWORD_2).unwrap();
     assert_eq!(
         slot_id, 2,
         "Expected slot id 2 after password+recovery slots"
     );
 
-    let list = key_list(site_dir).unwrap();
+    let list = key_list(bundle_root).unwrap();
     assert_eq!(list.active_slots, 3);
 
     // Revoke original password slot using second password
-    let revoke = key_revoke(site_dir, TEST_PASSWORD_2, 0).unwrap();
+    let revoke = key_revoke(bundle_root, TEST_PASSWORD_2, 0).unwrap();
     assert_eq!(revoke.revoked_slot_id, 0);
     assert_eq!(revoke.remaining_slots, 2);
 
     // Original password should fail
-    let config = load_config(site_dir).unwrap();
+    let config = load_config(bundle_root).unwrap();
     assert!(DecryptionEngine::unlock_with_password(config, TEST_PASSWORD).is_err());
 
     // Second password should still work
-    let config = load_config(site_dir).unwrap();
+    let config = load_config(bundle_root).unwrap();
     assert!(DecryptionEngine::unlock_with_password(config, TEST_PASSWORD_2).is_ok());
+
+    let verified = verify_bundle(bundle_root, false).expect("verify after key mutation");
+    assert_eq!(verified.status, "valid");
 }
 
 #[test]

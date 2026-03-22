@@ -4,7 +4,7 @@
 //! The verifier confirms correct structure, config schema, payload integrity, and
 //! the absence of secrets in site/.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use base64::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -199,23 +199,7 @@ pub fn verify_bundle(path: &Path, verbose: bool) -> Result<VerifyResult> {
 
 /// Resolve the site directory from a path
 fn resolve_site_dir(path: &Path) -> Result<PathBuf> {
-    if !path.exists() {
-        bail!("Path does not exist: {}", path.display());
-    }
-
-    // If path ends with "site" or contains site/, use it
-    if path.ends_with("site") || path.file_name().map(|n| n == "site").unwrap_or(false) {
-        return Ok(path.to_path_buf());
-    }
-
-    // If path contains site/ subdirectory, use that
-    let site_subdir = path.join("site");
-    if site_subdir.exists() && site_subdir.is_dir() {
-        return Ok(site_subdir);
-    }
-
-    // Otherwise treat path as site directory
-    Ok(path.to_path_buf())
+    super::resolve_site_dir(path)
 }
 
 /// Check that all required files exist

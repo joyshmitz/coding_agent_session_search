@@ -33,7 +33,7 @@ use rand::Rng;
 use serde::Serialize;
 use sha2::Sha256;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 use tracing::info;
 
@@ -91,7 +91,8 @@ pub struct RotateResult {
 
 /// List all key slots in an archive
 pub fn key_list(archive_dir: &Path) -> Result<KeyListResult> {
-    let config = load_config(archive_dir)?;
+    let archive_dir = super::resolve_site_dir(archive_dir)?;
+    let config = load_config(&archive_dir)?;
 
     let slots: Vec<KeySlotInfo> = config
         .key_slots
@@ -125,8 +126,9 @@ pub fn key_add_password(
     current_password: &str,
     new_password: &str,
 ) -> Result<u8> {
+    let archive_dir = super::resolve_site_dir(archive_dir)?;
     let config_path = archive_dir.join("config.json");
-    let mut config = load_config(archive_dir)?;
+    let mut config = load_config(&archive_dir)?;
 
     // Unlock with current password to get DEK
     let dek = zeroize::Zeroizing::new(unwrap_dek_with_password(&config, current_password)?);
@@ -148,7 +150,8 @@ pub fn key_add_password(
     serde_json::to_writer_pretty(BufWriter::new(file), &config)?;
 
     // Update integrity.json if present
-    update_integrity_hash(archive_dir, "config.json")?;
+    let manifest = regenerate_integrity_manifest(&archive_dir)?;
+    refresh_private_artifacts(&archive_dir, &config, manifest.as_ref(), None, false)?;
 
     info!(slot_id, "Added password key slot");
     Ok(slot_id)
@@ -159,8 +162,9 @@ pub fn key_add_recovery(
     archive_dir: &Path,
     current_password: &str,
 ) -> Result<(u8, RecoverySecret)> {
+    let archive_dir = super::resolve_site_dir(archive_dir)?;
     let config_path = archive_dir.join("config.json");
-    let mut config = load_config(archive_dir)?;
+    let mut config = load_config(&archive_dir)?;
 
     // Unlock with current password to get DEK
     let dek = zeroize::Zeroizing::new(unwrap_dek_with_password(&config, current_password)?);
@@ -185,7 +189,14 @@ pub fn key_add_recovery(
     serde_json::to_writer_pretty(BufWriter::new(file), &config)?;
 
     // Update integrity.json if present
-    update_integrity_hash(archive_dir, "config.json")?;
+    let manifest = regenerate_integrity_manifest(&archive_dir)?;
+    refresh_private_artifacts(
+        &archive_dir,
+        &config,
+        manifest.as_ref(),
+        Some(secret.as_bytes()),
+        false,
+    )?;
 
     info!(slot_id, "Added recovery key slot");
     Ok((slot_id, secret))
@@ -197,8 +208,9 @@ pub fn key_revoke(
     current_password: &str,
     slot_id_to_revoke: u8,
 ) -> Result<RevokeResult> {
+    let archive_dir = super::resolve_site_dir(archive_dir)?;
     let config_path = archive_dir.join("config.json");
-    let mut config = load_config(archive_dir)?;
+    let mut config = load_config(&archive_dir)?;
 
     // Safety: Cannot revoke last slot
     if config.key_slots.len() <= 1 {
@@ -230,7 +242,18 @@ pub fn key_revoke(
     serde_json::to_writer_pretty(BufWriter::new(file), &config)?;
 
     // Update integrity.json if present
-    update_integrity_hash(archive_dir, "config.json")?;
+    let manifest = regenerate_integrity_manifest(&archive_dir)?;
+    let has_recovery_slot = config
+        .key_slots
+        .iter()
+        .any(|slot| slot.slot_type == SlotType::Recovery);
+    refresh_private_artifacts(
+        &archive_dir,
+        &config,
+        manifest.as_ref(),
+        None,
+        !has_recovery_slot,
+    )?;
 
     info!(slot_id = slot_id_to_revoke, "Revoked key slot");
     Ok(RevokeResult {
@@ -247,13 +270,14 @@ pub fn key_rotate(
     keep_recovery: bool,
     progress: impl Fn(f32),
 ) -> Result<RotateResult> {
+    let archive_dir = super::resolve_site_dir(archive_dir)?;
     let config_path = archive_dir.join("config.json");
-    let config = load_config(archive_dir)?;
+    let config = load_config(&archive_dir)?;
 
     // 1. Decrypt payload with old password
     let old_dek = zeroize::Zeroizing::new(unwrap_dek_with_password(&config, old_password)?);
     let plaintext =
-        zeroize::Zeroizing::new(decrypt_all_chunks(archive_dir, &old_dek, &config, |p| {
+        zeroize::Zeroizing::new(decrypt_all_chunks(&archive_dir, &old_dek, &config, |p| {
             progress(p * 0.5)
         })?);
 
@@ -286,6 +310,7 @@ pub fn key_rotate(
     )?];
 
     let mut recovery_secret_encoded: Option<String> = None;
+    let mut recovery_secret_bytes: Option<Vec<u8>> = None;
     if keep_recovery {
         let secret = RecoverySecret::generate();
         new_slots.push(create_recovery_slot(
@@ -294,6 +319,7 @@ pub fn key_rotate(
             &BASE64_STANDARD.encode(new_export_id),
             1,
         )?);
+        recovery_secret_bytes = Some(secret.as_bytes().to_vec());
         recovery_secret_encoded = Some(secret.encoded().to_string());
     }
 
@@ -320,7 +346,14 @@ pub fn key_rotate(
     serde_json::to_writer_pretty(BufWriter::new(file), &new_config)?;
 
     // 6. Regenerate integrity.json
-    regenerate_integrity_manifest(archive_dir)?;
+    let manifest = regenerate_integrity_manifest(&archive_dir)?;
+    refresh_private_artifacts(
+        &archive_dir,
+        &new_config,
+        manifest.as_ref(),
+        recovery_secret_bytes.as_deref(),
+        keep_recovery,
+    )?;
 
     Ok(RotateResult {
         new_dek_created_at: chrono::Utc::now(),
@@ -683,98 +716,81 @@ fn build_chunk_aad(export_id: &[u8; 16], chunk_index: u32) -> Vec<u8> {
     aad
 }
 
-/// Update integrity.json for a single file
-fn update_integrity_hash(archive_dir: &Path, filename: &str) -> Result<()> {
+/// Regenerate entire integrity.json
+fn regenerate_integrity_manifest(
+    archive_dir: &Path,
+) -> Result<Option<crate::pages::bundle::IntegrityManifest>> {
     let integrity_path = archive_dir.join("integrity.json");
     if !integrity_path.exists() {
-        return Ok(());
+        return Ok(None);
     }
 
-    // Read current integrity.json
-    let file = File::open(&integrity_path)?;
-    let mut integrity: serde_json::Value = serde_json::from_reader(BufReader::new(file))?;
-
-    // Calculate new hash for file
-    let file_path = archive_dir.join(filename);
-    let content = std::fs::read(&file_path)?;
-    let hash = sha256_hex(&content);
-
-    // Update hash in integrity
-    if let Some(files) = integrity.get_mut("files").and_then(|f| f.as_object_mut()) {
-        files.insert(filename.to_string(), serde_json::json!(hash));
-    }
-
-    // Write updated integrity.json
+    let integrity = crate::pages::bundle::generate_integrity_manifest(archive_dir)?;
     let file = File::create(&integrity_path)?;
     serde_json::to_writer_pretty(BufWriter::new(file), &integrity)?;
+
+    Ok(Some(integrity))
+}
+
+fn refresh_private_artifacts(
+    archive_dir: &Path,
+    config: &EncryptionConfig,
+    manifest: Option<&crate::pages::bundle::IntegrityManifest>,
+    recovery_secret: Option<&[u8]>,
+    remove_recovery_artifacts: bool,
+) -> Result<()> {
+    let Some(private_dir) = private_dir_for_archive(archive_dir) else {
+        return Ok(());
+    };
+
+    if let Some(manifest) = manifest {
+        let fingerprint = crate::pages::bundle::compute_fingerprint(manifest);
+        crate::pages::bundle::write_private_fingerprint(&private_dir, &fingerprint)?;
+    }
+
+    let should_generate_qr = recovery_secret.is_some()
+        && (private_dir.join("qr-code.png").exists() || private_dir.join("qr-code.svg").exists());
+
+    crate::pages::bundle::write_private_artifacts_encrypted(
+        &private_dir,
+        config,
+        recovery_secret,
+        should_generate_qr,
+        remove_recovery_artifacts,
+    )?;
 
     Ok(())
 }
 
-/// Regenerate entire integrity.json
-fn regenerate_integrity_manifest(archive_dir: &Path) -> Result<()> {
-    let integrity_path = archive_dir.join("integrity.json");
-
-    // Find all files to hash
-    let mut files_map = serde_json::Map::new();
-
-    // Hash config.json
-    let config_path = archive_dir.join("config.json");
-    if config_path.exists() {
-        let content = std::fs::read(&config_path)?;
-        files_map.insert(
-            "config.json".to_string(),
-            serde_json::json!(sha256_hex(&content)),
-        );
-    }
-
-    // Hash all payload chunks
-    let payload_dir = archive_dir.join("payload");
-    if payload_dir.exists() {
-        for entry in std::fs::read_dir(&payload_dir)? {
-            let entry = entry?;
-            if entry.file_type()?.is_file() {
-                let filename = entry.file_name().to_string_lossy().to_string();
-                let content = std::fs::read(entry.path())?;
-                files_map.insert(
-                    format!("payload/{}", filename),
-                    serde_json::json!(sha256_hex(&content)),
-                );
-            }
+fn private_dir_for_archive(archive_dir: &Path) -> Option<std::path::PathBuf> {
+    if archive_dir
+        .file_name()
+        .map(|name| name == "site")
+        .unwrap_or(false)
+    {
+        let parent = archive_dir.parent()?;
+        let private_dir = parent.join("private");
+        if private_dir.is_dir() {
+            return Some(private_dir);
         }
     }
 
-    let integrity = serde_json::json!({
-        "version": 1,
-        "algorithm": "sha256",
-        "files": files_map,
-        "generated_at": Utc::now().to_rfc3339(),
-    });
-
-    let file = File::create(&integrity_path)?;
-    serde_json::to_writer_pretty(BufWriter::new(file), &integrity)?;
-
-    Ok(())
-}
-
-/// Calculate SHA-256 hash as hex string
-fn sha256_hex(data: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hex::encode(hasher.finalize())
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pages::bundle::BundleBuilder;
     use crate::pages::encrypt::{DecryptionEngine, EncryptionEngine};
+    use crate::pages::verify::verify_bundle;
     use tempfile::TempDir;
 
     fn setup_test_archive() -> (TempDir, std::path::PathBuf) {
         let temp_dir = TempDir::new().unwrap();
         let input_path = temp_dir.path().join("input.txt");
-        let output_dir = temp_dir.path().join("site");
+        let bundle_root = temp_dir.path().join("bundle");
+        let encrypted_dir = temp_dir.path().join("encrypted");
 
         // Create test file
         std::fs::write(&input_path, b"Test data for key management").unwrap();
@@ -783,10 +799,14 @@ mod tests {
         let mut engine = EncryptionEngine::new(1024).unwrap();
         engine.add_password_slot("test-password").unwrap();
         engine
-            .encrypt_file(&input_path, &output_dir, |_, _| {})
+            .encrypt_file(&input_path, &encrypted_dir, |_, _| {})
             .unwrap();
 
-        (temp_dir, output_dir)
+        BundleBuilder::new()
+            .build(&encrypted_dir, &bundle_root, |_, _| {})
+            .unwrap();
+
+        (temp_dir, bundle_root)
     }
 
     #[test]
@@ -957,5 +977,27 @@ mod tests {
         assert!(unwrap_dek_with_password(&config, "password-1").is_err()); // Revoked
         assert!(unwrap_dek_with_password(&config, "password-2").is_ok());
         assert!(unwrap_dek_with_password(&config, "password-3").is_ok());
+    }
+
+    #[test]
+    fn test_key_add_password_preserves_valid_integrity_manifest() {
+        let (_temp_dir, archive_dir) = setup_test_archive();
+
+        assert_eq!(verify_bundle(&archive_dir, false).unwrap().status, "valid");
+
+        key_add_password(&archive_dir, "test-password", "new-password").unwrap();
+
+        assert_eq!(verify_bundle(&archive_dir, false).unwrap().status, "valid");
+    }
+
+    #[test]
+    fn test_key_rotate_preserves_valid_integrity_manifest() {
+        let (_temp_dir, archive_dir) = setup_test_archive();
+
+        assert_eq!(verify_bundle(&archive_dir, false).unwrap().status, "valid");
+
+        key_rotate(&archive_dir, "test-password", "new-password", true, |_| {}).unwrap();
+
+        assert_eq!(verify_bundle(&archive_dir, false).unwrap().status, "valid");
     }
 }

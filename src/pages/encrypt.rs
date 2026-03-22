@@ -430,7 +430,7 @@ impl DecryptionEngine {
         output: P,
         progress: impl Fn(usize, usize),
     ) -> Result<()> {
-        let encrypted_dir = encrypted_dir.as_ref();
+        let encrypted_dir = super::resolve_site_dir(encrypted_dir.as_ref())?;
         let output_path = output.as_ref();
 
         let cipher = Aes256Gcm::new_from_slice(self.dek.as_bytes()).expect("Invalid key length");
@@ -610,7 +610,8 @@ fn build_chunk_aad(export_id: &[u8; 16], chunk_index: u32) -> Vec<u8> {
 
 /// Load encryption config from directory
 pub fn load_config<P: AsRef<Path>>(dir: P) -> Result<EncryptionConfig> {
-    let config_path = dir.as_ref().join("config.json");
+    let archive_dir = super::resolve_site_dir(dir.as_ref())?;
+    let config_path = archive_dir.join("config.json");
     let file = File::open(&config_path).context("Failed to open config.json")?;
     let config: EncryptionConfig = serde_json::from_reader(BufReader::new(file))?;
     Ok(config)
@@ -768,6 +769,32 @@ mod tests {
 
         // Wrong password should fail
         assert!(DecryptionEngine::unlock_with_password(config, "wrong").is_err());
+    }
+
+    #[test]
+    fn test_load_config_and_decrypt_accept_bundle_root() {
+        let temp_dir = TempDir::new().unwrap();
+        let input_path = temp_dir.path().join("input.txt");
+        let bundle_root = temp_dir.path().join("bundle");
+        let site_dir = bundle_root.join("site");
+        let decrypted_path = temp_dir.path().join("decrypted.txt");
+
+        let test_data = b"Bundle root decryption test data";
+        std::fs::write(&input_path, test_data).unwrap();
+
+        let mut engine = EncryptionEngine::new(1024).unwrap();
+        engine.add_password_slot("password").unwrap();
+        engine
+            .encrypt_file(&input_path, &site_dir, |_, _| {})
+            .unwrap();
+
+        let config = load_config(&bundle_root).unwrap();
+        let decryptor = DecryptionEngine::unlock_with_password(config, "password").unwrap();
+        decryptor
+            .decrypt_to_file(&bundle_root, &decrypted_path, |_, _| {})
+            .unwrap();
+
+        assert_eq!(std::fs::read(&decrypted_path).unwrap(), test_data);
     }
 
     #[test]
