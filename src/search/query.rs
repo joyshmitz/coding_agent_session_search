@@ -4461,6 +4461,12 @@ fn transpile_to_fts5(raw_query: &str) -> Option<String> {
                 next_op = "AND";
             }
             FsCassQueryToken::Or => {
+                if fts_clauses.is_empty() && pending_or_group.is_empty() {
+                    // Be permissive with a leading OR the same way we already
+                    // salvage a leading AND: ignore it instead of turning the
+                    // whole fallback query into an empty result set.
+                    continue;
+                }
                 // Start or continue an OR group. Unsupported `OR NOT` forms
                 // are rejected when the subsequent NOT token arrives.
                 in_or_sequence = true;
@@ -7237,6 +7243,15 @@ mod tests {
             "hyphenated bead IDs should survive the rusqlite fallback path"
         );
 
+        let leading_or_hits = client.search(
+            "OR br-123",
+            SearchFilters::default(),
+            10,
+            0,
+            FieldMask::FULL,
+        )?;
+        assert_eq!(leading_or_hits.len(), 2);
+
         let prefix_hits =
             client.search("br-12*", SearchFilters::default(), 10, 0, FieldMask::FULL)?;
         assert_eq!(prefix_hits.len(), 2);
@@ -9798,6 +9813,15 @@ mod tests {
     fn transpile_to_fts5_rejects_or_not_forms_it_cannot_represent() {
         assert_eq!(transpile_to_fts5("foo OR NOT bar"), None);
         assert_eq!(transpile_to_fts5("foo NOT bar OR baz"), None);
+    }
+
+    #[test]
+    fn transpile_to_fts5_ignores_leading_or() {
+        assert_eq!(transpile_to_fts5("OR test"), Some("test".to_string()));
+        assert_eq!(
+            transpile_to_fts5("OR foo-bar"),
+            Some("\"foo-bar\"".to_string())
+        );
     }
 
     #[test]
@@ -13097,6 +13121,7 @@ mod tests {
             transpile_to_fts5("foo OR bar"),
             Some("(foo OR bar)".to_string())
         );
+        assert_eq!(transpile_to_fts5("OR foo"), Some("foo".to_string()));
         assert_eq!(transpile_to_fts5("NOT foo"), None);
 
         // Precedence: OR binds tighter than AND in our parser logic
