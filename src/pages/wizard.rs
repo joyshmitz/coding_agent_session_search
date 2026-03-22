@@ -157,6 +157,11 @@ impl PagesWizard {
         }
     }
 
+    /// Override the database path used for agent/workspace discovery and export.
+    pub fn set_db_path(&mut self, db_path: PathBuf) {
+        self.state.db_path = db_path;
+    }
+
     /// Set whether to skip encryption (DANGEROUS - requires explicit confirmation).
     pub fn set_no_encryption(&mut self, no_encryption: bool) {
         self.no_encryption_mode = no_encryption;
@@ -1543,12 +1548,12 @@ impl PagesWizard {
 
         writeln!(term)?;
 
-        // Create output directory
-        if !self.state.output_dir.exists() {
-            std::fs::create_dir_all(&self.state.output_dir)?;
-        }
-
-        let export_db_path = self.state.output_dir.join("export.db");
+        // Stage export/encryption artifacts in a temp directory so the final
+        // bundle root only contains deployable output (site/ + private/).
+        let staging_dir = tempfile::tempdir()?;
+        let export_db_path = staging_dir.path().join("export.db");
+        let encrypted_dir = staging_dir.path().join("encrypted");
+        std::fs::create_dir_all(&encrypted_dir)?;
 
         // Phase 1: Database Export with progress
         let pb = ProgressBar::new_spinner();
@@ -1610,7 +1615,7 @@ impl PagesWizard {
             )?;
 
             // For unencrypted mode, just copy the export.db to payload directory
-            let payload_dir = self.state.output_dir.join("payload");
+            let payload_dir = encrypted_dir.join("payload");
             std::fs::create_dir_all(&payload_dir)?;
             let dest_db = payload_dir.join("data.db");
             std::fs::copy(&export_db_path, &dest_db)?;
@@ -1627,7 +1632,7 @@ impl PagesWizard {
                 },
                 "warning": "UNENCRYPTED - All content is publicly readable"
             });
-            let config_path = self.state.output_dir.join("config.json");
+            let config_path = encrypted_dir.join("config.json");
             std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
         } else {
             let pb2 = ProgressBar::new_spinner();
@@ -1657,12 +1662,7 @@ impl PagesWizard {
             }
 
             // Encrypt the database
-            let config =
-                enc_engine.encrypt_file(&export_db_path, &self.state.output_dir, |_, _| {})?;
-
-            // Write config.json
-            let config_path = self.state.output_dir.join("config.json");
-            std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
+            enc_engine.encrypt_file(&export_db_path, &encrypted_dir, |_, _| {})?;
 
             pb2.finish_with_message("✓ Encryption complete");
         }
@@ -1713,28 +1713,12 @@ impl PagesWizard {
             generated_docs,
         };
 
-        // Build the bundle - creates site/ and private/ directories
-        let bundle_output_dir = self
-            .state
-            .output_dir
-            .parent()
-            .map(|p| {
-                p.join(format!(
-                    "{}-bundle",
-                    self.state
-                        .output_dir
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                ))
-            })
-            .unwrap_or_else(|| self.state.output_dir.join("bundle"));
-
         let builder = BundleBuilder::with_config(bundle_config);
         let bundle_result =
-            builder.build(&self.state.output_dir, &bundle_output_dir, |phase, msg| {
+            builder.build(&encrypted_dir, &self.state.output_dir, |phase, msg| {
                 pb3.set_message(format!("{}: {}", phase, msg));
             })?;
+        self.state.final_site_dir = Some(bundle_result.site_dir.clone());
 
         pb3.finish_with_message(format!(
             "✓ Bundle complete: {} files, fingerprint {}",
@@ -1754,9 +1738,6 @@ impl PagesWizard {
                 writeln!(term, "    {}", warning)?;
             }
         }
-
-        // Clean up temporary export.db (encrypted version is in payload/)
-        std::fs::remove_file(&export_db_path).ok();
 
         writeln!(term)?;
         writeln!(
@@ -1817,13 +1798,25 @@ impl PagesWizard {
 
         match self.state.target {
             DeployTarget::Local => {
+                let site_dir = self
+                    .state
+                    .final_site_dir
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| self.state.output_dir.join("site"));
                 writeln!(term)?;
                 writeln!(term, "{}", style("✓ Export complete!").green().bold())?;
                 writeln!(term)?;
                 writeln!(
                     term,
-                    "Your archive has been exported to: {}",
+                    "Your archive bundle has been exported to: {}",
                     style(self.state.output_dir.display()).cyan()
+                )?;
+                writeln!(term)?;
+                writeln!(
+                    term,
+                    "Deployable site directory: {}",
+                    style(site_dir.display()).cyan()
                 )?;
                 writeln!(term)?;
                 writeln!(term, "To preview locally, run:")?;
@@ -1831,8 +1824,8 @@ impl PagesWizard {
                     term,
                     "  {}",
                     style(format!(
-                        "cd {} && python -m http.server 8080",
-                        self.state.output_dir.display()
+                        "cass pages --preview {} --no-open",
+                        site_dir.display()
                     ))
                     .dim()
                 )?;
@@ -1845,6 +1838,12 @@ impl PagesWizard {
             }
             DeployTarget::GitHubPages => {
                 writeln!(term, "  {} GitHub Pages deployment...", style("→").cyan())?;
+                let site_dir = self
+                    .state
+                    .final_site_dir
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| self.state.output_dir.join("site"));
 
                 // Determine repository name
                 let repo_name = self
@@ -1860,7 +1859,7 @@ impl PagesWizard {
                 match deployer.check_prerequisites() {
                     Ok(prereqs) if prereqs.is_ready() => {
                         // Deploy with progress output
-                        match deployer.deploy(&self.state.output_dir, |_phase, msg| {
+                        match deployer.deploy(&site_dir, |_phase, msg| {
                             let _ = writeln!(term, "    {} {}", style("•").dim(), msg);
                         }) {
                             Ok(result) => {
@@ -1885,7 +1884,7 @@ impl PagesWizard {
                                 writeln!(
                                     term,
                                     "To deploy manually, push the {} directory to a gh-pages branch.",
-                                    self.state.output_dir.display()
+                                    site_dir.display()
                                 )?;
                             }
                         }
@@ -1905,7 +1904,7 @@ impl PagesWizard {
                         writeln!(
                             term,
                             "To deploy manually after fixing prerequisites, push the {} directory to a gh-pages branch.",
-                            self.state.output_dir.display()
+                            site_dir.display()
                         )?;
                     }
                     Err(e) => {
@@ -1920,7 +1919,7 @@ impl PagesWizard {
                         writeln!(
                             term,
                             "To deploy manually, push the {} directory to a gh-pages branch.",
-                            self.state.output_dir.display()
+                            site_dir.display()
                         )?;
                     }
                 }
@@ -1931,6 +1930,12 @@ impl PagesWizard {
                     "  {} Cloudflare Pages deployment...",
                     style("→").cyan()
                 )?;
+                let site_dir = self
+                    .state
+                    .final_site_dir
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|| self.state.output_dir.join("site"));
 
                 // Determine project name from repo_name or use default
                 let project_name = self
@@ -1953,7 +1958,7 @@ impl PagesWizard {
                 match deployer.check_prerequisites() {
                     Ok(prereqs) if prereqs.is_ready() => {
                         // Deploy with progress output
-                        match deployer.deploy(&self.state.output_dir, |_phase, msg| {
+                        match deployer.deploy(&site_dir, |_phase, msg| {
                             let _ = writeln!(term, "    {} {}", style("•").dim(), msg);
                         }) {
                             Ok(result) => {
@@ -1980,14 +1985,14 @@ impl PagesWizard {
                                 writeln!(
                                     term,
                                     "To deploy manually, use wrangler to deploy the {} directory:",
-                                    self.state.output_dir.display()
+                                    site_dir.display()
                                 )?;
                                 writeln!(
                                     term,
                                     "  {}",
                                     style(format!(
                                         "wrangler pages deploy {} --project-name {}",
-                                        self.state.output_dir.display(),
+                                        site_dir.display(),
                                         project_name
                                     ))
                                     .dim()
@@ -2009,7 +2014,7 @@ impl PagesWizard {
                             "  {}",
                             style(format!(
                                 "wrangler pages deploy {} --project-name {}",
-                                self.state.output_dir.display(),
+                                site_dir.display(),
                                 project_name
                             ))
                             .dim()
@@ -2027,14 +2032,14 @@ impl PagesWizard {
                         writeln!(
                             term,
                             "To deploy manually, use wrangler to deploy the {} directory:",
-                            self.state.output_dir.display()
+                            site_dir.display()
                         )?;
                         writeln!(
                             term,
                             "  {}",
                             style(format!(
                                 "wrangler pages deploy {} --project-name {}",
-                                self.state.output_dir.display(),
+                                site_dir.display(),
                                 project_name
                             ))
                             .dim()

@@ -14,6 +14,15 @@ fn isolated_home() -> tempfile::TempDir {
     home
 }
 
+#[cfg(unix)]
+fn make_executable_script(path: &std::path::Path, body: &str) {
+    fs::write(path, body).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(path, perms).unwrap();
+}
+
 #[test]
 #[serial]
 #[cfg_attr(not(target_os = "linux"), ignore)]
@@ -82,6 +91,51 @@ fn install_sh_fails_with_bad_checksum() {
         !dest.path().join("cass").exists(),
         "cass binary should not be installed on checksum failure"
     );
+}
+
+#[test]
+#[serial]
+#[cfg_attr(not(target_os = "linux"), ignore)]
+fn install_sh_falls_back_to_shasum_when_sha256sum_fails() {
+    let _ = std::fs::remove_dir_all("/tmp/coding-agent-search-install.lock.d");
+    let tar = fixture("tests/fixtures/install/coding-agent-search-vtest-linux-x86_64.tar.gz");
+    let checksum = fs::read_to_string(
+        "tests/fixtures/install/coding-agent-search-vtest-linux-x86_64.tar.gz.sha256",
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    let dest = tempfile::TempDir::new().unwrap();
+    let home = isolated_home();
+    let tool_dir = tempfile::TempDir::new().unwrap();
+    let fake_sha = tool_dir.path().join("sha256sum");
+    make_executable_script(
+        &fake_sha,
+        "#!/bin/sh\n# simulate an unavailable sha256sum implementation\nexit 127\n",
+    );
+
+    let path = format!(
+        "{}:{}",
+        tool_dir.path().display(),
+        std::env::var("PATH").expect("PATH should be set")
+    );
+
+    let status = Command::new("bash")
+        .arg("install.sh")
+        .arg("--version")
+        .arg("vtest")
+        .arg("--dest")
+        .arg(dest.path())
+        .arg("--easy-mode")
+        .env("HOME", home.path())
+        .env("PATH", path)
+        .env("ARTIFACT_URL", format!("file://{}", tar.display()))
+        .env("CHECKSUM", checksum)
+        .status()
+        .expect("run install.sh with shasum fallback");
+
+    assert!(status.success(), "install.sh should fall back to shasum");
+    assert!(dest.path().join("cass").exists());
 }
 
 fn find_powershell() -> Option<String> {

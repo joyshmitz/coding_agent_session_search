@@ -26,6 +26,38 @@ ok() { log "\033[0;32m✓\033[0m $*"; }
 warn() { log "\033[1;33m⚠\033[0m $*"; }
 err() { log "\033[0;31m✗\033[0m $*"; }
 
+checksum_matches() {
+  local file="$1"
+  local expected actual status
+  expected=$(printf '%s' "$CHECKSUM" | tr '[:upper:]' '[:lower:]')
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    echo "$expected  $file" | sha256sum -c - >/dev/null 2>&1
+    status=$?
+    if [ "$status" -eq 0 ]; then
+      return 0
+    fi
+    if [ "$status" -ne 127 ]; then
+      return "$status"
+    fi
+  fi
+
+  if command -v shasum >/dev/null 2>&1; then
+    actual=$(shasum -a 256 "$file" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')
+    [ "$actual" = "$expected" ]
+    return $?
+  fi
+
+  if command -v openssl >/dev/null 2>&1; then
+    actual=$(openssl dgst -sha256 "$file" | awk '{print $NF}' | tr '[:upper:]' '[:lower:]')
+    [ "$actual" = "$expected" ]
+    return $?
+  fi
+
+  err "No SHA-256 verification tool found (need sha256sum, shasum, or openssl)"
+  exit 1
+}
+
 resolve_version() {
   if [ -n "$VERSION" ]; then return 0; fi
   local latest=""
@@ -232,7 +264,7 @@ if [ -z "$CHECKSUM" ]; then
   if [ -z "$CHECKSUM" ]; then err "Empty checksum file"; exit 1; fi
 fi
 
-echo "$CHECKSUM  $TMP/$TAR" | sha256sum -c - || { err "Checksum mismatch"; exit 1; }
+checksum_matches "$TMP/$TAR" || { err "Checksum mismatch"; exit 1; }
 ok "Checksum verified"
 
 info "Extracting"

@@ -189,6 +189,13 @@ impl BundleBuilder {
         let encrypted_dir = encrypted_dir.as_ref();
         let output_dir = output_dir.as_ref();
 
+        if output_dir.exists() && !output_dir.is_dir() {
+            bail!(
+                "bundle output path points to a file, expected a directory: {}",
+                output_dir.display()
+            );
+        }
+
         // Validate encrypted_dir has required files
         let config_path = encrypted_dir.join("config.json");
         let payload_dir = encrypted_dir.join("payload");
@@ -206,134 +213,232 @@ impl BundleBuilder {
             serde_json::from_reader(BufReader::new(file))?
         };
 
-        progress("setup", "Creating directory structure...");
+        let temp_output_dir = unique_bundle_dir(output_dir, "tmp");
+        let final_site_dir = output_dir.join("site");
+        let final_private_dir = output_dir.join("private");
+        let mut replace_attempted = false;
+        let result = (|| -> Result<BundleResult> {
+            progress("setup", "Creating directory structure...");
 
-        // Create output structure
-        let site_dir = output_dir.join("site");
-        let private_dir = output_dir.join("private");
+            // Stage the bundle under a unique temp root so reruns do not retain stale files.
+            let site_dir = temp_output_dir.join("site");
+            let private_dir = temp_output_dir.join("private");
 
-        fs::create_dir_all(&site_dir).context("Failed to create site/ directory")?;
-        fs::create_dir_all(&private_dir).context("Failed to create private/ directory")?;
+            fs::create_dir_all(&site_dir).context("Failed to create site/ directory")?;
+            fs::create_dir_all(&private_dir).context("Failed to create private/ directory")?;
 
-        // Create site subdirectories
-        let site_payload_dir = site_dir.join("payload");
-        fs::create_dir_all(&site_payload_dir).context("Failed to create site/payload/")?;
+            // Create site subdirectories
+            let site_payload_dir = site_dir.join("payload");
+            fs::create_dir_all(&site_payload_dir).context("Failed to create site/payload/")?;
 
-        progress("assets", "Copying web assets...");
+            progress("assets", "Copying web assets...");
 
-        // Copy embedded assets to site/
-        for (name, content) in PAGES_ASSETS {
-            let dest_path = site_dir.join(name);
-            fs::write(&dest_path, content).with_context(|| format!("Failed to write {}", name))?;
+            // Copy embedded assets to site/
+            for (name, content) in PAGES_ASSETS {
+                let dest_path = site_dir.join(name);
+                fs::write(&dest_path, content)
+                    .with_context(|| format!("Failed to write {}", name))?;
+            }
+
+            // Copy payload into site/payload/
+            let (chunk_count, is_encrypted) = match archive_config.as_encrypted() {
+                Some(_enc_config) => {
+                    progress("payload", "Copying encrypted payload...");
+                    let count = copy_payload_chunks(&payload_dir, &site_payload_dir)?;
+                    (count, true)
+                }
+                None => {
+                    progress("payload", "Copying unencrypted payload...");
+                    let unenc_config = archive_config
+                        .as_unencrypted()
+                        .context("Unencrypted config missing")?;
+                    let count = copy_payload_file(encrypted_dir, &site_dir, unenc_config)?;
+                    (count, false)
+                }
+            };
+
+            // Copy attachment blobs if present
+            let blobs_dir = encrypted_dir.join("blobs");
+            let attachment_count = if blobs_dir.exists() && blobs_dir.is_dir() {
+                progress("attachments", "Copying encrypted attachments...");
+                let site_blobs_dir = site_dir.join("blobs");
+                copy_blobs_directory(&blobs_dir, &site_blobs_dir)?
+            } else {
+                0
+            };
+
+            progress("config", "Writing configuration files...");
+
+            // Write config.json to site/ (already has public params only)
+            let site_config_path = site_dir.join("config.json");
+            let config_file = File::create(&site_config_path)?;
+            serde_json::to_writer_pretty(BufWriter::new(config_file), &archive_config)?;
+
+            // Write site metadata
+            let site_metadata = SiteMetadata {
+                title: self.config.title.clone(),
+                description: self.config.description.clone(),
+                generated_at: Utc::now().to_rfc3339(),
+                generator: "cass".to_string(),
+                generator_version: env!("CARGO_PKG_VERSION").to_string(),
+            };
+            let site_json_path = site_dir.join("site.json");
+            let site_json_file = File::create(&site_json_path)?;
+            serde_json::to_writer_pretty(BufWriter::new(site_json_file), &site_metadata)?;
+
+            progress("static", "Writing static files...");
+
+            // Write robots.txt
+            let robots_content = "User-agent: *\nDisallow: /\n";
+            fs::write(site_dir.join("robots.txt"), robots_content)?;
+
+            // Write .nojekyll (empty file to disable Jekyll processing)
+            fs::write(site_dir.join(".nojekyll"), "")?;
+
+            // Write generated documentation if provided, otherwise fallback to basic readme
+            if !self.config.generated_docs.is_empty() {
+                progress("docs", "Writing generated documentation...");
+                for doc in &self.config.generated_docs {
+                    let dest_path = match doc.location {
+                        DocLocation::RepoRoot => site_dir.join(&doc.filename),
+                        DocLocation::WebRoot => site_dir.join(&doc.filename),
+                    };
+                    fs::write(&dest_path, &doc.content)
+                        .with_context(|| format!("Failed to write {}", doc.filename))?;
+                }
+            } else {
+                // Fallback to basic README.md
+                let public_readme = generate_public_readme(
+                    &self.config.title,
+                    &self.config.description,
+                    is_encrypted,
+                );
+                fs::write(site_dir.join("README.md"), public_readme)?;
+            }
+
+            progress("integrity", "Generating integrity manifest...");
+
+            // Generate integrity.json for all files in site/
+            let integrity_manifest = generate_integrity_manifest(&site_dir)?;
+            let integrity_path = site_dir.join("integrity.json");
+            let integrity_file = File::create(&integrity_path)?;
+            serde_json::to_writer_pretty(BufWriter::new(integrity_file), &integrity_manifest)?;
+
+            // Compute integrity fingerprint (short hash for visual verification)
+            let fingerprint = compute_fingerprint(&integrity_manifest);
+
+            progress("private", "Writing private artifacts...");
+
+            // Write private artifacts
+            write_private_fingerprint(&private_dir, &fingerprint)?;
+            if is_encrypted {
+                let enc_config = archive_config
+                    .as_encrypted()
+                    .context("Encrypted config missing")?;
+                write_private_artifacts_encrypted(&private_dir, &self.config, enc_config)?;
+            } else {
+                write_private_unencrypted_notice(&private_dir)?;
+            }
+
+            replace_attempted = true;
+            replace_dir_from_temp(&temp_output_dir, output_dir)
+                .context("Failed to install completed bundle")?;
+
+            progress("complete", "Bundle complete!");
+
+            Ok(BundleResult {
+                site_dir: final_site_dir,
+                private_dir: final_private_dir,
+                chunk_count,
+                attachment_count,
+                fingerprint,
+                total_files: integrity_manifest.files.len(),
+            })
+        })();
+
+        if result.is_err() && !replace_attempted {
+            let _ = fs::remove_dir_all(&temp_output_dir);
         }
 
-        // Copy payload into site/payload/
-        let (chunk_count, is_encrypted) = match archive_config.as_encrypted() {
-            Some(_enc_config) => {
-                progress("payload", "Copying encrypted payload...");
-                let count = copy_payload_chunks(&payload_dir, &site_payload_dir)?;
-                (count, true)
-            }
-            None => {
-                progress("payload", "Copying unencrypted payload...");
-                let unenc_config = archive_config
-                    .as_unencrypted()
-                    .context("Unencrypted config missing")?;
-                let count = copy_payload_file(encrypted_dir, &site_dir, unenc_config)?;
-                (count, false)
-            }
-        };
+        result
+    }
+}
 
-        // Copy attachment blobs if present
-        let blobs_dir = encrypted_dir.join("blobs");
-        let attachment_count = if blobs_dir.exists() && blobs_dir.is_dir() {
-            progress("attachments", "Copying encrypted attachments...");
-            let site_blobs_dir = site_dir.join("blobs");
-            copy_blobs_directory(&blobs_dir, &site_blobs_dir)?
-        } else {
-            0
-        };
+fn unique_bundle_dir(path: &Path, suffix: &str) -> PathBuf {
+    unique_bundle_sidecar_path(path, suffix, "pages_bundle")
+}
 
-        progress("config", "Writing configuration files...");
+fn unique_bundle_backup_dir(path: &Path) -> PathBuf {
+    unique_bundle_sidecar_path(path, "bak", "pages_bundle")
+}
 
-        // Write config.json to site/ (already has public params only)
-        let site_config_path = site_dir.join("config.json");
-        let config_file = File::create(&site_config_path)?;
-        serde_json::to_writer_pretty(BufWriter::new(config_file), &archive_config)?;
+fn unique_bundle_sidecar_path(path: &Path, suffix: &str, fallback_name: &str) -> PathBuf {
+    static NEXT_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-        // Write site metadata
-        let site_metadata = SiteMetadata {
-            title: self.config.title.clone(),
-            description: self.config.description.clone(),
-            generated_at: Utc::now().to_rfc3339(),
-            generator: "cass".to_string(),
-            generator_version: env!("CARGO_PKG_VERSION").to_string(),
-        };
-        let site_json_path = site_dir.join("site.json");
-        let site_json_file = File::create(&site_json_path)?;
-        serde_json::to_writer_pretty(BufWriter::new(site_json_file), &site_metadata)?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let nonce = NEXT_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(fallback_name);
 
-        progress("static", "Writing static files...");
+    path.with_file_name(format!(
+        ".{file_name}.{suffix}.{}.{}.{}",
+        std::process::id(),
+        timestamp,
+        nonce
+    ))
+}
 
-        // Write robots.txt
-        let robots_content = "User-agent: *\nDisallow: /\n";
-        fs::write(site_dir.join("robots.txt"), robots_content)?;
+fn replace_dir_from_temp(temp_dir: &Path, final_dir: &Path) -> Result<()> {
+    if !final_dir.exists() {
+        return fs::rename(temp_dir, final_dir).with_context(|| {
+            format!(
+                "failed renaming completed bundle {} into place at {}",
+                temp_dir.display(),
+                final_dir.display()
+            )
+        });
+    }
 
-        // Write .nojekyll (empty file to disable Jekyll processing)
-        fs::write(site_dir.join(".nojekyll"), "")?;
+    let backup_dir = unique_bundle_backup_dir(final_dir);
+    fs::rename(final_dir, &backup_dir).with_context(|| {
+        format!(
+            "failed preparing backup {} before replacing {}",
+            backup_dir.display(),
+            final_dir.display()
+        )
+    })?;
 
-        // Write generated documentation if provided, otherwise fallback to basic readme
-        if !self.config.generated_docs.is_empty() {
-            progress("docs", "Writing generated documentation...");
-            for doc in &self.config.generated_docs {
-                let dest_path = match doc.location {
-                    DocLocation::RepoRoot => site_dir.join(&doc.filename),
-                    DocLocation::WebRoot => site_dir.join(&doc.filename),
-                };
-                fs::write(&dest_path, &doc.content)
-                    .with_context(|| format!("Failed to write {}", doc.filename))?;
-            }
-        } else {
-            // Fallback to basic README.md
-            let public_readme =
-                generate_public_readme(&self.config.title, &self.config.description, is_encrypted);
-            fs::write(site_dir.join("README.md"), public_readme)?;
+    match fs::rename(temp_dir, final_dir) {
+        Ok(()) => {
+            let _ = fs::remove_dir_all(&backup_dir);
+            Ok(())
         }
-
-        progress("integrity", "Generating integrity manifest...");
-
-        // Generate integrity.json for all files in site/
-        let integrity_manifest = generate_integrity_manifest(&site_dir)?;
-        let integrity_path = site_dir.join("integrity.json");
-        let integrity_file = File::create(&integrity_path)?;
-        serde_json::to_writer_pretty(BufWriter::new(integrity_file), &integrity_manifest)?;
-
-        // Compute integrity fingerprint (short hash for visual verification)
-        let fingerprint = compute_fingerprint(&integrity_manifest);
-
-        progress("private", "Writing private artifacts...");
-
-        // Write private artifacts
-        write_private_fingerprint(&private_dir, &fingerprint)?;
-        if is_encrypted {
-            let enc_config = archive_config
-                .as_encrypted()
-                .context("Encrypted config missing")?;
-            write_private_artifacts_encrypted(&private_dir, &self.config, enc_config)?;
-        } else {
-            write_private_unencrypted_notice(&private_dir)?;
-        }
-
-        progress("complete", "Bundle complete!");
-
-        Ok(BundleResult {
-            site_dir,
-            private_dir,
-            chunk_count,
-            attachment_count,
-            fingerprint,
-            total_files: integrity_manifest.files.len(),
-        })
+        Err(second_err) => match fs::rename(&backup_dir, final_dir) {
+            Ok(()) => {
+                let _ = fs::remove_dir_all(temp_dir);
+                bail!(
+                    "failed replacing {} with {}: {}; restored original bundle",
+                    final_dir.display(),
+                    temp_dir.display(),
+                    second_err
+                );
+            }
+            Err(restore_err) => {
+                bail!(
+                    "failed replacing {} with {}: {}; restore error: {}; temp bundle retained at {}",
+                    final_dir.display(),
+                    temp_dir.display(),
+                    second_err,
+                    restore_err,
+                    temp_dir.display()
+                );
+            }
+        },
     }
 }
 
@@ -717,7 +822,29 @@ Generated by cass v{}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pages::archive_config::{ArchiveConfig, UnencryptedPayload};
     use tempfile::TempDir;
+
+    fn write_unencrypted_source(root: &Path, payload_name: &str, body: &str) {
+        let payload_dir = root.join("payload");
+        fs::create_dir_all(&payload_dir).unwrap();
+        let payload_path = payload_dir.join(payload_name);
+        fs::write(&payload_path, body).unwrap();
+
+        let config = ArchiveConfig::Unencrypted(UnencryptedConfig {
+            encrypted: false,
+            version: "1.0.0".to_string(),
+            payload: UnencryptedPayload {
+                path: format!("payload/{payload_name}"),
+                format: "sqlite".to_string(),
+                size_bytes: Some(body.len() as u64),
+            },
+            warning: Some("UNENCRYPTED".to_string()),
+        });
+
+        let file = File::create(root.join("config.json")).unwrap();
+        serde_json::to_writer_pretty(BufWriter::new(file), &config).unwrap();
+    }
 
     #[test]
     fn test_bundle_builder_default() {
@@ -890,5 +1017,66 @@ mod tests {
         assert_eq!(copied, 1);
         assert!(dst.path().join("blob.bin").exists());
         assert!(!dst.path().join("linked-blob.bin").exists());
+    }
+
+    #[test]
+    fn test_build_replaces_existing_bundle_without_stale_files() {
+        let source = TempDir::new().unwrap();
+        let output_parent = TempDir::new().unwrap();
+        let output_dir = output_parent.path().join("bundle");
+
+        write_unencrypted_source(source.path(), "data.db", "fresh payload");
+
+        let builder = BundleBuilder::new();
+        builder
+            .build(source.path(), output_dir.as_path(), |_, _| {})
+            .expect("initial build");
+
+        fs::write(output_dir.join("site/stale.txt"), "stale").unwrap();
+        fs::write(output_dir.join("private/old-secret.txt"), "secret").unwrap();
+        fs::write(output_dir.join("site/payload/old.bin"), "old").unwrap();
+
+        builder
+            .build(source.path(), output_dir.as_path(), |_, _| {})
+            .expect("rebuild");
+
+        assert!(output_dir.join("site/config.json").exists());
+        assert!(
+            output_dir
+                .join("private/integrity-fingerprint.txt")
+                .exists()
+        );
+        assert!(!output_dir.join("site/stale.txt").exists());
+        assert!(!output_dir.join("private/old-secret.txt").exists());
+        assert!(!output_dir.join("site/payload/old.bin").exists());
+        assert!(output_dir.join("site/payload/data.db").exists());
+    }
+
+    #[test]
+    fn test_build_failure_preserves_existing_bundle() {
+        let source = TempDir::new().unwrap();
+        let output_parent = TempDir::new().unwrap();
+        let output_dir = output_parent.path().join("bundle");
+        let broken_source = TempDir::new().unwrap();
+
+        write_unencrypted_source(source.path(), "data.db", "fresh payload");
+
+        let builder = BundleBuilder::new();
+        builder
+            .build(source.path(), output_dir.as_path(), |_, _| {})
+            .expect("initial build");
+
+        fs::write(output_dir.join("site/marker.txt"), "keep me").unwrap();
+
+        let result = builder.build(broken_source.path(), output_dir.as_path(), |_, _| {});
+        assert!(result.is_err(), "broken rebuild should fail");
+
+        assert!(output_dir.join("site/marker.txt").exists());
+        assert!(output_dir.join("site/config.json").exists());
+        assert!(
+            output_dir
+                .join("private/integrity-fingerprint.txt")
+                .exists()
+        );
     }
 }
