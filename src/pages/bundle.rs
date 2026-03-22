@@ -4,7 +4,6 @@
 //! from an export. Output is safe for public hosting (GitHub Pages / Cloudflare Pages).
 
 use anyhow::{Context, Result, bail};
-use base64::prelude::*;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -661,13 +660,16 @@ pub(crate) fn write_private_artifacts_encrypted(
 
     // Write recovery secret if provided
     if let Some(secret) = recovery_secret {
-        let recovery_b64 = BASE64_STANDARD.encode(secret);
+        let recovery_b64 = super::qr::RecoverySecret::from_bytes(secret.to_vec())
+            .context("Recovery secret bytes must meet minimum entropy requirements")?
+            .encoded()
+            .to_string();
         let recovery_content = format!(
             "Recovery Secret\n\
             ================\n\n\
             This secret can unlock your archive if you forget your password.\n\
             Store it securely and NEVER share it.\n\n\
-            Secret (base64):\n\
+            Secret (base64url):\n\
             {}\n\n\
             To use: Click \"Scan Recovery QR Code\" in the web viewer, or\n\
             use this base64 value with the recovery function.\n\n\

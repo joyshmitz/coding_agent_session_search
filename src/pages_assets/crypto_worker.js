@@ -546,12 +546,22 @@ async function loadSqlite() {
  * Convert base64 to Uint8Array
  */
 function base64ToArray(base64) {
-    const binary = atob(base64);
+    const normalized = normalizeBase64(base64);
+    const binary = atob(normalized);
     const bytes = new Uint8Array(binary.length);
     for (let i = 0; i < binary.length; i++) {
         bytes[i] = binary.charCodeAt(i);
     }
     return bytes;
+}
+
+function normalizeBase64(base64) {
+    const trimmed = base64.trim().replace(/-/g, '+').replace(/_/g, '/');
+    const padding = trimmed.length % 4;
+    if (padding === 0) {
+        return trimmed;
+    }
+    return trimmed + '='.repeat(4 - padding);
 }
 
 /**
