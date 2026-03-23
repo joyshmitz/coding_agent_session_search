@@ -193,6 +193,23 @@ function invalidateAppInitAttempt() {
     activeAppInitToken += 1;
 }
 
+function clearWorkerKeys() {
+    try {
+        worker?.postMessage({ type: 'CLEAR_KEYS' });
+    } catch (error) {
+        console.warn('Failed to clear worker keys:', error);
+    }
+}
+
+function broadcastAuthLock(action = 'lock') {
+    window.dispatchEvent(new CustomEvent('cass:lock', {
+        detail: {
+            action,
+            source: 'auth',
+        },
+    }));
+}
+
 function isCurrentWorkerMessage(type, requestId) {
     if (requestId == null) {
         return true;
@@ -696,7 +713,7 @@ function handleWorkerMessage(event) {
 /**
  * Handle worker errors
  */
-function handleWorkerError(error) {
+async function handleWorkerError(error) {
     console.error('Worker error:', error);
     const hadActiveSession =
         decryptInFlight
@@ -707,11 +724,14 @@ function handleWorkerError(error) {
     decryptInFlight = false;
     activeUnlockRequestId = null;
     activeDecryptRequestId = null;
+    clearWorkerKeys();
     clearStoredSession();
     window.cassSession = null;
+    await closeLiveDatabase();
     hideProgress();
     enableForm();
     if (hadActiveSession) {
+        broadcastAuthLock('lock');
         elements.appScreen.classList.add('hidden');
         elements.authScreen.classList.remove('hidden');
         elements.passwordInput.value = '';
@@ -761,19 +781,15 @@ function handleUnlockFailed(data) {
  * Handle successful decryption
  */
 async function handleDecryptSuccess(data) {
+    const initToken = activeAppInitToken;
     updateProgress('Database decrypted', 100);
 
     if (!data?.dbBytes) {
-        invalidateAppInitAttempt();
-        decryptInFlight = false;
-        activeDecryptRequestId = null;
-        hideProgress();
-        showError('Decryption did not return a database payload');
-        enableForm();
-        elements.appScreen.classList.add('hidden');
-        elements.authScreen.classList.remove('hidden');
-        clearStoredSession();
-        window.cassSession = null;
+        await recoverFromAppInitFailure(
+            'Decryption did not return a database payload',
+            new Error('Missing database payload'),
+            initToken
+        );
         return;
     }
 
@@ -792,27 +808,33 @@ async function handleDecryptSuccess(data) {
             throw new Error('Invalid database payload');
         }
         await dbModule.initDatabase(dbBytes);
+        if (!isCurrentAppInitToken(initToken)) {
+            await closeLiveDatabase();
+            return;
+        }
         const stats = dbModule.getStatistics();
+        if (!isCurrentAppInitToken(initToken)) {
+            await closeLiveDatabase();
+            return;
+        }
         window.dispatchEvent(new CustomEvent('cass:db-ready', {
             detail: {
                 conversationCount: stats.conversations || 0,
                 messageCount: stats.messages || 0,
             },
         }));
+        if (!isCurrentAppInitToken(initToken)) {
+            await closeLiveDatabase();
+            return;
+        }
         decryptInFlight = false;
         activeDecryptRequestId = null;
     } catch (error) {
-        console.error('Failed to initialize database:', error);
-        invalidateAppInitAttempt();
-        decryptInFlight = false;
-        activeDecryptRequestId = null;
-        hideProgress();
-        showError('Failed to initialize database');
-        enableForm();
-        elements.appScreen.classList.add('hidden');
-        elements.authScreen.classList.remove('hidden');
-        clearStoredSession();
-        window.cassSession = null;
+        if (!isCurrentAppInitToken(initToken)) {
+            await closeLiveDatabase();
+            return;
+        }
+        await recoverFromAppInitFailure('Failed to initialize database', error, initToken);
     }
 }
 
@@ -828,8 +850,11 @@ function handleDecryptFailed(data) {
     enableForm();
     elements.appScreen.classList.add('hidden');
     elements.authScreen.classList.remove('hidden');
+    clearWorkerKeys();
     clearStoredSession();
     window.cassSession = null;
+    void closeLiveDatabase();
+    broadcastAuthLock('lock');
     elements.passwordInput.value = '';
 }
 
@@ -854,9 +879,11 @@ async function recoverFromAppInitFailure(message, error, initToken = activeAppIn
     decryptInFlight = false;
     activeUnlockRequestId = null;
     activeDecryptRequestId = null;
+    clearWorkerKeys();
     clearStoredSession();
     window.cassSession = null;
     await closeLiveDatabase();
+    broadcastAuthLock('lock');
     hideProgress();
     enableForm();
     elements.appScreen.classList.add('hidden');
@@ -963,9 +990,64 @@ async function loadUnencryptedDatabase(initToken = activeAppInitToken) {
 function getUnencryptedPayloadPath() {
     const rawPath = config?.payload?.path;
     if (typeof rawPath === 'string' && rawPath.trim().length > 0) {
-        return rawPath.startsWith('./') ? rawPath : `./${rawPath}`;
+        return normalizeUnencryptedPayloadPath(rawPath);
     }
     return './payload/data.db';
+}
+
+function normalizeUnencryptedPayloadPath(rawPath) {
+    const trimmed = rawPath.trim();
+    if (!trimmed) {
+        throw new Error('Unencrypted payload path cannot be empty');
+    }
+    if (trimmed.startsWith('/') || trimmed.startsWith('\\') || /^[A-Za-z]:[\\/]/.test(trimmed)) {
+        throw new Error('Unencrypted payload path must be relative');
+    }
+    if (trimmed.includes('?') || trimmed.includes('#') || trimmed.includes('\\')) {
+        throw new Error('Unencrypted payload path contains invalid characters');
+    }
+
+    let normalized = trimmed;
+    while (normalized.startsWith('./')) {
+        normalized = normalized.slice(2);
+    }
+
+    const segments = normalized.split('/');
+    if (segments.length < 2) {
+        throw new Error('Unencrypted payload path must reference a file under payload/');
+    }
+
+    const safeSegments = [];
+    for (const segment of segments) {
+        if (!segment || segment === '.' || segment === '..') {
+            throw new Error('Unencrypted payload path contains traversal segments');
+        }
+
+        let decodedSegment;
+        try {
+            decodedSegment = decodeURIComponent(segment);
+        } catch (error) {
+            throw new Error('Unencrypted payload path contains invalid escapes');
+        }
+
+        if (
+            decodedSegment === '.'
+            || decodedSegment === '..'
+            || decodedSegment.includes('/')
+            || decodedSegment.includes('\\')
+            || decodedSegment.includes('\0')
+        ) {
+            throw new Error('Unencrypted payload path contains invalid encoded segments');
+        }
+
+        safeSegments.push(segment);
+    }
+
+    if (safeSegments[0] !== 'payload') {
+        throw new Error('Unencrypted payload path must reside under payload/');
+    }
+
+    return `./${safeSegments.join('/')}`;
 }
 
 /**
@@ -1019,15 +1101,10 @@ async function lockArchive(options = {}) {
     clearStoredSession();
 
     // Tell worker to clear keys
-    worker?.postMessage({ type: 'CLEAR_KEYS' });
+    clearWorkerKeys();
 
     if (broadcast) {
-        window.dispatchEvent(new CustomEvent('cass:lock', {
-            detail: {
-                action,
-                source: 'auth',
-            },
-        }));
+        broadcastAuthLock(action);
     }
 
     await closeLiveDatabase();

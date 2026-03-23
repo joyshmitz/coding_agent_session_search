@@ -126,7 +126,13 @@ async function loadManifest(dek, exportId) {
     // Parse JSON manifest
     const decoder = new TextDecoder();
     const manifestJson = decoder.decode(plaintext);
-    return JSON.parse(manifestJson);
+    let parsedManifest;
+    try {
+        parsedManifest = JSON.parse(manifestJson);
+    } catch (error) {
+        throw new Error(`Invalid attachment manifest JSON: ${error.message}`);
+    }
+    return validateManifest(parsedManifest);
 }
 
 /**
@@ -167,23 +173,24 @@ export function getMessageAttachments(messageId) {
  */
 export async function loadBlob(hash, dek, exportId) {
     const epoch = attachmentEpoch;
+    const normalizedHash = normalizeBlobHash(hash);
 
     // Check cache
-    if (blobCache.has(hash)) {
-        updateLru(hash);
-        return blobCache.get(hash).data;
+    if (blobCache.has(normalizedHash)) {
+        updateLru(normalizedHash);
+        return blobCache.get(normalizedHash).data;
     }
 
     // Fetch encrypted blob
-    const response = await fetch(`./blobs/${hash}.bin`);
+    const response = await fetch(`./blobs/${normalizedHash}.bin`);
     if (!response.ok) {
-        throw new Error(`Blob not found: ${hash}`);
+        throw new Error(`Blob not found: ${normalizedHash}`);
     }
 
     const ciphertext = new Uint8Array(await response.arrayBuffer());
 
     // Derive nonce using HKDF
-    const nonce = await deriveBlobNonce(hash);
+    const nonce = await deriveBlobNonce(normalizedHash);
 
     // Import DEK for decryption
     const dekKey = await crypto.subtle.importKey(
@@ -195,7 +202,7 @@ export async function loadBlob(hash, dek, exportId) {
     );
 
     // Build AAD: export_id || hash_bytes
-    const hashBytes = hexToBytes(hash);
+    const hashBytes = hexToBytes(normalizedHash);
     const aad = new Uint8Array(exportId.length + hashBytes.length);
     aad.set(exportId);
     aad.set(hashBytes, exportId.length);
@@ -218,7 +225,7 @@ export async function loadBlob(hash, dek, exportId) {
     }
 
     // Cache the result
-    cacheBlob(hash, data);
+    cacheBlob(normalizedHash, data);
 
     return data;
 }
@@ -234,16 +241,17 @@ export async function loadBlob(hash, dek, exportId) {
  */
 export async function loadBlobAsUrl(hash, mimeType, dek, exportId) {
     const epoch = attachmentEpoch;
+    const normalizedHash = normalizeBlobHash(hash);
 
     // Check if we already have an object URL
-    const cached = blobCache.get(hash);
+    const cached = blobCache.get(normalizedHash);
     if (cached?.objectUrl) {
-        updateLru(hash);
+        updateLru(normalizedHash);
         return cached.objectUrl;
     }
 
     // Load the blob data
-    const data = await loadBlob(hash, dek, exportId);
+    const data = await loadBlob(normalizedHash, dek, exportId);
 
     // Create object URL
     const blob = new Blob([data], { type: mimeType });
@@ -255,8 +263,8 @@ export async function loadBlobAsUrl(hash, mimeType, dek, exportId) {
     }
 
     // Update cache with URL
-    if (blobCache.has(hash)) {
-        blobCache.get(hash).objectUrl = url;
+    if (blobCache.has(normalizedHash)) {
+        blobCache.get(normalizedHash).objectUrl = url;
     }
 
     return url;
@@ -310,6 +318,67 @@ function hexToBytes(hex) {
         bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
     }
     return bytes;
+}
+
+function normalizeBlobHash(hash) {
+    if (typeof hash !== 'string') {
+        throw new Error('Attachment hash must be a string');
+    }
+
+    const normalized = hash.trim().toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(normalized)) {
+        throw new Error('Attachment hash must be 64 hex characters');
+    }
+
+    return normalized;
+}
+
+function validateManifest(rawManifest) {
+    if (!rawManifest || typeof rawManifest !== 'object' || Array.isArray(rawManifest)) {
+        throw new Error('Attachment manifest must be an object');
+    }
+    if (!Array.isArray(rawManifest.entries)) {
+        throw new Error('Attachment manifest entries must be an array');
+    }
+    if (
+        rawManifest.total_size_bytes != null
+        && (!Number.isSafeInteger(rawManifest.total_size_bytes) || rawManifest.total_size_bytes < 0)
+    ) {
+        throw new Error('Attachment manifest total_size_bytes must be a non-negative integer');
+    }
+
+    return {
+        ...rawManifest,
+        entries: rawManifest.entries.map((entry, index) => validateManifestEntry(entry, index)),
+    };
+}
+
+function validateManifestEntry(entry, index) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new Error(`Attachment entry ${index} must be an object`);
+    }
+    if (typeof entry.filename !== 'string' || entry.filename.length === 0 || entry.filename.includes('\0')) {
+        throw new Error(`Attachment entry ${index} has an invalid filename`);
+    }
+    if (
+        typeof entry.mime_type !== 'string'
+        || entry.mime_type.trim().length === 0
+        || /[\0\r\n]/.test(entry.mime_type)
+    ) {
+        throw new Error(`Attachment entry ${index} has an invalid MIME type`);
+    }
+    if (!Number.isSafeInteger(entry.size_bytes) || entry.size_bytes < 0) {
+        throw new Error(`Attachment entry ${index} has an invalid size`);
+    }
+    if (!Number.isSafeInteger(entry.message_id) || entry.message_id < 0) {
+        throw new Error(`Attachment entry ${index} has an invalid message ID`);
+    }
+
+    return {
+        ...entry,
+        hash: normalizeBlobHash(entry.hash),
+        mime_type: entry.mime_type.trim(),
+    };
 }
 
 /**
