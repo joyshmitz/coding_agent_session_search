@@ -425,6 +425,10 @@ function appendAttachmentsToMessage(messageElement, message) {
 }
 
 function handleArchiveLock() {
+    currentConversation = null;
+    currentMessages = [];
+    destroyVirtualList();
+    clearAllCache();
     attachmentState = createAttachmentState();
     resetAttachments();
 }

@@ -18,7 +18,7 @@ import { initSearch, clearSearch, getSearchState, setSearchQuery } from './searc
 import { initConversationViewer, loadConversation, clearViewer, getCurrentConversation } from './conversation.js';
 import { createRouter, getRouter, parseSearchParams, buildConversationPath } from './router.js';
 import { getConversationLink, copyConversationLink, isWebShareAvailable, shareConversation } from './share.js';
-import { initStats, renderStatsDashboard } from './stats.js';
+import { initStats, renderStatsDashboard, clearStatsCache } from './stats.js';
 import { initStorage, StorageKeys } from './storage.js';
 import { initSettings, render as renderSettings } from './settings.js';
 
@@ -558,6 +558,7 @@ function handleBackToSearch() {
 function handleSessionReset(action) {
     clearViewer();
     clearSearch({ reloadRecent: false });
+    clearStatsCache();
     closeDatabase();
     window.dispatchEvent(new CustomEvent('cass:lock', {
         detail: { action, source: 'viewer' },
@@ -571,6 +572,7 @@ function handleGlobalLock(event) {
 
     clearViewer();
     clearSearch({ reloadRecent: false });
+    clearStatsCache();
     state.view = 'search';
     state.conversationId = null;
     state.messageId = null;
@@ -720,6 +722,7 @@ export function cleanup() {
     closeDatabase();
     clearSearch();
     clearViewer();
+    clearStatsCache();
     console.log('[Viewer] Cleaned up');
 }
 

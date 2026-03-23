@@ -21,6 +21,11 @@ let decryptInFlight = false;
 let activeUnlockRequestId = null;
 let activeDecryptRequestId = null;
 let nextWorkerRequestId = 1;
+const LEGACY_SESSION_KEYS = {
+    DEK: 'cass_session_dek',
+    EXPIRY: 'cass_session_expiry',
+    UNLOCKED: 'cass_unlocked',
+};
 
 // DOM Elements
 const elements = {
@@ -1069,6 +1074,9 @@ function clearStoredSession() {
                 sessionKeys.DEK,
                 sessionKeys.EXPIRY,
                 sessionKeys.UNLOCKED,
+                LEGACY_SESSION_KEYS.DEK,
+                LEGACY_SESSION_KEYS.EXPIRY,
+                LEGACY_SESSION_KEYS.UNLOCKED,
             ]) {
                 storage.removeItem(key);
             }
