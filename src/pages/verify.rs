@@ -7,6 +7,7 @@
 use anyhow::{Context, Result};
 use base64::prelude::*;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -46,6 +47,15 @@ const SECRET_FILES: &[&str] = &[
 
 /// Directories that should not exist in site/
 const SECRET_DIRS: &[&str] = &["private"];
+
+/// JSON keys in config.json that indicate plaintext secret leakage.
+const FORBIDDEN_CONFIG_KEYS: &[(&str, &str)] = &[
+    ("password", "password field"),
+    ("secret", "secret field"),
+    ("private_key", "private_key field"),
+    ("master_key", "master_key field"),
+    ("recovery_secret", "recovery_secret"),
+];
 
 /// Verification result for a single check
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -996,36 +1006,56 @@ fn check_no_secrets(site_dir: &Path) -> CheckResult {
     // Recursive scan: detect secret files/dirs hidden in subdirectories
     find_secrets_recursive(site_dir, site_dir, &mut errors);
 
-    // Check config.json doesn't contain plaintext secrets
-    // Note: We're looking for actual secret values, not field names like "total_plaintext_size"
+    // Check config.json doesn't contain plaintext secrets.
+    // Walk the parsed JSON tree instead of doing brittle raw substring checks so
+    // formatting changes like `"secret" : "..."` or nested objects can't hide leakage.
     let config_path = site_dir.join("config.json");
     if config_path.exists()
         && let Ok(content) = fs::read_to_string(&config_path)
+        && let Ok(config_json) = serde_json::from_str::<Value>(&content)
     {
-        let content_lower = content.to_lowercase();
-        // Check for patterns that indicate actual secrets being stored
-        // These patterns look for JSON keys that shouldn't exist in public config
-        let forbidden_patterns = [
-            ("\"password\":", "password field"), // Password stored in config
-            ("\"secret\":", "secret field"),     // Secret stored directly
-            ("\"private_key\":", "private_key field"), // Private key in config
-            ("\"master_key\":", "master_key field"), // Master key exposed
-            ("\"recovery_secret\":", "recovery_secret"), // Recovery secret in config
-        ];
-        for (pattern, description) in forbidden_patterns {
-            if content_lower.contains(pattern) {
-                errors.push(format!(
-                    "config.json contains forbidden pattern: {}",
-                    description
-                ));
-            }
-        }
+        find_forbidden_config_keys(&config_json, "", &mut errors);
     }
 
     if errors.is_empty() {
         CheckResult::pass()
     } else {
         CheckResult::fail(errors.join("; "))
+    }
+}
+
+fn find_forbidden_config_keys(value: &Value, current_path: &str, findings: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                let child_path = if current_path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{current_path}.{key}")
+                };
+                if let Some((_, description)) = FORBIDDEN_CONFIG_KEYS
+                    .iter()
+                    .find(|(forbidden, _)| key.eq_ignore_ascii_case(forbidden))
+                {
+                    findings.push(format!(
+                        "config.json contains forbidden field: {} at {}",
+                        description, child_path
+                    ));
+                }
+                find_forbidden_config_keys(child, &child_path, findings);
+            }
+        }
+        Value::Array(items) => {
+            for (idx, child) in items.iter().enumerate() {
+                let child_path = if current_path.is_empty() {
+                    format!("[{idx}]")
+                } else {
+                    format!("{current_path}[{idx}]")
+                };
+                find_forbidden_config_keys(child, &child_path, findings);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1500,6 +1530,72 @@ mod tests {
 
         let result = verify_bundle(&site_dir, false).unwrap();
         assert!(!result.checks.no_secrets_in_site.passed);
+    }
+
+    #[test]
+    fn test_check_no_secrets_flags_nested_config_secret_key_with_whitespace() {
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path().join("site");
+        fs::create_dir_all(&site_dir).unwrap();
+        fs::write(
+            site_dir.join("config.json"),
+            r#"{
+                "encrypted": false,
+                "version": "1.0",
+                "payload": { "path": "payload/data.sqlite", "format": "sqlite" },
+                "metadata": { "secret" : "leaked" }
+            }"#,
+        )
+        .unwrap();
+
+        let result = check_no_secrets(&site_dir);
+        assert!(!result.passed);
+        assert!(
+            result
+                .details
+                .as_ref()
+                .map(|details| {
+                    details.contains(
+                        "config.json contains forbidden field: secret field at metadata.secret",
+                    )
+                })
+                .unwrap_or(false),
+            "nested secret key with whitespace should be detected: {:?}",
+            result.details
+        );
+    }
+
+    #[test]
+    fn test_check_no_secrets_flags_forbidden_config_key_inside_array() {
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path().join("site");
+        fs::create_dir_all(&site_dir).unwrap();
+        fs::write(
+            site_dir.join("config.json"),
+            r#"{
+                "encrypted": false,
+                "version": "1.0",
+                "payload": { "path": "payload/data.sqlite", "format": "sqlite" },
+                "metadata": [{ "private_key" : "leaked" }]
+            }"#,
+        )
+        .unwrap();
+
+        let result = check_no_secrets(&site_dir);
+        assert!(!result.passed);
+        assert!(
+            result
+                .details
+                .as_ref()
+                .map(|details| {
+                    details.contains(
+                        "config.json contains forbidden field: private_key field at metadata[0].private_key",
+                    )
+                })
+                .unwrap_or(false),
+            "forbidden key inside arrays should be detected: {:?}",
+            result.details
+        );
     }
 
     #[test]
