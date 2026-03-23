@@ -134,17 +134,32 @@ function initializeViews() {
     applyStoredTheme();
 
     // Initialize storage and settings
-    storageReady = initStorage().catch((error) => {
+    storageReady = initStorage().then(() => ({ ok: true })).catch((error) => {
         console.warn('[Viewer] Storage init failed:', error);
+        return { ok: false, error };
     });
-    storageReady.then(() => {
-        if (!state.initialized || lifecycleEpoch !== viewerLifecycleEpoch) {
+    storageReady.then((result) => {
+        if (lifecycleEpoch !== viewerLifecycleEpoch) {
             return;
         }
-        initSettings(elements.settingsView, {
-            onSessionReset: handleSessionReset,
-        });
-        settingsReady = true;
+
+        if (!result?.ok) {
+            settingsReady = false;
+            return;
+        }
+
+        try {
+            initSettings(elements.settingsView, {
+                onSessionReset: handleSessionReset,
+            });
+            settingsReady = true;
+        } catch (error) {
+            console.error('[Viewer] Failed to initialize settings:', error);
+            settingsReady = false;
+            if (state.initialized && state.view === 'settings') {
+                renderSettingsErrorPanel('Settings could not be initialized for this archive.');
+            }
+        }
     });
 
     // Initialize search view
@@ -496,16 +511,33 @@ function displayStats() {
  */
 function renderSettingsPanel() {
     if (storageReady) {
-        storageReady.then(() => {
+        storageReady.then((result) => {
+            if (!result?.ok) {
+                if (state.initialized && state.view === 'settings') {
+                    renderSettingsErrorPanel('Settings are unavailable because browser storage failed to initialize.');
+                }
+                return;
+            }
+
             if (settingsReady && state.initialized && state.view === 'settings') {
-                renderSettings();
+                try {
+                    renderSettings();
+                } catch (error) {
+                    console.error('[Viewer] Failed to render settings panel:', error);
+                    renderSettingsErrorPanel('Settings could not be rendered for this archive.');
+                }
             }
         });
         return;
     }
 
     if (settingsReady) {
-        renderSettings();
+        try {
+            renderSettings();
+        } catch (error) {
+            console.error('[Viewer] Failed to render settings panel:', error);
+            renderSettingsErrorPanel('Settings could not be rendered for this archive.');
+        }
     }
 }
 
@@ -551,6 +583,23 @@ function renderNotFoundPanel(path) {
                 <h2>Page Not Found</h2>
                 <p>The requested page <code>${escapeHtml(path || 'unknown')}</code> could not be found.</p>
                 <a href="#/" class="btn btn-primary">Go to Search</a>
+            </div>
+        </div>
+    `;
+}
+
+function renderSettingsErrorPanel(message) {
+    if (!elements.settingsView) {
+        return;
+    }
+
+    elements.settingsView.innerHTML = `
+        <div class="panel settings-panel">
+            <header class="panel-header">
+                <h2>Settings</h2>
+            </header>
+            <div class="panel-content">
+                <p>${escapeHtml(message)}</p>
             </div>
         </div>
     `;
@@ -694,9 +743,10 @@ function showNotification(message, type = 'info') {
  * Format agent name for display
  */
 function formatAgentName(agent) {
-    if (!agent) return 'Unknown';
+    if (agent === undefined || agent === null || agent === '') return 'Unknown';
+    const value = String(agent);
     // Capitalize first letter
-    return agent.charAt(0).toUpperCase() + agent.slice(1).replace(/_/g, ' ');
+    return value.charAt(0).toUpperCase() + value.slice(1).replace(/_/g, ' ');
 }
 
 /**

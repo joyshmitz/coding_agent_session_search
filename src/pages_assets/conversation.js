@@ -732,8 +732,9 @@ function showError(message) {
  * Format agent name for display
  */
 function formatAgentName(agent) {
-    if (!agent) return 'Unknown';
-    return agent.charAt(0).toUpperCase() + agent.slice(1);
+    if (agent === undefined || agent === null || agent === '') return 'Unknown';
+    const value = String(agent);
+    return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 /**

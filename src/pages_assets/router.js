@@ -37,6 +37,40 @@ let currentRoute = {
 // Router instance
 let routerInstance = null;
 
+export function parseRouteIdSegment(segment) {
+    if (typeof segment !== 'string' || !/^[1-9]\d*$/.test(segment)) {
+        return null;
+    }
+
+    const value = Number.parseInt(segment, 10);
+    return Number.isSafeInteger(value) ? value : null;
+}
+
+export function parseConversationRouteParts(parts) {
+    if (!Array.isArray(parts) || parts[0] !== 'c') {
+        return null;
+    }
+
+    if (parts.length !== 2 && !(parts.length === 4 && parts[2] === 'm' && parts[3])) {
+        return null;
+    }
+
+    const conversationId = parseRouteIdSegment(parts[1]);
+    if (conversationId === null) {
+        return null;
+    }
+
+    const messageId = parts.length === 4 ? parseRouteIdSegment(parts[3]) : null;
+    if (parts.length === 4 && messageId === null) {
+        return null;
+    }
+
+    return {
+        conversationId,
+        messageId,
+    };
+}
+
 /**
  * Hash-based Router class
  */
@@ -215,42 +249,30 @@ class Router {
         }
 
         // /search -> search view
-        if (parts[0] === 'search') {
+        if (parts[0] === 'search' && parts.length === 1) {
             return { view: 'search', params: {} };
         }
 
         // /c/:id -> conversation view
-        if (parts[0] === 'c' && parts[1]) {
-            const conversationId = parseInt(parts[1], 10);
-
-            // /c/:id/m/:msgId -> conversation with message
-            if (parts[2] === 'm' && parts[3]) {
-                const messageId = parseInt(parts[3], 10);
+        if (parts[0] === 'c') {
+            const conversationParams = parseConversationRouteParts(parts);
+            if (conversationParams) {
                 return {
                     view: 'conversation',
-                    params: {
-                        conversationId: isNaN(conversationId) ? null : conversationId,
-                        messageId: isNaN(messageId) ? null : messageId,
-                    },
+                    params: conversationParams,
                 };
             }
 
-            return {
-                view: 'conversation',
-                params: {
-                    conversationId: isNaN(conversationId) ? null : conversationId,
-                    messageId: null,
-                },
-            };
+            return { view: 'not-found', params: { path } };
         }
 
         // /settings -> settings panel
-        if (parts[0] === 'settings') {
+        if (parts[0] === 'settings' && parts.length === 1) {
             return { view: 'settings', params: {} };
         }
 
         // /stats -> stats panel
-        if (parts[0] === 'stats') {
+        if (parts[0] === 'stats' && parts.length === 1) {
             return { view: 'stats', params: {} };
         }
 
@@ -371,6 +393,8 @@ export default {
     getRouter,
     navigate,
     getCurrentRoute,
+    parseConversationRouteParts,
+    parseRouteIdSegment,
     buildConversationPath,
     buildSearchPath,
     parseSearchParams,

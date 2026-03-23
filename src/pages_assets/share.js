@@ -5,7 +5,11 @@
  * Works with hash-based routing for static hosting compatibility.
  */
 
-import { buildConversationPath, buildSearchPath } from './router.js';
+import {
+    buildConversationPath,
+    buildSearchPath,
+    parseConversationRouteParts,
+} from './router.js';
 
 /**
  * Get the base URL (everything before the hash)
@@ -208,37 +212,35 @@ export function parseShareLink(link) {
         }
 
         // Home/search
-        if (parts.length === 0 || parts[0] === 'search') {
+        if (parts.length === 0) {
+            return { view: 'search', params: {}, query };
+        }
+
+        if (parts[0] === 'search' && parts.length === 1) {
             return { view: 'search', params: {}, query };
         }
 
         // Conversation
-        if (parts[0] === 'c' && parts[1]) {
-            const conversationId = parseInt(parts[1], 10);
-            if (Number.isNaN(conversationId)) {
-                return null;
-            }
-
-            const hasMessageSegment = parts[2] === 'm' && parts[3];
-            const messageId = hasMessageSegment ? parseInt(parts[3], 10) : null;
-            if (hasMessageSegment && Number.isNaN(messageId)) {
+        if (parts[0] === 'c') {
+            const conversationParams = parseConversationRouteParts(parts);
+            if (!conversationParams) {
                 return null;
             }
 
             return {
                 view: 'conversation',
-                params: { conversationId, messageId },
+                params: conversationParams,
                 query,
             };
         }
 
         // Settings
-        if (parts[0] === 'settings') {
+        if (parts[0] === 'settings' && parts.length === 1) {
             return { view: 'settings', params: {}, query };
         }
 
         // Stats
-        if (parts[0] === 'stats') {
+        if (parts[0] === 'stats' && parts.length === 1) {
             return { view: 'stats', params: {}, query };
         }
 

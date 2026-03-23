@@ -264,8 +264,14 @@ function computeAnalyticsFromDatabase() {
         const stopWords = new Set(['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'is', 'it', 'as', 'was', 'be', 'are', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'this', 'that', 'these', 'those', 'i', 'you', 'we', 'they', 'what', 'which', 'who', 'when', 'where', 'why', 'how']);
 
         titleRows.forEach(row => {
-            if (row.title) {
-                const words = row.title.toLowerCase().split(/\s+/);
+            const title = typeof row.title === 'string'
+                ? row.title
+                : row.title === undefined || row.title === null
+                    ? ''
+                    : String(row.title);
+
+            if (title) {
+                const words = title.toLowerCase().split(/\s+/);
                 words.forEach(word => {
                     const cleaned = word.replace(/[^a-z0-9_-]/g, '');
                     if (cleaned.length >= 3 && !stopWords.has(cleaned)) {
@@ -450,7 +456,7 @@ function renderDashboard(data) {
                                     ${agentSummary.agents.map(agent => `
                                         <tr>
                                             <td>
-                                                <span class="agent-badge agent-${agent.name.toLowerCase().replace(/[^a-z0-9]/g, '-')}">
+                                                <span class="agent-badge agent-${toCssSlug(agent.name)}">
                                                     ${escapeHtml(formatAgentName(agent.name))}
                                                 </span>
                                             </td>
@@ -679,7 +685,7 @@ function renderRoleBars(roles) {
                 <div class="role-bar-item">
                     <span class="role-name">${escapeHtml(role)}</span>
                     <div class="role-bar-container">
-                        <div class="role-bar role-${role.toLowerCase()}" style="width: ${percent}%"
+                        <div class="role-bar role-${toCssSlug(role)}" style="width: ${percent}%"
                              aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100"></div>
                     </div>
                     <span class="role-count">${formatNumber(count)} (${percent}%)</span>
@@ -722,8 +728,18 @@ function setupTimelineControls(timeline) {
  * @returns {string} Formatted name
  */
 function formatAgentName(agent) {
-    if (!agent) return 'Unknown';
-    return agent.charAt(0).toUpperCase() + agent.slice(1).replace(/[-_]/g, ' ');
+    if (agent === undefined || agent === null || agent === '') return 'Unknown';
+    const value = String(agent);
+    return value.charAt(0).toUpperCase() + value.slice(1).replace(/[-_]/g, ' ');
+}
+
+function toCssSlug(value, fallback = 'unknown') {
+    if (value === undefined || value === null || value === '') {
+        return fallback;
+    }
+
+    const slug = String(value).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    return slug || fallback;
 }
 
 /**

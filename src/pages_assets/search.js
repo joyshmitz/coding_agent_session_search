@@ -13,6 +13,7 @@ import {
     getConversationsByAgent,
     getConversationsByTimeRange,
 } from './database.js';
+import { parseRouteIdSegment } from './router.js';
 import { VirtualList } from './virtual-list.js';
 
 // Search configuration
@@ -56,6 +57,25 @@ let elements = {
     resultCount: null,
     noResults: null,
 };
+
+function parseResultSelection(card) {
+    const conversationId = parseRouteIdSegment(card?.dataset?.conversationId || '');
+    if (conversationId === null) {
+        return null;
+    }
+
+    const rawMessageId = card?.dataset?.messageId || '';
+    if (!rawMessageId) {
+        return { conversationId, messageId: null };
+    }
+
+    const messageId = parseRouteIdSegment(rawMessageId);
+    if (messageId === null) {
+        return null;
+    }
+
+    return { conversationId, messageId };
+}
 
 function isCurrentSearchEpoch(epoch) {
     return epoch === searchEpoch;
@@ -226,10 +246,13 @@ function setupEventListeners() {
     elements.resultsList.addEventListener('click', (e) => {
         const resultCard = e.target.closest('.result-card');
         if (resultCard) {
-            const convId = parseInt(resultCard.dataset.conversationId, 10);
-            const msgId = parseInt(resultCard.dataset.messageId, 10) || null;
+            const selection = parseResultSelection(resultCard);
+            if (!selection) {
+                console.warn('[Search] Ignoring result with invalid conversation/message id');
+                return;
+            }
             if (onResultSelect) {
-                onResultSelect(convId, msgId);
+                onResultSelect(selection.conversationId, selection.messageId);
             }
         }
     });
@@ -627,10 +650,13 @@ function createResultCard(result, index) {
 
     // Add click handler for virtual list items
     article.addEventListener('click', () => {
-        const convId = parseInt(article.dataset.conversationId, 10);
-        const msgId = parseInt(article.dataset.messageId, 10) || null;
+        const selection = parseResultSelection(article);
+        if (!selection) {
+            console.warn('[Search] Ignoring result with invalid conversation/message id');
+            return;
+        }
         if (onResultSelect) {
-            onResultSelect(convId, msgId);
+            onResultSelect(selection.conversationId, selection.messageId);
         }
     });
 
@@ -776,21 +802,23 @@ function showError(message) {
  * Format agent name for display
  */
 function formatAgentName(agent) {
-    if (!agent) return 'Unknown';
+    if (agent === undefined || agent === null || agent === '') return 'Unknown';
+    const value = String(agent);
 
     // Capitalize first letter
-    return agent.charAt(0).toUpperCase() + agent.slice(1);
+    return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
 /**
  * Format workspace path for display
  */
 function formatWorkspace(workspace) {
-    if (!workspace) return '';
+    if (workspace === undefined || workspace === null || workspace === '') return '';
+    const value = String(workspace);
 
     // Show last 2 path components
-    const parts = workspace.split('/').filter(Boolean);
-    if (parts.length <= 2) return workspace;
+    const parts = value.split('/').filter(Boolean);
+    if (parts.length <= 2) return value;
 
     return '.../' + parts.slice(-2).join('/');
 }
