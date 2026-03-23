@@ -120,9 +120,12 @@ mod tests {
         let count: i64 = conn.query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))?;
         assert_eq!(count, 2);
 
-        let fts_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM messages_fts", [], |r| r.get(0))?;
-        assert_eq!(fts_count, 3);
+        let fts_exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'messages_fts'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(fts_exists, 1);
 
         // Verify Path Transformation (Relative)
         let path: String = conn.query_row(
@@ -257,6 +260,149 @@ mod tests {
     }
 
     #[test]
+    fn test_export_preserves_message_identity_and_optional_metadata() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let source_path = temp_dir.path().join("source.db");
+        let output_path = temp_dir.path().join("export.db");
+
+        setup_source_db(&source_path)?;
+
+        let source_conn = Connection::open(&source_path)?;
+        source_conn.execute("ALTER TABLE messages ADD COLUMN attachment_refs TEXT", [])?;
+
+        let source_message_id: i64 = source_conn.query_row(
+            "SELECT id FROM messages WHERE conversation_id = 1 AND idx = 0",
+            [],
+            |row| row.get(0),
+        )?;
+        source_conn.execute(
+            "UPDATE messages SET updated_at = ?, model = ?, attachment_refs = ? WHERE id = ?",
+            rusqlite::params![
+                1_600_000_123_000_i64,
+                "claude-opus-4-6",
+                "[\"blob-a\",\"blob-b\"]",
+                source_message_id
+            ],
+        )?;
+        drop(source_conn);
+
+        let filter = ExportFilter {
+            agents: None,
+            workspaces: None,
+            since: None,
+            until: None,
+            path_mode: PathMode::Relative,
+        };
+
+        let engine = ExportEngine::new(&source_path, &output_path, filter);
+        engine.execute(|_, _| {}, None)?;
+
+        let output_conn = Connection::open(&output_path)?;
+        let exported = output_conn.query_row(
+            "SELECT id, updated_at, model, attachment_refs FROM messages WHERE conversation_id = 1 AND idx = 0",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )?;
+
+        assert_eq!(exported.0, source_message_id);
+        assert_eq!(exported.1, Some(1_600_000_123_000_i64));
+        assert_eq!(exported.2.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(exported.3.as_deref(), Some("[\"blob-a\",\"blob-b\"]"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_export_derives_model_from_extra_json_when_column_missing() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let source_path = temp_dir.path().join("source.db");
+        let output_path = temp_dir.path().join("export.db");
+
+        let conn = Connection::open(&source_path)?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE agents (id INTEGER PRIMARY KEY, slug TEXT NOT NULL);
+            CREATE TABLE workspaces (id INTEGER PRIMARY KEY, path TEXT NOT NULL);
+            CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY,
+                agent_id INTEGER NOT NULL,
+                workspace_id INTEGER,
+                title TEXT,
+                source_path TEXT NOT NULL,
+                started_at INTEGER,
+                ended_at INTEGER,
+                message_count INTEGER,
+                metadata_json TEXT
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER NOT NULL,
+                idx INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at INTEGER,
+                extra_json TEXT
+            );
+            "#,
+        )?;
+        conn.execute("INSERT INTO agents (id, slug) VALUES (1, 'claude')", [])?;
+        conn.execute(
+            "INSERT INTO workspaces (id, path) VALUES (1, '/home/user/proj1')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO conversations (id, agent_id, workspace_id, title, source_path, started_at, message_count)
+             VALUES (1, 1, 1, 'Extra JSON model', '/home/user/proj1/.claude/extra.jsonl', 1600000000000, 1)",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO messages (id, conversation_id, idx, role, content, created_at, extra_json)
+             VALUES (101, 1, 0, 'assistant', 'hello', 1600000000000, ?1)",
+            rusqlite::params![
+                r#"{"message":{"model":"claude-sonnet-4"},"attachments":["blob-z"]}"#
+            ],
+        )?;
+        drop(conn);
+
+        let filter = ExportFilter {
+            agents: None,
+            workspaces: None,
+            since: None,
+            until: None,
+            path_mode: PathMode::Relative,
+        };
+
+        let engine = ExportEngine::new(&source_path, &output_path, filter);
+        engine.execute(|_, _| {}, None)?;
+
+        let output_conn = Connection::open(&output_path)?;
+        let exported = output_conn.query_row(
+            "SELECT id, model, attachment_refs FROM messages WHERE conversation_id = 1 AND idx = 0",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )?;
+
+        assert_eq!(exported.0, 101);
+        assert_eq!(exported.1.as_deref(), Some("claude-sonnet-4"));
+        assert_eq!(exported.2.as_deref(), Some("[\"blob-z\"]"));
+
+        Ok(())
+    }
+
+    #[test]
     fn test_export_filter_workspace() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let source_path = temp_dir.path().join("source.db");
@@ -315,7 +461,12 @@ mod tests {
         assert_eq!(count, 0);
 
         // Schema should exist (FTS table)
-        let _: i64 = conn.query_row("SELECT COUNT(*) FROM messages_fts", [], |r| r.get(0))?;
+        let fts_exists: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'messages_fts'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(fts_exists, 1);
 
         Ok(())
     }

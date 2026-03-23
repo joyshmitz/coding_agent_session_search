@@ -516,8 +516,8 @@ impl PagesConfig {
         }
 
         if self.bundle.include_attachments {
-            warnings.push(
-                "include_attachments is enabled. This may significantly increase export size."
+            errors.push(
+                "include_attachments is not implemented for pages exports yet. The current pipeline cannot extract attachment blobs from the source database."
                     .to_string(),
             );
         }
@@ -738,6 +738,24 @@ mod tests {
         assert_eq!(config.filters.agents, vec!["claude-code", "codex"]);
         assert_eq!(config.bundle.title, "My Archive");
         assert_eq!(config.deployment.target, "local");
+    }
+
+    #[test]
+    fn test_validate_rejects_include_attachments_until_supported() {
+        let json = r#"{
+            "encryption": {"password": "test-password-123"},
+            "bundle": {"include_attachments": true}
+        }"#;
+        let config: PagesConfig = serde_json::from_str(json).unwrap();
+        let validation = config.validate();
+
+        assert!(!validation.valid);
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|err| err.contains("include_attachments is not implemented"))
+        );
     }
 
     #[test]

@@ -15,6 +15,7 @@ let worker = null;
 let qrScanner = null;
 let strengthMeter = null;
 let isUnencryptedArchive = false;
+let tofuStatus = { valid: true, isFirstVisit: true };
 
 const SESSION_KEYS = {
     DEK: 'cass_session_dek',
@@ -56,7 +57,7 @@ async function init() {
     // Load configuration
     try {
         config = await loadConfig();
-        await displayFingerprint();
+        tofuStatus = await displayFingerprint();
     } catch (error) {
         showError('Failed to load archive configuration. The archive may be corrupted.');
         console.error('Config load error:', error);
@@ -149,8 +150,8 @@ function setupEventListeners() {
     elements.fingerprintHelp?.addEventListener('click', toggleFingerprintTooltip);
 
     // Lock button (re-lock archive)
-    elements.lockBtn?.addEventListener('click', lockArchive);
-    window.addEventListener('cass:lock', lockArchive);
+    elements.lockBtn?.addEventListener('click', handleLockButtonClick);
+    window.addEventListener('cass:lock', handleExternalLockEvent);
     window.addEventListener('cass:session-mode-change', (event) => {
         const mode = event?.detail?.mode;
         if (mode === StorageMode.MEMORY) {
@@ -182,9 +183,21 @@ async function loadConfig() {
     return response.json();
 }
 
-function getTofuKey(fingerprint) {
-    const seed = config?.export_id || fingerprint || 'default';
-    return `cass_fingerprint_${seed}`;
+function getArchiveTofuScope() {
+    try {
+        return new URL('./', window.location.href).href;
+    } catch (error) {
+        const href = typeof window?.location?.href === 'string'
+            ? window.location.href
+            : 'unknown';
+        return href.split('#')[0].split('?')[0];
+    }
+}
+
+function getTofuKey() {
+    // Scope TOFU to the archive location, not the archive's self-declared export_id.
+    // Otherwise a full archive swap at the same URL looks like a first visit.
+    return `cass_fingerprint_v2_${getArchiveTofuScope()}`;
 }
 
 /**
@@ -200,15 +213,17 @@ async function displayFingerprint() {
             elements.fingerprintValue.textContent = fingerprint;
 
             // TOFU verification
-            const result = await verifyTofu(fingerprint, getTofuKey(fingerprint));
+            const result = await verifyTofu(fingerprint, getTofuKey());
             displayTofuStatus(result);
+            return result;
         } else {
             // Fall back to config fingerprint
             const fingerprint = await computeFingerprint(JSON.stringify(config));
             elements.fingerprintValue.textContent = fingerprint;
 
-            const result = await verifyTofu(fingerprint, getTofuKey(fingerprint));
+            const result = await verifyTofu(fingerprint, getTofuKey());
             displayTofuStatus(result);
+            return result;
         }
     } catch (error) {
         // Use export_id as fallback fingerprint
@@ -219,6 +234,8 @@ async function displayFingerprint() {
         } else {
             elements.fingerprintValue.textContent = 'unavailable';
         }
+
+        return { valid: true, isFirstVisit: true };
     }
 }
 
@@ -390,7 +407,7 @@ function showTofuWarning(result) {
  * Accept new fingerprint (user acknowledges the change)
  */
 function acceptNewFingerprint(newFingerprint) {
-    const tofuKey = getTofuKey(newFingerprint);
+    const tofuKey = getTofuKey();
     try {
         localStorage.setItem(tofuKey, newFingerprint);
 
@@ -806,15 +823,63 @@ function getUnencryptedPayloadPath() {
 }
 
 /**
+ * Handle lock button click from the app header.
+ */
+function handleLockButtonClick(event) {
+    if (event) {
+        event.preventDefault();
+    }
+    void lockArchive({ broadcast: true, action: 'lock' });
+}
+
+/**
+ * Handle lock requests emitted by other modules.
+ */
+function handleExternalLockEvent(event) {
+    if (event?.detail?.source === 'auth') {
+        return;
+    }
+    void lockArchive({
+        broadcast: false,
+        action: event?.detail?.action || 'lock',
+    });
+}
+
+/**
+ * Best-effort close of the decrypted browser database before re-locking.
+ */
+async function closeLiveDatabase() {
+    try {
+        const dbModule = await import('./database.js');
+        dbModule.closeDatabase();
+    } catch (error) {
+        console.warn('Failed to close live database during lock:', error);
+    }
+}
+
+/**
  * Lock the archive (return to auth screen)
  */
-function lockArchive() {
+async function lockArchive(options = {}) {
+    const { broadcast = false, action = 'lock' } = options;
+
     // Clear session
     window.cassSession = null;
     clearStoredSession();
 
     // Tell worker to clear keys
     worker?.postMessage({ type: 'CLEAR_KEYS' });
+
+    if (broadcast) {
+        window.dispatchEvent(new CustomEvent('cass:lock', {
+            detail: {
+                action,
+                source: 'auth',
+            },
+        }));
+    }
+
+    await closeLiveDatabase();
 
     // Return to auth screen
     elements.appScreen.classList.add('hidden');
@@ -831,6 +896,11 @@ function lockArchive() {
  * Check for existing session on page load
  */
 function checkExistingSession() {
+    if (tofuStatus?.valid === false) {
+        clearStoredSession();
+        return;
+    }
+
     const restored = restoreSession();
     if (restored) {
         transitionToApp();

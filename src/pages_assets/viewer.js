@@ -124,6 +124,8 @@ function initializeViews() {
         onNavigate: handleRouteChange,
     });
 
+    window.addEventListener('cass:lock', handleGlobalLock);
+
     // Mark as initialized
     state.initialized = true;
 
@@ -498,9 +500,26 @@ function handleBackToSearch() {
 
 function handleSessionReset(action) {
     clearViewer();
-    clearSearch();
+    clearSearch({ reloadRecent: false });
     closeDatabase();
-    window.dispatchEvent(new CustomEvent('cass:lock', { detail: { action } }));
+    window.dispatchEvent(new CustomEvent('cass:lock', {
+        detail: { action, source: 'viewer' },
+    }));
+}
+
+function handleGlobalLock(event) {
+    if (event?.detail?.source === 'viewer') {
+        return;
+    }
+
+    clearViewer();
+    clearSearch({ reloadRecent: false });
+    state.view = 'search';
+    state.conversationId = null;
+    state.messageId = null;
+    state.searchQuery = '';
+    showViewContainer('search');
+    updateActiveNavLink('search');
 }
 
 /**

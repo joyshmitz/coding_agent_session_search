@@ -257,7 +257,6 @@ impl CloudflareDeployer {
         bundle_dir: P,
         mut progress: impl FnMut(&str, &str),
     ) -> Result<DeployResult> {
-        let bundle_dir = bundle_dir.as_ref();
         let branch = self.config.branch.clone();
         let account_id = self
             .config
@@ -285,9 +284,8 @@ impl CloudflareDeployer {
 
         // Step 2: Copy bundle to temp directory and add Cloudflare files
         progress("prepare", "Preparing deployment...");
-        let temp_dir = create_temp_dir()?;
+        let temp_dir = stage_deploy_dir(bundle_dir.as_ref())?;
         let deploy_dir = temp_dir.path().join("site");
-        copy_dir_recursive(bundle_dir, &deploy_dir)?;
 
         // Step 3: Generate Cloudflare-specific files
         progress("headers", "Generating COOP/COEP headers...");
@@ -401,6 +399,30 @@ fn create_temp_dir() -> Result<TempDeployDir> {
     let temp_dir = temp_base.join(dir_name);
     std::fs::create_dir_all(&temp_dir)?;
     Ok(TempDeployDir { path: temp_dir })
+}
+
+fn stage_deploy_dir(source_path: &Path) -> Result<TempDeployDir> {
+    let source_site_dir = resolve_deploy_site_dir(source_path)?;
+    let temp_dir = create_temp_dir()?;
+    let deploy_dir = temp_dir.path().join("site");
+    copy_dir_recursive(&source_site_dir, &deploy_dir)?;
+    Ok(temp_dir)
+}
+
+fn resolve_deploy_site_dir(path: &Path) -> Result<PathBuf> {
+    if path.file_name().map(|name| name == "site").unwrap_or(false) && path.is_dir() {
+        return Ok(path.to_path_buf());
+    }
+
+    let site_subdir = path.join("site");
+    if site_subdir.is_dir() {
+        return Ok(site_subdir);
+    }
+
+    bail!(
+        "expected a bundle root containing site/ or a site/ directory, got {}",
+        path.display()
+    );
 }
 
 fn apply_api_credentials(cmd: &mut Command, account_id: Option<&str>, api_token: Option<&str>) {
@@ -1488,6 +1510,41 @@ mod tests {
         };
 
         assert!(!temp_path.exists());
+    }
+
+    #[test]
+    fn test_stage_deploy_dir_resolves_bundle_root_without_copying_private_artifacts() {
+        use tempfile::TempDir;
+
+        let bundle_root = TempDir::new().unwrap();
+        let site_dir = bundle_root.path().join("site");
+        let private_dir = bundle_root.path().join("private");
+        std::fs::create_dir_all(&site_dir).unwrap();
+        std::fs::create_dir_all(&private_dir).unwrap();
+        std::fs::write(site_dir.join("index.html"), "<html></html>").unwrap();
+        std::fs::write(site_dir.join("config.json"), "{}").unwrap();
+        std::fs::write(private_dir.join("master-key.json"), "{\"secret\":true}").unwrap();
+
+        let staged = stage_deploy_dir(bundle_root.path()).unwrap();
+        let staged_site_dir = staged.path().join("site");
+
+        assert!(staged_site_dir.join("index.html").exists());
+        assert!(staged_site_dir.join("config.json").exists());
+        assert!(!staged_site_dir.join("private").exists());
+        assert!(!staged.path().join("private").exists());
+    }
+
+    #[test]
+    fn test_resolve_deploy_site_dir_rejects_non_bundle_directory() {
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("index.html"), "<html></html>").unwrap();
+
+        let err = resolve_deploy_site_dir(temp.path())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("expected a bundle root containing site/ or a site/ directory"));
     }
 
     #[test]

@@ -2932,6 +2932,10 @@ async fn execute_cli(
                             retryable: false,
                         })?;
 
+                        if include_attachments {
+                            pages_config.bundle.include_attachments = true;
+                        }
+
                         if let Some(target) = target {
                             pages_config.deployment.target = target.as_config_value().to_string();
                         }
@@ -3065,6 +3069,20 @@ async fn execute_cli(
                         })?;
 
                         return Ok(());
+                    }
+
+                    if include_attachments {
+                        return Err(CliError {
+                            code: 2,
+                            kind: "pages",
+                            message: "--include-attachments is not implemented for pages exports"
+                                .to_string(),
+                            hint: Some(
+                                "Remove --include-attachments. The current pages pipeline cannot extract attachment blobs from the source database yet."
+                                    .to_string(),
+                            ),
+                            retryable: false,
+                        });
                     }
 
                     // Handle --validate-config without --config

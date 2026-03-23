@@ -196,17 +196,11 @@ impl ProfilePreferences {
 
         let content = toml::to_string_pretty(self).context("Failed to serialize preferences")?;
 
-        // Atomic write: temp file then rename
-        let temp_path = path.with_extension("tmp");
+        // Atomic write: write to a unique temp file in the same directory, then replace.
+        let temp_path = unique_atomic_temp_path(&path);
         std::fs::write(&temp_path, &content)
             .with_context(|| format!("Failed to write {}", temp_path.display()))?;
-        std::fs::rename(&temp_path, &path).with_context(|| {
-            format!(
-                "Failed to rename {} to {}",
-                temp_path.display(),
-                path.display()
-            )
-        })?;
+        replace_file_from_temp(&temp_path, &path)?;
 
         Ok(())
     }
@@ -226,6 +220,101 @@ impl ProfilePreferences {
     pub fn effective_profile(&self) -> ShareProfile {
         self.last_used.unwrap_or(self.default_profile)
     }
+}
+
+fn replace_file_from_temp(temp_path: &std::path::Path, final_path: &std::path::Path) -> Result<()> {
+    if cfg!(windows) {
+        match std::fs::rename(temp_path, final_path) {
+            Ok(()) => Ok(()),
+            Err(first_err) if final_path.exists() => {
+                let backup_path = unique_atomic_backup_path(final_path);
+                std::fs::rename(final_path, &backup_path).with_context(|| {
+                    format!(
+                        "Failed preparing backup {} before replacing {} after {}",
+                        backup_path.display(),
+                        final_path.display(),
+                        first_err
+                    )
+                })?;
+
+                match std::fs::rename(temp_path, final_path) {
+                    Ok(()) => {
+                        let _ = std::fs::remove_file(&backup_path);
+                        Ok(())
+                    }
+                    Err(second_err) => match std::fs::rename(&backup_path, final_path) {
+                        Ok(()) => {
+                            let _ = std::fs::remove_file(temp_path);
+                            anyhow::bail!(
+                                "Failed replacing {} with {}: {}; restored original preferences",
+                                final_path.display(),
+                                temp_path.display(),
+                                second_err
+                            );
+                        }
+                        Err(restore_err) => {
+                            anyhow::bail!(
+                                "Failed replacing {} with {}: {}; restore error: {}; temp file retained at {}",
+                                final_path.display(),
+                                temp_path.display(),
+                                second_err,
+                                restore_err,
+                                temp_path.display()
+                            );
+                        }
+                    },
+                }
+            }
+            Err(err) => Err(err).with_context(|| {
+                format!(
+                    "Failed to rename {} to {}",
+                    temp_path.display(),
+                    final_path.display()
+                )
+            }),
+        }
+    } else {
+        std::fs::rename(temp_path, final_path).with_context(|| {
+            format!(
+                "Failed to rename {} to {}",
+                temp_path.display(),
+                final_path.display()
+            )
+        })
+    }
+}
+
+fn unique_atomic_temp_path(path: &std::path::Path) -> PathBuf {
+    unique_atomic_sidecar_path(path, "tmp", "profile_prefs.toml")
+}
+
+fn unique_atomic_backup_path(path: &std::path::Path) -> PathBuf {
+    unique_atomic_sidecar_path(path, "bak", "profile_prefs.toml")
+}
+
+fn unique_atomic_sidecar_path(
+    path: &std::path::Path,
+    suffix: &str,
+    fallback_name: &str,
+) -> PathBuf {
+    static NEXT_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let nonce = NEXT_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(fallback_name);
+
+    path.with_file_name(format!(
+        ".{file_name}.{suffix}.{}.{}.{}",
+        std::process::id(),
+        timestamp,
+        nonce
+    ))
 }
 
 /// Serializable version of RedactionConfig for persistence.
@@ -491,5 +580,34 @@ mod tests {
     fn test_preferences_path_uses_default_data_dir() {
         let path = ProfilePreferences::default_path().expect("default path");
         assert_eq!(path, crate::default_data_dir().join("profile_prefs.toml"));
+    }
+
+    #[test]
+    fn test_unique_atomic_temp_path_changes_each_call() {
+        let final_path = std::path::Path::new("/tmp/profile_prefs.toml");
+        let first = unique_atomic_temp_path(final_path);
+        let second = unique_atomic_temp_path(final_path);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn test_replace_file_from_temp_overwrites_existing_file() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let final_path = temp_dir.path().join("profile_prefs.toml");
+        let first_tmp = temp_dir.path().join("first.tmp");
+        let second_tmp = temp_dir.path().join("second.tmp");
+
+        std::fs::write(&first_tmp, "default_profile = \"team\"\n").unwrap();
+        replace_file_from_temp(&first_tmp, &final_path).unwrap();
+        assert!(final_path.exists());
+        assert!(!first_tmp.exists());
+
+        std::fs::write(&second_tmp, "default_profile = \"public\"\n").unwrap();
+        replace_file_from_temp(&second_tmp, &final_path).unwrap();
+
+        let content = std::fs::read_to_string(&final_path).unwrap();
+        assert!(content.contains("public"));
     }
 }

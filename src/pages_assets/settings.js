@@ -123,8 +123,8 @@ export async function render() {
                     <h3>Database Caching (OPFS)</h3>
                     ${opfsAvailable ? `
                         <p class="settings-description">
-                            Cache the decrypted database locally for faster loading.
-                            The cache is encrypted at rest and tied to this browser.
+                            Cache the decrypted database locally for faster browsing after unlock.
+                            This cache stays in this browser profile until you clear it.
                         </p>
 
                         <div class="setting-item">

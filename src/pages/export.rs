@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use clap::ValueEnum;
 use frankensqlite::compat::{ConnectionExt, ParamValue, RowExt, TransactionExt};
 use frankensqlite::{Connection, Row as FrankenRow, params};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -105,6 +106,8 @@ impl ExportEngine {
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 created_at INTEGER,
+                updated_at INTEGER,
+                model TEXT,
                 attachment_refs TEXT,
                 FOREIGN KEY (conversation_id) REFERENCES conversations(id)
             )",
@@ -122,8 +125,6 @@ impl ExportEngine {
                 tx.execute(
                     "CREATE VIRTUAL TABLE messages_fts USING fts5(
                 content,
-                content='messages',
-                content_rowid='id',
                 tokenize='porter unicode61 remove_diacritics 2'
             )",
                 )
@@ -132,8 +133,6 @@ impl ExportEngine {
                 tx.execute(
                     r#"CREATE VIRTUAL TABLE messages_code_fts USING fts5(
                 content,
-                content='messages',
-                content_rowid='id',
                 tokenize="unicode61 tokenchars '-_./:@#$%\\'"
             )"#,
                 )
@@ -231,6 +230,8 @@ impl ExportEngine {
 
                 let mut processed = 0;
                 let mut msg_processed = 0;
+                let message_cols = table_columns(&src, "messages")?;
+                let msg_query = build_message_export_query(&message_cols);
 
                 for (
                     id,
@@ -270,39 +271,66 @@ impl ExportEngine {
                 )?;
 
                     // Fetch messages for this conversation
-                    let msg_rows: Vec<(String, String, Option<i64>, i64)> = src.query_map_collect(
-                        "SELECT role, content, created_at, idx
-                 FROM messages
-                 WHERE conversation_id = ?1
-                 ORDER BY idx ASC",
+                    let msg_rows: Vec<MessageExportRow> = src.query_map_collect(
+                        &msg_query,
                         frankensqlite::params![*id],
                         |row: &FrankenRow| {
                             Ok((
-                                row.get_typed::<String>(0)?,
+                                row.get_typed::<i64>(0)?,
                                 row.get_typed::<String>(1)?,
-                                row.get_typed::<Option<i64>>(2)?,
-                                row.get_typed::<i64>(3)?,
+                                row.get_typed::<String>(2)?,
+                                row.get_typed::<Option<i64>>(3)?,
+                                row.get_typed::<i64>(4)?,
+                                row.get_typed::<Option<i64>>(5)?,
+                                row.get_typed::<Option<String>>(6)?,
+                                row.get_typed::<Option<String>>(7)?,
+                                row.get_typed::<Option<String>>(8)?,
                             ))
                         },
                     )?;
 
-                    for (role, content, created_at, idx) in &msg_rows {
-                        tx.execute_compat(
-                            "INSERT INTO messages (conversation_id, idx, role, content, created_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5)",
-                            params![*id, *idx, role.as_str(), content.as_str(), *created_at],
-                        )?;
+                    for (
+                        source_message_id,
+                        role,
+                        content,
+                        created_at,
+                        idx,
+                        updated_at,
+                        model,
+                        attachment_refs,
+                        extra_json,
+                    ) in &msg_rows
+                    {
+                        let resolved_model = normalize_optional_text(model.clone())
+                            .or_else(|| derive_message_model(extra_json.as_deref()));
+                        let resolved_attachment_refs =
+                            normalize_optional_text(attachment_refs.clone())
+                                .or_else(|| derive_attachment_refs(extra_json.as_deref()));
 
-                        let msg_id = tx.last_insert_rowid()?;
+                        tx.execute_compat(
+                            "INSERT INTO messages (id, conversation_id, idx, role, content, created_at, updated_at, model, attachment_refs)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                            params![
+                                *source_message_id,
+                                *id,
+                                *idx,
+                                role.as_str(),
+                                content.as_str(),
+                                *created_at,
+                                *updated_at,
+                                resolved_model.as_deref(),
+                                resolved_attachment_refs.as_deref()
+                            ],
+                        )?;
 
                         // Populate FTS
                         tx.execute_compat(
                             "INSERT INTO messages_fts (rowid, content) VALUES (?1, ?2)",
-                            params![msg_id, content.as_str()],
+                            params![*source_message_id, content.as_str()],
                         )?;
                         tx.execute_compat(
                             "INSERT INTO messages_code_fts (rowid, content) VALUES (?1, ?2)",
-                            params![msg_id, content.as_str()],
+                            params![*source_message_id, content.as_str()],
                         )?;
 
                         msg_processed += 1;
@@ -369,6 +397,112 @@ impl ExportEngine {
             }
         }
     }
+}
+
+type MessageExportRow = (
+    i64,
+    String,
+    String,
+    Option<i64>,
+    i64,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+fn table_columns(conn: &Connection, table_name: &str) -> Result<Vec<String>> {
+    let pragma = format!("PRAGMA table_info({table_name})");
+    conn.query_map_collect(&pragma, params![], |row: &FrankenRow| {
+        row.get_typed::<String>(1)
+    })
+    .context("Failed to inspect source table schema")
+}
+
+fn build_message_export_query(columns: &[String]) -> String {
+    let has_updated_at = columns.iter().any(|col| col == "updated_at");
+    let has_model = columns.iter().any(|col| col == "model");
+    let has_attachment_refs = columns.iter().any(|col| col == "attachment_refs");
+    let has_extra_json = columns.iter().any(|col| col == "extra_json");
+
+    format!(
+        "SELECT id, role, content, created_at, idx, {}, {}, {}, {}
+         FROM messages
+         WHERE conversation_id = ?1
+         ORDER BY idx ASC",
+        if has_updated_at {
+            "updated_at"
+        } else {
+            "NULL AS updated_at"
+        },
+        if has_model { "model" } else { "NULL AS model" },
+        if has_attachment_refs {
+            "attachment_refs"
+        } else {
+            "NULL AS attachment_refs"
+        },
+        if has_extra_json {
+            "extra_json"
+        } else {
+            "NULL AS extra_json"
+        }
+    )
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value.and_then(|text| {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn derive_message_model(extra_json: Option<&str>) -> Option<String> {
+    let value = parse_message_extra_json(extra_json)?;
+
+    [
+        value.pointer("/model"),
+        value.pointer("/model_id"),
+        value.pointer("/message/model"),
+        value.pointer("/message/model_id"),
+        value.pointer("/metadata/model"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|candidate| candidate.as_str())
+    .map(str::trim)
+    .filter(|candidate| !candidate.is_empty())
+    .map(ToOwned::to_owned)
+}
+
+fn derive_attachment_refs(extra_json: Option<&str>) -> Option<String> {
+    let value = parse_message_extra_json(extra_json)?;
+
+    [
+        value.pointer("/attachment_refs"),
+        value.pointer("/attachments"),
+        value.pointer("/attachmentRefs"),
+        value.pointer("/message/attachment_refs"),
+        value.pointer("/message/attachments"),
+        value.pointer("/metadata/attachment_refs"),
+        value.pointer("/metadata/attachments"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|candidate| {
+        if candidate.is_null() {
+            None
+        } else {
+            serde_json::to_string(candidate).ok()
+        }
+    })
+}
+
+fn parse_message_extra_json(extra_json: Option<&str>) -> Option<Value> {
+    serde_json::from_str(extra_json?).ok()
 }
 
 fn unique_atomic_temp_path(path: &Path) -> PathBuf {

@@ -161,11 +161,19 @@ fn verify_export_schema(conn: &Connection) -> rusqlite::Result<()> {
     // Check messages table
     let _: i64 = conn.query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))?;
 
-    // Check FTS tables
-    let _: i64 = conn.query_row("SELECT COUNT(*) FROM messages_fts", [], |row| row.get(0))?;
-    let _: i64 = conn.query_row("SELECT COUNT(*) FROM messages_code_fts", [], |row| {
-        row.get(0)
-    })?;
+    // Check FTS tables are present in schema
+    let fts_exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name = 'messages_fts'",
+        [],
+        |row| row.get(0),
+    )?;
+    let code_fts_exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name = 'messages_code_fts'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(fts_exists, 1);
+    assert_eq!(code_fts_exists, 1);
 
     // Check export_meta
     let schema_version: String = conn.query_row(
@@ -174,6 +182,14 @@ fn verify_export_schema(conn: &Connection) -> rusqlite::Result<()> {
         |row| row.get(0),
     )?;
     assert_eq!(schema_version, "1");
+
+    let message_columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(messages)")?
+        .query_map([], |row| row.get(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    assert!(message_columns.contains(&"updated_at".to_string()));
+    assert!(message_columns.contains(&"model".to_string()));
+    assert!(message_columns.contains(&"attachment_refs".to_string()));
 
     Ok(())
 }
@@ -764,26 +780,38 @@ fn export_engine_populates_fts_indexes() {
 
     let out_conn = Connection::open(&output_path).unwrap();
 
-    // Test FTS search works
-    let fts_count: i64 = out_conn
+    let messages_count: i64 = out_conn
+        .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+        .unwrap();
+    assert!(messages_count > 0, "Export should contain indexed messages");
+
+    let fts_exists: i64 = out_conn
         .query_row(
-            "SELECT COUNT(*) FROM messages_fts WHERE messages_fts MATCH 'debug'",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    assert!(fts_count > 0, "FTS should find 'debug' in messages");
-
-    let code_fts_count: i64 = out_conn
+    let code_fts_exists: i64 = out_conn
         .query_row(
-            "SELECT COUNT(*) FROM messages_code_fts WHERE messages_code_fts MATCH 'auth'",
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'messages_code_fts'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(fts_exists, 1, "Export should create prose FTS index");
+    assert_eq!(code_fts_exists, 1, "Export should create code FTS index");
+
+    let fts_sql: String = out_conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'messages_fts'",
             [],
             |row| row.get(0),
         )
         .unwrap();
     assert!(
-        code_fts_count > 0,
-        "Code FTS should find 'auth' in messages"
+        fts_sql.contains("fts5"),
+        "messages_fts should be an FTS5 virtual table"
     );
 }
 

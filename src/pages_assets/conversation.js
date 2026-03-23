@@ -7,6 +7,12 @@
  */
 
 import { getConversation, getConversationMessages, checkMemoryPressure, getMemoryUsage } from './database.js';
+import {
+    createAttachmentElement,
+    getMessageAttachments,
+    initAttachments,
+    reset as resetAttachments,
+} from './attachments.js';
 import { VariableHeightVirtualList } from './virtual-list.js';
 
 // Virtual scrolling configuration
@@ -45,6 +51,7 @@ let currentConversation = null;
 let currentMessages = [];
 let onBack = null;
 let messageVirtualList = null; // Virtual list for long conversations
+let attachmentState = createAttachmentState();
 
 // DOM element references
 let elements = {
@@ -61,6 +68,7 @@ let elements = {
 export function initConversationViewer(container, backCallback) {
     elements.container = container;
     onBack = backCallback;
+    window.addEventListener('cass:lock', handleArchiveLock);
 }
 
 /**
@@ -109,8 +117,48 @@ export async function loadConversation(conversationId, highlightMessageId = null
         showMemoryWarning();
     }
 
+    await ensureAttachmentsReady();
+
     // Render the view
     render(currentConversation, currentMessages, highlightMessageId);
+}
+
+function createAttachmentState() {
+    return {
+        ready: false,
+        available: false,
+        dek: null,
+        exportId: null,
+    };
+}
+
+async function ensureAttachmentsReady() {
+    if (attachmentState.ready) {
+        return attachmentState.available;
+    }
+
+    const session = window.cassSession;
+    const dekBase64 = session?.dek;
+    const exportIdBase64 = session?.config?.export_id;
+
+    if (!dekBase64 || !exportIdBase64) {
+        attachmentState.ready = true;
+        attachmentState.available = false;
+        return false;
+    }
+
+    try {
+        attachmentState.dek = base64ToBytes(dekBase64);
+        attachmentState.exportId = base64ToBytes(exportIdBase64);
+        const manifest = await initAttachments(attachmentState.dek, attachmentState.exportId);
+        attachmentState.available = Boolean(manifest?.entries?.length);
+    } catch (error) {
+        console.warn('[Conversation] Attachment manifest unavailable:', error);
+        attachmentState.available = false;
+    }
+
+    attachmentState.ready = true;
+    return attachmentState.available;
 }
 
 /**
@@ -219,6 +267,7 @@ function renderVirtualMessages(messages, highlightId) {
 function renderDirectMessages(messages, highlightId) {
     const html = messages.map((msg, idx) => renderMessage(msg, idx, msg.id === highlightId)).join('');
     elements.messagesList.innerHTML = html;
+    hydrateDirectMessageAttachments(messages);
 
     // Apply syntax highlighting
     applySyntaxHighlighting();
@@ -253,6 +302,8 @@ function createMessageElement(message, index, isHighlighted = false) {
             ${renderedContent}
         </div>
     `;
+
+    appendAttachmentsToMessage(article, message);
 
     // Apply syntax highlighting after element is created
     requestAnimationFrame(() => {
@@ -325,6 +376,59 @@ function renderMessage(message, index, isHighlighted = false) {
     `;
 }
 
+function hydrateDirectMessageAttachments(messages) {
+    if (!attachmentState.available) {
+        return;
+    }
+
+    const byId = new Map(messages.map(message => [String(message.id), message]));
+    const renderedMessages = elements.messagesList.querySelectorAll('.message[data-message-id]');
+
+    renderedMessages.forEach(messageElement => {
+        const message = byId.get(messageElement.dataset.messageId);
+        if (message) {
+            appendAttachmentsToMessage(messageElement, message);
+        }
+    });
+}
+
+function appendAttachmentsToMessage(messageElement, message) {
+    if (!attachmentState.available) {
+        return;
+    }
+
+    const attachments = getMessageAttachments(message.id);
+    if (!attachments.length) {
+        return;
+    }
+
+    const contentElement = messageElement.querySelector('.message-content');
+    if (!contentElement || contentElement.querySelector('.message-attachments')) {
+        return;
+    }
+
+    const attachmentsContainer = document.createElement('div');
+    attachmentsContainer.className = 'message-attachments';
+
+    const label = document.createElement('div');
+    label.className = 'message-attachments-label';
+    label.textContent = attachments.length === 1 ? 'Attachment' : 'Attachments';
+    attachmentsContainer.appendChild(label);
+
+    attachments.forEach(entry => {
+        attachmentsContainer.appendChild(
+            createAttachmentElement(entry, attachmentState.dek, attachmentState.exportId)
+        );
+    });
+
+    contentElement.appendChild(attachmentsContainer);
+}
+
+function handleArchiveLock() {
+    attachmentState = createAttachmentState();
+    resetAttachments();
+}
+
 /**
  * Set up event listeners
  */
@@ -372,6 +476,15 @@ function renderMarkdown(content) {
 
     // Fallback: simple markdown-like rendering
     return sanitizeHtml(simpleMarkdown(content));
+}
+
+function base64ToBytes(base64) {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+        bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
 }
 
 /**

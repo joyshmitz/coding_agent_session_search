@@ -847,7 +847,9 @@ export async function setSearchQuery(query, options = {}) {
 /**
  * Clear search and reset to initial state
  */
-export function clearSearch() {
+export function clearSearch(options = {}) {
+    const { reloadRecent = true } = options;
+
     clearTimeout(searchTimeout);
     currentQuery = '';
     currentFilters = { agent: null, since: null, until: null };
@@ -875,7 +877,17 @@ export function clearSearch() {
     // Reset search mode toggle
     setSearchMode('auto');
 
-    loadRecentConversations();
+    if (reloadRecent) {
+        loadRecentConversations();
+    } else {
+        hideNoResults();
+        if (elements.resultsList) {
+            elements.resultsList.innerHTML = '';
+        }
+        if (elements.resultCount) {
+            elements.resultCount.textContent = '';
+        }
+    }
 }
 
 /**

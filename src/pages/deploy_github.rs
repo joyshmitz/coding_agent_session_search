@@ -167,26 +167,27 @@ impl GitHubDeployer {
 
     /// Check size of bundle directory
     pub fn check_size(&self, bundle_dir: &Path) -> Result<SizeCheck> {
+        let bundle_dir = resolve_deploy_site_dir(bundle_dir)?;
         let mut total_bytes = 0u64;
         let mut file_count = 0usize;
         let mut large_files = Vec::new();
         let mut has_oversized = false;
 
-        visit_files(bundle_dir, &mut |path, size| {
+        visit_files(&bundle_dir, &mut |path, size| {
             total_bytes += size;
             file_count += 1;
 
             if size > MAX_FILE_SIZE_BYTES {
                 has_oversized = true;
                 let rel_path = path
-                    .strip_prefix(bundle_dir)
+                    .strip_prefix(bundle_dir.as_path())
                     .unwrap_or(path)
                     .to_string_lossy()
                     .to_string();
                 large_files.push((rel_path, size));
             } else if size > FILE_SIZE_WARNING_BYTES {
                 let rel_path = path
-                    .strip_prefix(bundle_dir)
+                    .strip_prefix(bundle_dir.as_path())
                     .unwrap_or(path)
                     .to_string_lossy()
                     .to_string();
@@ -213,7 +214,7 @@ impl GitHubDeployer {
         bundle_dir: P,
         mut progress: impl FnMut(&str, &str),
     ) -> Result<DeployResult> {
-        let bundle_dir = bundle_dir.as_ref();
+        let bundle_dir = resolve_deploy_site_dir(bundle_dir.as_ref())?;
 
         // Step 1: Check prerequisites
         progress("prereq", "Checking prerequisites...");
@@ -231,7 +232,7 @@ impl GitHubDeployer {
 
         // Step 2: Check size
         progress("size", "Checking bundle size...");
-        let size_check = self.check_size(bundle_dir)?;
+        let size_check = self.check_size(&bundle_dir)?;
 
         if size_check.exceeds_limit {
             bail!(
@@ -290,7 +291,7 @@ impl GitHubDeployer {
         // Step 5: Copy bundle contents
         progress("copy", "Copying bundle files...");
         let work_dir = temp_dir.join(&self.repo_name);
-        copy_bundle_to_repo(bundle_dir, &work_dir)?;
+        copy_bundle_to_repo(&bundle_dir, &work_dir)?;
         configure_git_identity(&work_dir, username)?;
 
         // Step 6: Create orphan branch and push
@@ -367,6 +368,22 @@ fn create_temp_dir() -> Result<PathBuf> {
     let temp_dir = temp_base.join(dir_name);
     std::fs::create_dir_all(&temp_dir)?;
     Ok(temp_dir)
+}
+
+fn resolve_deploy_site_dir(path: &Path) -> Result<PathBuf> {
+    if path.file_name().map(|name| name == "site").unwrap_or(false) && path.is_dir() {
+        return Ok(path.to_path_buf());
+    }
+
+    let site_subdir = path.join("site");
+    if site_subdir.is_dir() {
+        return Ok(site_subdir);
+    }
+
+    bail!(
+        "expected a bundle root containing site/ or a site/ directory, got {}",
+        path.display()
+    );
 }
 
 /// Get gh CLI version
@@ -520,6 +537,8 @@ fn clone_repo(repo_url: &str, dest: &Path) -> Result<()> {
 
 /// Copy bundle contents to repository directory
 fn copy_bundle_to_repo(bundle_dir: &Path, repo_dir: &Path) -> Result<()> {
+    let bundle_dir = resolve_deploy_site_dir(bundle_dir)?;
+
     // Clear existing files (except .git)
     if repo_dir.exists() {
         for entry in std::fs::read_dir(repo_dir)? {
@@ -538,7 +557,7 @@ fn copy_bundle_to_repo(bundle_dir: &Path, repo_dir: &Path) -> Result<()> {
     }
 
     // Copy bundle files
-    copy_dir_recursive(bundle_dir, repo_dir)?;
+    copy_dir_recursive(&bundle_dir, repo_dir)?;
 
     // Ensure .nojekyll exists
     let nojekyll = repo_dir.join(".nojekyll");
@@ -791,6 +810,38 @@ mod tests {
     }
 
     #[test]
+    fn test_size_check_resolves_bundle_root_without_counting_private_artifacts() {
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path().join("site");
+        let private_dir = temp.path().join("private");
+        std::fs::create_dir_all(&site_dir).unwrap();
+        std::fs::create_dir_all(&private_dir).unwrap();
+        std::fs::write(site_dir.join("index.html"), "abcd").unwrap();
+        std::fs::write(private_dir.join("master-key.json"), "secret").unwrap();
+
+        let deployer = GitHubDeployer::default();
+        let check = deployer.check_size(temp.path()).unwrap();
+
+        assert_eq!(check.file_count, 1);
+        assert_eq!(check.total_bytes, 4);
+    }
+
+    #[test]
+    fn test_resolve_deploy_site_dir_rejects_non_bundle_directory() {
+        use tempfile::TempDir;
+
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("index.html"), "<html></html>").unwrap();
+
+        let err = resolve_deploy_site_dir(temp.path())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("expected a bundle root containing site/ or a site/ directory"));
+    }
+
+    #[test]
     fn test_copy_dir_recursive() {
         use tempfile::TempDir;
 
@@ -806,6 +857,29 @@ mod tests {
 
         assert!(dst.path().join("root.txt").exists());
         assert!(dst.path().join("subdir/nested.txt").exists());
+    }
+
+    #[test]
+    fn test_copy_bundle_to_repo_resolves_bundle_root_without_copying_private_artifacts() {
+        use tempfile::TempDir;
+
+        let bundle_root = TempDir::new().unwrap();
+        let repo_dir = TempDir::new().unwrap();
+        let site_dir = bundle_root.path().join("site");
+        let private_dir = bundle_root.path().join("private");
+        std::fs::create_dir_all(&site_dir).unwrap();
+        std::fs::create_dir_all(&private_dir).unwrap();
+        std::fs::write(site_dir.join("index.html"), "<html></html>").unwrap();
+        std::fs::write(site_dir.join("config.json"), "{}").unwrap();
+        std::fs::write(private_dir.join("master-key.json"), "{\"secret\":true}").unwrap();
+
+        copy_bundle_to_repo(bundle_root.path(), repo_dir.path()).unwrap();
+
+        assert!(repo_dir.path().join("index.html").exists());
+        assert!(repo_dir.path().join("config.json").exists());
+        assert!(repo_dir.path().join(".nojekyll").exists());
+        assert!(!repo_dir.path().join("private").exists());
+        assert!(!repo_dir.path().join("site").exists());
     }
 
     #[test]
