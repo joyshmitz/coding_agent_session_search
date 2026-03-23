@@ -977,7 +977,7 @@ fn check_no_secrets(site_dir: &Path) -> CheckResult {
     // Check for forbidden files
     for file in SECRET_FILES {
         let path = site_dir.join(file);
-        if path.exists() {
+        if fs::symlink_metadata(&path).is_ok() {
             errors.push(format!("Secret file found in site/: {}", file));
         }
     }
@@ -985,8 +985,11 @@ fn check_no_secrets(site_dir: &Path) -> CheckResult {
     // Check for forbidden directories
     for dir in SECRET_DIRS {
         let path = site_dir.join(dir);
-        if path.exists() && path.is_dir() {
-            errors.push(format!("Secret directory found in site/: {}/", dir));
+        if let Ok(metadata) = fs::symlink_metadata(&path) {
+            let file_type = metadata.file_type();
+            if file_type.is_dir() || file_type.is_symlink() {
+                errors.push(format!("Secret directory found in site/: {}/", dir));
+            }
         }
     }
 
@@ -1543,6 +1546,60 @@ mod tests {
                 })
                 .unwrap_or(false),
             "secret-named symlink should still be reported: {:?}",
+            result.details
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_check_no_secrets_flags_top_level_secret_file_broken_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path().join("site");
+        fs::create_dir_all(&site_dir).unwrap();
+        symlink(
+            temp.path().join("missing-recovery-secret"),
+            site_dir.join("recovery-secret.txt"),
+        )
+        .unwrap();
+
+        let result = check_no_secrets(&site_dir);
+        assert!(!result.passed);
+        assert!(
+            result
+                .details
+                .as_ref()
+                .map(|details| details.contains("Secret file found in site/: recovery-secret.txt"))
+                .unwrap_or(false),
+            "top-level dangling secret symlink should still be reported: {:?}",
+            result.details
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_check_no_secrets_flags_top_level_secret_dir_broken_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path().join("site");
+        fs::create_dir_all(&site_dir).unwrap();
+        symlink(
+            temp.path().join("missing-private"),
+            site_dir.join("private"),
+        )
+        .unwrap();
+
+        let result = check_no_secrets(&site_dir);
+        assert!(!result.passed);
+        assert!(
+            result
+                .details
+                .as_ref()
+                .map(|details| details.contains("Secret directory found in site/: private/"))
+                .unwrap_or(false),
+            "top-level dangling private symlink should still be reported: {:?}",
             result.details
         );
     }
