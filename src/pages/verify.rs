@@ -1037,10 +1037,16 @@ fn find_secrets_recursive(base: &Path, current: &Path, findings: &mut Vec<String
 
     for entry in entries.flatten() {
         let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
         let name = match entry.file_name().to_str() {
             Some(n) => n.to_string(),
             None => continue,
         };
+        let is_secret_file = SECRET_FILES.contains(&name.as_str());
+        let is_secret_dir = SECRET_DIRS.contains(&name.as_str());
 
         let rel_path = path
             .strip_prefix(base)
@@ -1048,8 +1054,8 @@ fn find_secrets_recursive(base: &Path, current: &Path, findings: &mut Vec<String
             .to_string_lossy()
             .replace('\\', "/");
 
-        if path.is_dir() {
-            if SECRET_DIRS.contains(&name.as_str()) {
+        if file_type.is_dir() {
+            if is_secret_dir {
                 // Skip if this is a top-level match (already caught above)
                 if current != base {
                     findings.push(format!(
@@ -1058,9 +1064,24 @@ fn find_secrets_recursive(base: &Path, current: &Path, findings: &mut Vec<String
                     ));
                 }
             }
-            // Always recurse into subdirectories
+            // Only recurse into real directories. Symlinked directories are handled below
+            // so a malicious or accidental loop cannot drag verification outside site/.
             find_secrets_recursive(base, &path, findings);
-        } else if path.is_file() && SECRET_FILES.contains(&name.as_str()) {
+        } else if file_type.is_symlink() {
+            if is_secret_dir {
+                if current != base {
+                    findings.push(format!(
+                        "Secret directory found in site subdirectory: {}/",
+                        rel_path
+                    ));
+                }
+            } else if is_secret_file && current != base {
+                findings.push(format!(
+                    "Secret file found in site subdirectory: {}",
+                    rel_path
+                ));
+            }
+        } else if file_type.is_file() && is_secret_file {
             // Skip if this is a top-level match (already caught above)
             if current != base {
                 findings.push(format!(
@@ -1476,6 +1497,54 @@ mod tests {
 
         let result = verify_bundle(&site_dir, false).unwrap();
         assert!(!result.checks.no_secrets_in_site.passed);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_check_no_secrets_does_not_follow_symlinked_directories() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path().join("site");
+        let outside_dir = temp.path().join("outside");
+        fs::create_dir_all(&site_dir).unwrap();
+        fs::create_dir_all(outside_dir.join("private")).unwrap();
+        fs::write(outside_dir.join("private/recovery-secret.txt"), "secret").unwrap();
+        symlink(&outside_dir, site_dir.join("linked-assets")).unwrap();
+
+        let result = check_no_secrets(&site_dir);
+        assert!(
+            result.passed,
+            "symlink targets outside site/ should not be scanned as in-tree secrets: {:?}",
+            result.details
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_check_no_secrets_flags_secret_named_symlink_without_recursing() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let site_dir = temp.path().join("site");
+        let benign_dir = temp.path().join("benign");
+        fs::create_dir_all(site_dir.join("nested")).unwrap();
+        fs::create_dir_all(&benign_dir).unwrap();
+        symlink(&benign_dir, site_dir.join("nested/private")).unwrap();
+
+        let result = check_no_secrets(&site_dir);
+        assert!(!result.passed);
+        assert!(
+            result
+                .details
+                .as_ref()
+                .map(|details| {
+                    details.contains("Secret directory found in site subdirectory: nested/private/")
+                })
+                .unwrap_or(false),
+            "secret-named symlink should still be reported: {:?}",
+            result.details
+        );
     }
 
     #[test]
