@@ -59,7 +59,7 @@ const LEGACY_SESSION_KEYS = [
     'cass_session_expiry',
     'cass_unlocked',
 ];
-const ALL_ARCHIVE_SESSION_KEY_RE = /^cass_session_(?:dek|expiry|unlocked)_[0-9a-f]{8}$/;
+const ALL_ARCHIVE_SESSION_KEY_RE = /^cass_(?:session_(?:dek|expiry)|unlocked)_[0-9a-f]{8}$/;
 const ALL_ARCHIVE_TOFU_KEY_RE = /^cass_fingerprint_v2_[0-9a-f]{8}$/;
 
 // In-memory storage (fallback and default)
