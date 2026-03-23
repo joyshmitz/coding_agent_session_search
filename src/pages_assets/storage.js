@@ -67,6 +67,7 @@ const memoryStore = new Map();
 
 // Current storage mode
 let currentMode = StorageMode.MEMORY;
+let opfsEnabled = false;
 
 // OPFS directory handle (cached)
 let opfsRoot = null;
@@ -194,6 +195,7 @@ export async function initStorage() {
     console.log('[Storage] Initializing...');
 
     const savedMode = getStoredMode();
+    opfsEnabled = getPersistedOpfsEnabled();
     currentMode = savedMode;
     if (currentMode === StorageMode.OPFS) {
         if (!isOpfsEnabled()) {
@@ -233,10 +235,7 @@ export function getStoredMode() {
     return StorageMode.MEMORY;
 }
 
-/**
- * Check if OPFS persistence is enabled by user
- */
-export function isOpfsEnabled() {
+function getPersistedOpfsEnabled() {
     try {
         return localStorage.getItem(KEYS.OPFS_ENABLED) === 'true';
     } catch (e) {
@@ -245,19 +244,27 @@ export function isOpfsEnabled() {
 }
 
 /**
+ * Check if OPFS persistence is enabled by user
+ */
+export function isOpfsEnabled() {
+    return opfsEnabled;
+}
+
+/**
  * Persist OPFS opt-in preference
  */
 export function setOpfsEnabled(enabled) {
+    opfsEnabled = Boolean(enabled);
     try {
-        if (enabled) {
+        if (opfsEnabled) {
             localStorage.setItem(KEYS.OPFS_ENABLED, 'true');
         } else {
             localStorage.removeItem(KEYS.OPFS_ENABLED);
         }
     } catch (e) {
-        // Ignore
+        console.warn('[Storage] Could not persist OPFS preference');
     }
-    return enabled;
+    return opfsEnabled;
 }
 
 /**

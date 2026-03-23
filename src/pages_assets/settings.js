@@ -592,6 +592,9 @@ async function handleResetSession() {
 
     try {
         const storageCleared = await clearAllStorage();
+        await setStorageMode(StorageMode.MEMORY);
+        setOpfsEnabled(false);
+        window.dispatchEvent(new CustomEvent('cass:session-mode-change', { detail: { mode: StorageMode.MEMORY } }));
         if (onSessionReset) {
             onSessionReset('reset');
         }

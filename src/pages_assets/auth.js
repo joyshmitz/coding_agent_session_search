@@ -6,7 +6,7 @@
  */
 
 import { createStrengthMeter } from './password-strength.js';
-import { StorageMode, getArchiveScopeId, getStoredMode, isOpfsEnabled } from './storage.js';
+import { StorageMode, getArchiveScopeId, getStorageMode, getStoredMode, isOpfsEnabled } from './storage.js';
 import { SESSION_CONFIG } from './session.js';
 
 // State
@@ -211,7 +211,7 @@ function broadcastAuthLock(action = 'lock') {
 }
 
 function isCurrentWorkerMessage(type, requestId) {
-    if (requestId == null) {
+    if (requestId === null || requestId === undefined) {
         return true;
     }
 
@@ -1136,6 +1136,15 @@ function checkExistingSession() {
 }
 
 function getPreferredSessionMode() {
+    const currentMode = getStorageMode();
+    if (
+        currentMode === StorageMode.MEMORY
+        || currentMode === StorageMode.SESSION
+        || currentMode === StorageMode.LOCAL
+    ) {
+        return currentMode;
+    }
+
     const savedMode = getStoredMode();
     if (
         savedMode === StorageMode.MEMORY
