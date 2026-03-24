@@ -227,6 +227,24 @@ impl SyncReport {
     pub fn failed_paths(&self) -> usize {
         self.path_results.iter().filter(|r| !r.success).count()
     }
+
+    /// Summarize the overall sync outcome.
+    pub fn sync_result(&self) -> SyncResult {
+        if self.all_succeeded {
+            SyncResult::Success
+        } else {
+            let errors: Vec<String> = self
+                .path_results
+                .iter()
+                .filter_map(|r| r.error.clone())
+                .collect();
+            if self.successful_paths() > 0 {
+                SyncResult::PartialFailure(errors.join("; "))
+            } else {
+                SyncResult::Failed(errors.join("; "))
+            }
+        }
+    }
 }
 
 /// Statistics parsed from rsync output.
@@ -1610,6 +1628,26 @@ pub enum SyncResult {
     Skipped,
 }
 
+impl SyncResult {
+    /// Short display label for the result.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::PartialFailure(_) => "partial",
+            Self::Failed(_) => "failed",
+            Self::Skipped => "never",
+        }
+    }
+
+    /// Error text for partial/full failures.
+    pub fn error_message(&self) -> Option<&str> {
+        match self {
+            Self::PartialFailure(error) | Self::Failed(error) => Some(error.as_str()),
+            Self::Success | Self::Skipped => None,
+        }
+    }
+}
+
 /// Sync information for a single source.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SourceSyncInfo {
@@ -1623,6 +1661,19 @@ pub struct SourceSyncInfo {
     pub bytes_transferred: u64,
     /// Duration of last sync in milliseconds.
     pub duration_ms: u64,
+}
+
+impl SourceSyncInfo {
+    /// Build sync info from a sync report using the current wall clock time.
+    pub fn from_report(report: &SyncReport) -> Self {
+        Self {
+            last_sync: Some(current_unix_ms()),
+            last_result: report.sync_result(),
+            files_synced: report.total_files(),
+            bytes_transferred: report.total_bytes(),
+            duration_ms: report.total_duration_ms,
+        }
+    }
 }
 
 /// Persistent sync status for all sources.
@@ -1661,40 +1712,12 @@ impl SyncStatus {
 
     /// Update status for a source from a sync report.
     pub fn update(&mut self, source_name: &str, report: &SyncReport) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        let now = i64::try_from(now).unwrap_or(i64::MAX);
+        self.set_info(source_name, SourceSyncInfo::from_report(report));
+    }
 
-        let result = if report.all_succeeded {
-            SyncResult::Success
-        } else if report.successful_paths() > 0 {
-            let errors: Vec<String> = report
-                .path_results
-                .iter()
-                .filter_map(|r| r.error.clone())
-                .collect();
-            SyncResult::PartialFailure(errors.join("; "))
-        } else {
-            let errors: Vec<String> = report
-                .path_results
-                .iter()
-                .filter_map(|r| r.error.clone())
-                .collect();
-            SyncResult::Failed(errors.join("; "))
-        };
-
-        self.sources.insert(
-            source_name.to_string(),
-            SourceSyncInfo {
-                last_sync: Some(now),
-                last_result: result,
-                files_synced: report.total_files(),
-                bytes_transferred: report.total_bytes(),
-                duration_ms: report.total_duration_ms,
-            },
-        );
+    /// Set status for a source from precomputed sync info.
+    pub fn set_info(&mut self, source_name: &str, info: SourceSyncInfo) {
+        self.sources.insert(source_name.to_string(), info);
     }
 
     /// Get sync info for a source.
@@ -1706,6 +1729,14 @@ impl SyncStatus {
     fn status_path(data_dir: &Path) -> PathBuf {
         data_dir.join("sync_status.json")
     }
+}
+
+fn current_unix_ms() -> i64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    i64::try_from(now).unwrap_or(i64::MAX)
 }
 
 fn unique_atomic_temp_path(path: &Path) -> PathBuf {
@@ -2034,6 +2065,7 @@ Total transferred file size: 1,234 bytes
     fn test_sync_result_default() {
         let result = SyncResult::default();
         assert!(matches!(result, SyncResult::Skipped));
+        assert_eq!(result.label(), "never");
     }
 
     #[test]

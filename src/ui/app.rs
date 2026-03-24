@@ -4271,6 +4271,55 @@ pub struct SourcesViewState {
     pub status: String,
 }
 
+fn format_source_sync_status(report: &crate::sources::SyncReport) -> String {
+    match report.sync_result() {
+        crate::sources::SyncResult::Success => format!(
+            "Sync '{}' OK: {} files, {} bytes",
+            report.source_name,
+            report.total_files(),
+            report.total_bytes()
+        ),
+        crate::sources::SyncResult::PartialFailure(error) => {
+            let total_paths = report.successful_paths() + report.failed_paths();
+            if error.is_empty() {
+                format!(
+                    "Sync '{}' partial: {}/{} paths OK",
+                    report.source_name,
+                    report.successful_paths(),
+                    total_paths
+                )
+            } else {
+                format!(
+                    "Sync '{}' partial: {}/{} paths OK ({error})",
+                    report.source_name,
+                    report.successful_paths(),
+                    total_paths
+                )
+            }
+        }
+        crate::sources::SyncResult::Failed(error) => {
+            if error.is_empty() {
+                format!("Sync '{}' failed", report.source_name)
+            } else {
+                format!("Sync '{}' failed: {error}", report.source_name)
+            }
+        }
+        crate::sources::SyncResult::Skipped => format!("Sync '{}' skipped", report.source_name),
+    }
+}
+
+fn apply_source_sync_info_to_item(
+    item: &mut SourcesViewItem,
+    info: &crate::sources::SourceSyncInfo,
+) {
+    item.last_sync = info.last_sync;
+    item.last_result = info.last_result.label().into();
+    item.files_synced = info.files_synced;
+    item.bytes_transferred = info.bytes_transferred;
+    item.doctor_summary = None;
+    item.error = info.last_result.error_message().map(str::to_owned);
+}
+
 // =========================================================================
 // CassApp — the ftui Model
 // =========================================================================
@@ -12219,12 +12268,6 @@ impl CassApp {
 
         for src in &config.sources {
             let info = sync_status.sources.get(&src.name);
-            let last_result_str = match info.map(|i| &i.last_result) {
-                Some(crate::sources::SyncResult::Success) => "success",
-                Some(crate::sources::SyncResult::PartialFailure(_)) => "partial",
-                Some(crate::sources::SyncResult::Failed(_)) => "failed",
-                Some(crate::sources::SyncResult::Skipped) | None => "never",
-            };
             items.push(SourcesViewItem {
                 name: src.name.clone(),
                 kind: src.source_type,
@@ -12232,12 +12275,15 @@ impl CassApp {
                 schedule: format!("{:?}", src.sync_schedule).to_lowercase(),
                 path_count: src.paths.len(),
                 last_sync: info.and_then(|i| i.last_sync),
-                last_result: last_result_str.into(),
+                last_result: info
+                    .map(|i| i.last_result.label())
+                    .unwrap_or("never")
+                    .into(),
                 files_synced: info.map(|i| i.files_synced).unwrap_or(0),
                 bytes_transferred: info.map(|i| i.bytes_transferred).unwrap_or(0),
                 busy: false,
                 doctor_summary: None,
-                error: None,
+                error: info.and_then(|i| i.last_result.error_message().map(str::to_owned)),
             });
         }
 
@@ -12913,11 +12959,8 @@ pub enum CassMsg {
     SourcesRefreshed,
     /// Trigger sync for the selected source (by name).
     SourceSyncRequested(String),
-    /// Sync completed with a result message.
-    SourceSyncCompleted {
-        source_name: String,
-        message: String,
-    },
+    /// Sync completed with a structured result report.
+    SourceSyncCompleted { report: crate::sources::SyncReport },
     /// Trigger doctor diagnostics for the selected source.
     SourceDoctorRequested(String),
     /// Doctor diagnostics completed.
@@ -18932,35 +18975,22 @@ impl super::ftui_adapter::Model for CassApp {
                         let source_def = source_def.clone();
                         ftui::Cmd::task(move || {
                             let engine = SyncEngine::new(&data_dir);
-                            match engine.sync_source(&source_def) {
-                                Ok(report) => {
-                                    let msg = if report.all_succeeded {
-                                        format!(
-                                            "Sync '{}' OK: {} files, {} bytes",
-                                            source_name,
-                                            report.total_files(),
-                                            report.total_bytes()
-                                        )
-                                    } else {
-                                        format!(
-                                            "Sync '{}' partial: {}/{} paths OK",
-                                            source_name,
-                                            report.successful_paths(),
-                                            report.successful_paths() + report.failed_paths()
-                                        )
-                                    };
-                                    CassMsg::SourceSyncCompleted {
-                                        source_name,
-                                        message: msg,
-                                    }
-                                }
-                                Err(e) => CassMsg::SourceSyncCompleted {
-                                    source_name,
-                                    message: format!("Sync failed: {e}"),
-                                },
-                            }
+                            let report = engine.sync_source(&source_def).unwrap_or_else(|error| {
+                                crate::sources::SyncReport::failed(source_name.clone(), error)
+                            });
+                            CassMsg::SourceSyncCompleted { report }
                         })
                     } else {
+                        if let Some(item) = self
+                            .sources_view
+                            .items
+                            .iter_mut()
+                            .find(|item| item.name == source_name)
+                        {
+                            item.busy = false;
+                            item.error =
+                                Some("Source no longer exists in sources config".to_string());
+                        }
                         self.sources_view.status =
                             format!("Source '{source_name}' not found in config");
                         ftui::Cmd::none()
@@ -18973,12 +19003,10 @@ impl super::ftui_adapter::Model for CassApp {
                     ftui::Cmd::none()
                 }
             }
-            CassMsg::SourceSyncCompleted {
-                ref source_name,
-                ref message,
-            } => {
-                let source_name = source_name.clone();
-                let message = message.clone();
+            CassMsg::SourceSyncCompleted { ref report } => {
+                let source_name = report.source_name.clone();
+                let sync_info = crate::sources::SourceSyncInfo::from_report(report);
+                let base_status_message = format_source_sync_status(report);
                 if let Some(item) = self
                     .sources_view
                     .items
@@ -18986,8 +19014,33 @@ impl super::ftui_adapter::Model for CassApp {
                     .find(|i| i.name == source_name)
                 {
                     item.busy = false;
+                    apply_source_sync_info_to_item(item, &sync_info);
                 }
-                self.sources_view.status = message;
+                #[cfg(not(test))]
+                {
+                    use crate::sources::SyncStatus;
+
+                    let status_message = match SyncStatus::load(&self.data_dir) {
+                        Ok(mut persisted_status) => {
+                            persisted_status.set_info(&source_name, sync_info);
+                            if let Err(error) = persisted_status.save(&self.data_dir) {
+                                format!(
+                                    "{base_status_message} (warning: failed to save sync status: {error})"
+                                )
+                            } else {
+                                base_status_message
+                            }
+                        }
+                        Err(error) => format!(
+                            "{base_status_message} (warning: failed to load sync status: {error})"
+                        ),
+                    };
+                    self.sources_view.status = status_message;
+                }
+                #[cfg(test)]
+                {
+                    self.sources_view.status = base_status_message;
+                }
                 ftui::Cmd::none()
             }
             CassMsg::SourceDoctorRequested(ref name) => {
@@ -36936,6 +36989,21 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
     // Sources management tests (2noh9.4.9)
     // =========================================================================
 
+    fn make_sync_report(
+        source_name: &str,
+        path_results: Vec<crate::sources::PathSyncResult>,
+        total_duration_ms: u64,
+    ) -> crate::sources::SyncReport {
+        let all_succeeded = path_results.iter().all(|result| result.success);
+        crate::sources::SyncReport {
+            source_name: source_name.to_string(),
+            method: crate::sources::SyncMethod::Rsync,
+            path_results,
+            total_duration_ms,
+            all_succeeded,
+        }
+    }
+
     #[test]
     fn sources_entered_switches_surface() {
         let mut app = CassApp::default();
@@ -37038,7 +37106,7 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
     }
 
     #[test]
-    fn sources_sync_completed_clears_busy() {
+    fn sources_sync_completed_updates_row_state_on_success() {
         let mut app = CassApp::default();
         app.sources_view.items = vec![SourcesViewItem {
             name: "laptop".into(),
@@ -37051,16 +37119,123 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
             files_synced: 0,
             bytes_transferred: 0,
             busy: true,
+            doctor_summary: Some((3, 1, 0)),
+            error: Some("stale error".into()),
+        }];
+
+        let report = make_sync_report(
+            "laptop",
+            vec![crate::sources::PathSyncResult {
+                remote_path: "~/sessions".into(),
+                files_transferred: 42,
+                bytes_transferred: 1024,
+                success: true,
+                duration_ms: 15,
+                ..Default::default()
+            }],
+            15,
+        );
+
+        let _ = app.update(CassMsg::SourceSyncCompleted { report });
+        let item = &app.sources_view.items[0];
+        assert!(!item.busy);
+        assert!(item.last_sync.is_some());
+        assert_eq!(item.last_result, "success");
+        assert_eq!(item.files_synced, 42);
+        assert_eq!(item.bytes_transferred, 1024);
+        assert_eq!(item.doctor_summary, None);
+        assert_eq!(item.error, None);
+        assert!(app.sources_view.status.contains("Sync 'laptop' OK"));
+    }
+
+    #[test]
+    fn sources_sync_completed_updates_row_state_on_partial_failure() {
+        let mut app = CassApp::default();
+        app.sources_view.items = vec![SourcesViewItem {
+            name: "laptop".into(),
+            kind: crate::sources::SourceKind::Ssh,
+            host: Some("user@laptop".into()),
+            schedule: "manual".into(),
+            path_count: 2,
+            last_sync: None,
+            last_result: "never".into(),
+            files_synced: 0,
+            bytes_transferred: 0,
+            busy: true,
+            doctor_summary: Some((2, 0, 0)),
+            error: None,
+        }];
+
+        let report = make_sync_report(
+            "laptop",
+            vec![
+                crate::sources::PathSyncResult {
+                    remote_path: "~/sessions".into(),
+                    files_transferred: 7,
+                    bytes_transferred: 2048,
+                    success: true,
+                    duration_ms: 12,
+                    ..Default::default()
+                },
+                crate::sources::PathSyncResult {
+                    remote_path: "~/logs".into(),
+                    success: false,
+                    error: Some("permission denied".into()),
+                    duration_ms: 3,
+                    ..Default::default()
+                },
+            ],
+            15,
+        );
+
+        let _ = app.update(CassMsg::SourceSyncCompleted { report });
+        let item = &app.sources_view.items[0];
+        assert!(!item.busy);
+        assert!(item.last_sync.is_some());
+        assert_eq!(item.last_result, "partial");
+        assert_eq!(item.files_synced, 7);
+        assert_eq!(item.bytes_transferred, 2048);
+        assert_eq!(item.doctor_summary, None);
+        assert_eq!(item.error.as_deref(), Some("permission denied"));
+        assert!(app.sources_view.status.contains("partial"));
+        assert!(app.sources_view.status.contains("permission denied"));
+    }
+
+    #[test]
+    fn sources_sync_completed_updates_row_state_on_failure() {
+        let mut app = CassApp::default();
+        app.sources_view.items = vec![SourcesViewItem {
+            name: "laptop".into(),
+            kind: crate::sources::SourceKind::Ssh,
+            host: Some("user@laptop".into()),
+            schedule: "manual".into(),
+            path_count: 1,
+            last_sync: None,
+            last_result: "never".into(),
+            files_synced: 99,
+            bytes_transferred: 4096,
+            busy: true,
             doctor_summary: None,
             error: None,
         }];
 
-        let _ = app.update(CassMsg::SourceSyncCompleted {
-            source_name: "laptop".into(),
-            message: "Synced 42 files".into(),
-        });
-        assert!(!app.sources_view.items[0].busy);
-        assert_eq!(app.sources_view.status, "Synced 42 files");
+        let report =
+            crate::sources::SyncReport::failed("laptop", crate::sources::SyncError::NoHost);
+
+        let _ = app.update(CassMsg::SourceSyncCompleted { report });
+        let item = &app.sources_view.items[0];
+        assert!(!item.busy);
+        assert!(item.last_sync.is_some());
+        assert_eq!(item.last_result, "failed");
+        assert_eq!(item.files_synced, 0);
+        assert_eq!(item.bytes_transferred, 0);
+        assert_eq!(item.error.as_deref(), Some("Source has no host configured"));
+        assert!(app.sources_view.status.contains("failed"));
+        assert!(
+            app.sources_view
+                .status
+                .contains("Source has no host configured")
+        );
     }
 
     #[test]
