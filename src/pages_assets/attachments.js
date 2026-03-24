@@ -37,8 +37,18 @@ function isCurrentEpoch(epoch) {
     return epoch === attachmentEpoch;
 }
 
+function createAttachmentError(message, code) {
+    const error = new Error(message);
+    error.code = code;
+    return error;
+}
+
 function createInvalidationError() {
-    return new Error('Attachment request invalidated');
+    return createAttachmentError('Attachment request invalidated', 'ATTACHMENT_REQUEST_INVALIDATED');
+}
+
+function shouldCacheManifestAbsence(error) {
+    return error?.code === 'ATTACHMENT_MANIFEST_ABSENT';
 }
 
 /**
@@ -71,12 +81,12 @@ export async function initAttachments(dek, exportId) {
             isManifestLoaded = true;
             return manifest;
         } catch (error) {
-            if (error.message !== 'Attachment request invalidated') {
+            if (error?.code !== 'ATTACHMENT_REQUEST_INVALIDATED') {
                 console.warn('[Attachments] No attachments found or manifest failed:', error.message);
             }
             if (isCurrentEpoch(epoch)) {
                 manifest = null;
-                isManifestLoaded = true;
+                isManifestLoaded = shouldCacheManifestAbsence(error);
             }
             return null;
         } finally {
@@ -95,7 +105,13 @@ export async function initAttachments(dek, exportId) {
 async function loadManifest(dek, exportId) {
     const response = await fetch('./blobs/manifest.enc');
     if (!response.ok) {
-        throw new Error('Manifest not found');
+        if (response.status === 404) {
+            throw createAttachmentError('Manifest not found', 'ATTACHMENT_MANIFEST_ABSENT');
+        }
+        throw createAttachmentError(
+            `Failed to load attachment manifest: ${response.status}`,
+            'ATTACHMENT_MANIFEST_FETCH_FAILED'
+        );
     }
 
     const ciphertext = new Uint8Array(await response.arrayBuffer());
@@ -130,7 +146,10 @@ async function loadManifest(dek, exportId) {
     try {
         parsedManifest = JSON.parse(manifestJson);
     } catch (error) {
-        throw new Error(`Invalid attachment manifest JSON: ${error.message}`);
+        throw createAttachmentError(
+            `Invalid attachment manifest JSON: ${error.message}`,
+            'ATTACHMENT_MANIFEST_INVALID'
+        );
     }
     return validateManifest(parsedManifest);
 }
@@ -574,7 +593,7 @@ async function loadImageAttachment(container, img, hash, mimeType, dek, exportId
         img.classList.remove('hidden');
         container.classList.add('loaded');
     } catch (error) {
-        if (error.message === 'Attachment request invalidated') {
+        if (error?.code === 'ATTACHMENT_REQUEST_INVALIDATED') {
             return;
         }
         console.error('[Attachments] Failed to load image:', error);
@@ -646,7 +665,7 @@ async function downloadAttachment(entry, dek, exportId) {
         a.click();
         document.body.removeChild(a);
     } catch (error) {
-        if (error.message === 'Attachment request invalidated') {
+        if (error?.code === 'ATTACHMENT_REQUEST_INVALIDATED') {
             return;
         }
         console.error('[Attachments] Failed to download:', error);

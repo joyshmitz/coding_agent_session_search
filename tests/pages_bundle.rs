@@ -875,6 +875,30 @@ mod tests {
     }
 
     #[test]
+    fn test_attachment_manifest_failures_only_cache_true_absence() {
+        let attachments_js = include_str!("../src/pages_assets/attachments.js");
+        assert!(
+            attachments_js.contains("function shouldCacheManifestAbsence(error) {")
+                && attachments_js.contains("return error?.code === 'ATTACHMENT_MANIFEST_ABSENT';")
+                && attachments_js.contains("isManifestLoaded = shouldCacheManifestAbsence(error);"),
+            "attachment init should only memoize true manifest absence instead of treating every manifest failure as a permanent no-attachments state"
+        );
+        assert!(
+            attachments_js.contains("if (response.status === 404) {")
+                && attachments_js.contains(
+                    "throw createAttachmentError('Manifest not found', 'ATTACHMENT_MANIFEST_ABSENT');"
+                )
+                && attachments_js.contains("'ATTACHMENT_MANIFEST_FETCH_FAILED'")
+                && attachments_js.contains("'ATTACHMENT_MANIFEST_INVALID'"),
+            "attachment manifest loading should distinguish missing manifests from retryable fetch or parse failures"
+        );
+        assert!(
+            attachments_js.contains("if (error?.code === 'ATTACHMENT_REQUEST_INVALIDATED') {"),
+            "attachment invalidation handling should use stable error codes instead of brittle string matching"
+        );
+    }
+
+    #[test]
     fn test_worker_message_paths_guard_malformed_payloads_and_report_generic_failures() {
         let auth_js = include_str!("../src/pages_assets/auth.js");
         assert!(
