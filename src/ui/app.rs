@@ -12246,6 +12246,7 @@ impl CassApp {
         sync_status: &crate::sources::SyncStatus,
         config_path: String,
     ) {
+        let previous_status = self.sources_view.status.clone();
         let previous_selected = self.sources_view.selected;
         let previous_selected_name = self
             .sources_view
@@ -12311,13 +12312,18 @@ impl CassApp {
             .as_deref()
             .and_then(|name| items.iter().position(|item| item.name == name))
             .unwrap_or_else(|| previous_selected.min(count.saturating_sub(1)));
+        let status = if items.iter().any(|item| item.busy) {
+            previous_status
+        } else {
+            format!("{count} source(s) configured")
+        };
         self.sources_view = SourcesViewState {
             items,
             selected,
             scroll: previous_scroll.min(count.saturating_sub(1)),
             busy: false,
             config_path,
-            status: format!("{count} source(s) configured"),
+            status,
         };
         self.ensure_sources_selection_visible();
     }
@@ -19021,7 +19027,9 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::SourcesRefreshed => {
                 #[cfg(not(test))]
                 self.load_sources_view();
-                self.sources_view.status = "Sources refreshed".into();
+                if !self.sources_view.items.iter().any(|item| item.busy) {
+                    self.sources_view.status = "Sources refreshed".into();
+                }
                 ftui::Cmd::none()
             }
             CassMsg::SourcesSelectionMoved { delta } => {
@@ -37524,6 +37532,53 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
     }
 
     #[test]
+    fn rebuild_sources_view_preserves_busy_status_message() {
+        let mut app = CassApp::default();
+        app.sources_view.status = "Syncing 'beta'...".into();
+        app.sources_view.items = vec![
+            SourcesViewItem {
+                name: "local".into(),
+                kind: crate::sources::SourceKind::Local,
+                host: None,
+                schedule: "always".into(),
+                path_count: 0,
+                last_sync: None,
+                last_result: "n/a".into(),
+                files_synced: 0,
+                bytes_transferred: 0,
+                busy: false,
+                doctor_summary: None,
+                error: None,
+            },
+            SourcesViewItem {
+                name: "beta".into(),
+                kind: crate::sources::SourceKind::Ssh,
+                host: Some("user@beta".into()),
+                schedule: "manual".into(),
+                path_count: 1,
+                last_sync: None,
+                last_result: "never".into(),
+                files_synced: 0,
+                bytes_transferred: 0,
+                busy: true,
+                doctor_summary: None,
+                error: None,
+            },
+        ];
+        app.sources_view.selected = 1;
+
+        let config = crate::sources::SourcesConfig {
+            sources: vec![crate::sources::SourceDefinition::ssh("beta", "user@beta")],
+        };
+        let sync_status = crate::sources::SyncStatus::default();
+
+        app.rebuild_sources_view(&config, &sync_status, "/tmp/sources.toml".into());
+
+        assert_eq!(app.sources_view.status, "Syncing 'beta'...");
+        assert!(app.sources_view.items[1].busy);
+    }
+
+    #[test]
     fn sources_sync_requested_marks_busy() {
         let mut app = CassApp::default();
         app.sources_view.items = vec![SourcesViewItem {
@@ -37706,6 +37761,30 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         assert!(!app.sources_view.items[0].busy);
         assert_eq!(app.sources_view.items[0].doctor_summary, Some((3, 1, 0)));
         assert!(app.sources_view.status.contains("3 pass"));
+    }
+
+    #[test]
+    fn sources_refreshed_keeps_active_status_when_row_busy() {
+        let mut app = CassApp::default();
+        app.sources_view.status = "Running doctor on 'laptop'...".into();
+        app.sources_view.items = vec![SourcesViewItem {
+            name: "laptop".into(),
+            kind: crate::sources::SourceKind::Ssh,
+            host: Some("user@laptop".into()),
+            schedule: "manual".into(),
+            path_count: 1,
+            last_sync: None,
+            last_result: "never".into(),
+            files_synced: 0,
+            bytes_transferred: 0,
+            busy: true,
+            doctor_summary: None,
+            error: None,
+        }];
+
+        let _ = app.update(CassMsg::SourcesRefreshed);
+
+        assert_eq!(app.sources_view.status, "Running doctor on 'laptop'...");
     }
 
     #[test]
