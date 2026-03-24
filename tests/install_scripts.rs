@@ -392,10 +392,6 @@ fn find_powershell() -> Option<String> {
 
 #[test]
 fn install_ps1_succeeds_with_valid_checksum() {
-    if !cfg!(target_os = "windows") {
-        eprintln!("skipping powershell test: non-windows runner");
-        return;
-    }
     let Some(ps) = find_powershell() else {
         eprintln!("skipping powershell test: pwsh not found");
         return;
@@ -422,7 +418,6 @@ fn install_ps1_succeeds_with_valid_checksum() {
         .arg(dest.path())
         .arg("-Checksum")
         .arg(&checksum)
-        .arg("-EasyMode")
         .arg("-ArtifactUrl")
         .arg(format!("file://{}", zip.display()))
         .status()
@@ -437,10 +432,6 @@ fn install_ps1_succeeds_with_valid_checksum() {
 
 #[test]
 fn install_ps1_fails_with_bad_checksum() {
-    if !cfg!(target_os = "windows") {
-        eprintln!("skipping powershell test: non-windows runner");
-        return;
-    }
     let Some(ps) = find_powershell() else {
         eprintln!("skipping powershell test: pwsh not found");
         return;
@@ -461,7 +452,6 @@ fn install_ps1_fails_with_bad_checksum() {
         .arg(dest.path())
         .arg("-Checksum")
         .arg("deadbeef")
-        .arg("-EasyMode")
         .arg("-ArtifactUrl")
         .arg(format!("file://{}", zip.display()))
         .status()

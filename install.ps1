@@ -73,6 +73,52 @@ function Get-SiblingUrl {
   }
 }
 
+function Resolve-LocalSourcePath {
+  param([string]$Location)
+
+  if (-not $Location) { return $null }
+
+  try {
+    $uri = [System.Uri]$Location
+    if ($uri.IsAbsoluteUri -and $uri.IsFile) {
+      return $uri.LocalPath
+    }
+  } catch {
+  }
+
+  if (Test-Path -LiteralPath $Location) {
+    return (Resolve-Path -LiteralPath $Location).ProviderPath
+  }
+
+  return $null
+}
+
+function Copy-ArtifactToFile {
+  param(
+    [string]$Location,
+    [string]$Destination
+  )
+
+  $localPath = Resolve-LocalSourcePath $Location
+  if ($localPath) {
+    Copy-Item -LiteralPath $localPath -Destination $Destination -Force
+    return
+  }
+
+  Invoke-WebRequest -Uri $Location -OutFile $Destination
+}
+
+function Read-TextResource {
+  param([string]$Location)
+
+  $localPath = Resolve-LocalSourcePath $Location
+  if ($localPath) {
+    return Get-Content -LiteralPath $localPath -Raw
+  }
+
+  return Invoke-RestMethod -Uri $Location -ErrorAction Stop
+}
+
 # Map architecture to the naming convention used by release.yml
 $arch = "amd64"
 $zip = "cass-windows-${arch}.zip"
@@ -94,7 +140,7 @@ try {
   $zipFile = Join-Path $tmp $zip
 
   Write-Host "Downloading $url"
-  Invoke-WebRequest -Uri $url -OutFile $zipFile
+  Copy-ArtifactToFile -Location $url -Destination $zipFile
 
   $checksumToUse = $Checksum
   if (-not $checksumToUse) {
@@ -107,11 +153,8 @@ try {
       if ($checksumFetched) { break }
       if (-not $tryUrl) { continue }
       try {
-        # Use Invoke-RestMethod which returns the body as a string and follows
-        # redirects reliably across all PowerShell versions (Windows PS 5.x and
-        # PS Core 7+).  Invoke-WebRequest with -UseBasicParsing can return
-        # .Content as a byte array in PS 5.x, breaking .Trim().
-        $raw = Invoke-RestMethod -Uri $tryUrl -ErrorAction Stop
+        # Read checksum content as text from either a local file or a remote URL.
+        $raw = Read-TextResource $tryUrl
         if ($tryUrl -like "*/SHA256SUMS.txt") {
           # SHA256SUMS.txt contains lines like: <hash>  <filename>
           foreach ($line in $raw -split "`n") {
