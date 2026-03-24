@@ -15,7 +15,7 @@ use crate::sources::provenance::LOCAL_SOURCE_ID;
 
 pub const SCHEMA_HASH: &str = CASS_SCHEMA_HASH;
 const TANTIVY_ADD_BATCH_MAX_MESSAGES: usize = 512;
-const TANTIVY_ADD_BATCH_MAX_CHARS: usize = 1 * 1024 * 1024;
+const TANTIVY_ADD_BATCH_MAX_CHARS: usize = 1024 * 1024;
 
 fn map_fs_err(err: frankensearch::SearchError) -> Error {
     Error::new(err)

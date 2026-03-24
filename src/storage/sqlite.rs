@@ -5732,7 +5732,7 @@ impl FtsEntry {
 }
 
 const FTS_ENTRY_BATCH_MAX_DOCS: usize = 512;
-const FTS_ENTRY_BATCH_MAX_CHARS: usize = 1 * 1024 * 1024;
+const FTS_ENTRY_BATCH_MAX_CHARS: usize = 1024 * 1024;
 
 fn flush_pending_fts_entries(
     tx: &FrankenTransaction<'_>,

@@ -8705,6 +8705,8 @@ fn wait_with_progress<T>(
     use std::sync::atomic::Ordering;
     use std::time::{Duration, Instant};
 
+    let mut progress_completion: Option<(indicatif::ProgressBar, usize, usize)> = None;
+
     if show_progress {
         use indicatif::{ProgressBar, ProgressStyle};
 
@@ -8807,11 +8809,7 @@ fn wait_with_progress<T>(
         let total = progress.total.load(Ordering::Relaxed);
         let current = progress.current.load(Ordering::Relaxed);
         let agents = progress.discovered_agents.load(Ordering::Relaxed);
-        pb.finish_with_message(format!(
-            "Done: {} conversations from {} agent(s)",
-            current.max(total),
-            agents
-        ));
+        progress_completion = Some((pb, current.max(total), agents));
     } else if show_plain {
         eprintln!("Starting index...");
         let mut last_phase = usize::MAX;
@@ -8869,13 +8867,28 @@ fn wait_with_progress<T>(
         }
     }
 
-    handle.join().map_err(|_| CliError {
-        code: 9,
-        kind: "doctor",
-        message: "doctor worker thread panicked".to_string(),
-        hint: None,
-        retryable: true,
-    })?
+    let result = match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(CliError {
+            code: 9,
+            kind: "doctor",
+            message: "doctor worker thread panicked".to_string(),
+            hint: None,
+            retryable: true,
+        }),
+    };
+
+    if let Some((pb, conversations, agents)) = progress_completion {
+        match &result {
+            Ok(_) => pb.finish_with_message(format!(
+                "Done: {} conversations from {} agent(s)",
+                conversations, agents
+            )),
+            Err(err) => pb.abandon_with_message(format!("Failed: {}", err)),
+        }
+    }
+
+    result
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12083,6 +12096,7 @@ fn run_index_with_data(
     }
 
     let start = Instant::now();
+    let mut progress_completion: Option<(indicatif::ProgressBar, usize, usize)> = None;
 
     // Run indexer in background thread so we can poll progress
     let opts_clone = opts.clone();
@@ -12203,11 +12217,7 @@ fn run_index_with_data(
         let total = index_progress.total.load(Ordering::Relaxed);
         let current = index_progress.current.load(Ordering::Relaxed);
         let agents = index_progress.discovered_agents.load(Ordering::Relaxed);
-        pb.finish_with_message(format!(
-            "Done: {} conversations from {} agent(s)",
-            current.max(total),
-            agents
-        ));
+        progress_completion = Some((pb, current.max(total), agents));
     } else if show_plain {
         // Plain mode: print periodic status updates
         use std::sync::atomic::Ordering;
@@ -12274,16 +12284,8 @@ fn run_index_with_data(
     }
 
     // Get the result from the indexer thread
-    let res = index_handle
-        .join()
-        .map_err(|_| CliError {
-            code: 9,
-            kind: "index",
-            message: "index thread panicked".to_string(),
-            hint: None,
-            retryable: true,
-        })?
-        .map_err(|e| {
+    let res = match index_handle.join() {
+        Ok(result) => result.map_err(|e| {
             let chain = e
                 .chain()
                 .map(std::string::ToString::to_string)
@@ -12296,7 +12298,26 @@ fn run_index_with_data(
                 hint: None,
                 retryable: true,
             }
-        });
+        }),
+        Err(_) => Err(CliError {
+            code: 9,
+            kind: "index",
+            message: "index thread panicked".to_string(),
+            hint: None,
+            retryable: true,
+        }),
+    };
+
+    if let Some((pb, conversations, agents)) = progress_completion {
+        match &res {
+            Ok(_) => pb.finish_with_message(format!(
+                "Done: {} conversations from {} agent(s)",
+                conversations, agents
+            )),
+            Err(err) => pb.abandon_with_message(format!("Failed: {}", err)),
+        }
+    }
+
     let elapsed_ms = start.elapsed().as_millis();
 
     if let Err(err) = &res {

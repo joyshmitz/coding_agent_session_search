@@ -376,6 +376,31 @@ pub struct IndexOptions {
     pub watch_interval_secs: u64,
 }
 
+fn reset_progress_to_idle(progress: Option<&Arc<IndexingProgress>>) {
+    let Some(progress) = progress else {
+        return;
+    };
+
+    progress.phase.store(0, Ordering::Relaxed);
+    progress.is_rebuilding.store(false, Ordering::Relaxed);
+}
+
+struct RunIndexProgressReset {
+    progress: Option<Arc<IndexingProgress>>,
+}
+
+impl RunIndexProgressReset {
+    fn new(progress: Option<Arc<IndexingProgress>>) -> Self {
+        Self { progress }
+    }
+}
+
+impl Drop for RunIndexProgressReset {
+    fn drop(&mut self) {
+        reset_progress_to_idle(self.progress.as_ref());
+    }
+}
+
 // =============================================================================
 // Streaming Indexing (Opt 8.2)
 // =============================================================================
@@ -1390,6 +1415,9 @@ pub fn run_index(
     opts: IndexOptions,
     event_channel: Option<(Sender<IndexerEvent>, Receiver<IndexerEvent>)>,
 ) -> Result<()> {
+    let _progress_reset = RunIndexProgressReset::new(opts.progress.clone());
+    set_progress_last_error(opts.progress.as_ref(), None);
+
     let (storage, storage_rebuilt) = open_storage_for_index(&opts.db_path)?;
     let index_path = index_dir(&opts.data_dir)?;
 
@@ -1466,13 +1494,6 @@ pub fn run_index(
 
     // Record scan start time before scanning
     let scan_start_ts = FrankenStorage::now_millis();
-
-    // Reset progress error state
-    if let Some(p) = &opts.progress
-        && let Ok(mut last_error) = p.last_error.lock()
-    {
-        *last_error = None;
-    }
 
     // Keep sources table in sync with sources.toml for provenance integrity.
     sync_sources_config_to_db(&storage);
@@ -1633,10 +1654,7 @@ pub fn run_index(
     storage.set_last_indexed_at(now_ms)?;
     tracing::info!(now_ms, "updated last_indexed_at for status display");
 
-    if let Some(p) = &opts.progress {
-        p.phase.store(0, Ordering::Relaxed); // Idle
-        p.is_rebuilding.store(false, Ordering::Relaxed);
-    }
+    reset_progress_to_idle(opts.progress.as_ref());
 
     if opts.watch || opts.watch_once_paths.is_some() {
         let opts_clone = opts.clone();
@@ -2344,9 +2362,7 @@ fn reindex_paths(
     }
 
     // Reset phase to idle if progress exists
-    if let Some(p) = &opts.progress {
-        p.phase.store(0, Ordering::Relaxed);
-    }
+    reset_progress_to_idle(opts.progress.as_ref());
 
     Ok(total_indexed)
 }
@@ -2562,9 +2578,7 @@ fn finalize_watch_reindex_result(
         }
         Err(error) => {
             tracing::warn!(error = %error, context, "watch reindex failed");
-            if let Some(progress) = progress {
-                progress.phase.store(0, Ordering::Relaxed);
-            }
+            reset_progress_to_idle(progress);
             set_progress_last_error(progress, Some(format!("{context}: {error}")));
             detector.record_scan(0);
             0
@@ -5578,6 +5592,36 @@ mod tests {
                 .as_deref(),
             Some("watch incremental reindex: boom"),
             "failed watch reindex should surface the real error"
+        );
+    }
+
+    #[test]
+    fn run_index_progress_reset_guard_resets_idle_state_without_clobbering_error() {
+        let progress = Arc::new(IndexingProgress::default());
+        progress.phase.store(2, Ordering::Relaxed);
+        progress.is_rebuilding.store(true, Ordering::Relaxed);
+        *progress
+            .last_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some("boom".to_string());
+
+        {
+            let _guard = RunIndexProgressReset::new(Some(progress.clone()));
+        }
+
+        assert_eq!(progress.phase.load(Ordering::Relaxed), 0);
+        assert!(
+            !progress.is_rebuilding.load(Ordering::Relaxed),
+            "drop guard should clear stale rebuild state after failures"
+        );
+        assert_eq!(
+            progress
+                .last_error
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_deref(),
+            Some("boom"),
+            "idle-state cleanup should not erase the real error"
         );
     }
 
