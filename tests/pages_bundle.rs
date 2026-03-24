@@ -1520,6 +1520,155 @@ mod tests {
     }
 
     #[test]
+    fn test_attachment_image_loading_handles_immediately_complete_images() -> Result<()> {
+        run_node_module_assertions(
+            r#"
+                function makeClassList(owner) {
+                    return {
+                        add(...names) {
+                            const set = new Set(owner.className.split(/\s+/).filter(Boolean));
+                            names.forEach((name) => set.add(name));
+                            owner.className = [...set].join(' ');
+                        },
+                        remove(...names) {
+                            const set = new Set(owner.className.split(/\s+/).filter(Boolean));
+                            names.forEach((name) => set.delete(name));
+                            owner.className = [...set].join(' ');
+                        },
+                        contains(name) {
+                            return owner.className.split(/\s+/).filter(Boolean).includes(name);
+                        },
+                    };
+                }
+
+                class MockElement {
+                    constructor(tagName = 'div') {
+                        this.tagName = tagName.toUpperCase();
+                        this.children = [];
+                        this.dataset = {};
+                        this.listeners = new Map();
+                        this.className = '';
+                        this.classList = makeClassList(this);
+                        this.innerHTML = '';
+                        this.textContent = '';
+                        this.parentElement = null;
+                        this.complete = false;
+                        this.naturalWidth = 1;
+                        this._src = '';
+                        this.onload = null;
+                        this.onerror = null;
+                    }
+
+                    appendChild(child) {
+                        child.parentElement = this;
+                        this.children.push(child);
+                        return child;
+                    }
+
+                    addEventListener(type, handler) {
+                        this.listeners.set(type, handler);
+                    }
+
+                    removeEventListener(type, handler) {
+                        if (this.listeners.get(type) === handler) {
+                            this.listeners.delete(type);
+                        }
+                    }
+
+                    set src(value) {
+                        this._src = value;
+                        this.complete = true;
+                        if (typeof this.onload === 'function') {
+                            this.onload();
+                        }
+                    }
+
+                    get src() {
+                        return this._src;
+                    }
+                }
+
+                const originalDocument = globalThis.document;
+                const originalIntersectionObserver = globalThis.IntersectionObserver;
+                const originalFetch = globalThis.fetch;
+                const originalImportKey = globalThis.crypto.subtle.importKey;
+                const originalDeriveBits = globalThis.crypto.subtle.deriveBits;
+                const originalDecrypt = globalThis.crypto.subtle.decrypt;
+                const originalCreateObjectURL = URL.createObjectURL;
+                const originalRevokeObjectURL = URL.revokeObjectURL;
+
+                globalThis.document = {
+                    createElement(tagName) {
+                        return new MockElement(tagName);
+                    },
+                };
+                globalThis.IntersectionObserver = class {
+                    observe() {}
+                    disconnect() {}
+                };
+
+                globalThis.fetch = async () => ({
+                    ok: true,
+                    status: 200,
+                    arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer,
+                });
+                globalThis.crypto.subtle.importKey = async () => ({});
+                globalThis.crypto.subtle.deriveBits = async () => new Uint8Array(12).buffer;
+                globalThis.crypto.subtle.decrypt = async () => new Uint8Array([9, 8, 7]).buffer;
+                URL.createObjectURL = () => 'blob:immediate-image';
+                URL.revokeObjectURL = () => {};
+
+                try {
+                    const { createAttachmentElement, reset } = await import('./src/pages_assets/attachments.js');
+
+                    reset();
+
+                    const element = createAttachmentElement(
+                        {
+                            hash: 'a'.repeat(64),
+                            mime_type: 'image/png',
+                            filename: 'fast.png',
+                            size_bytes: 3,
+                            message_id: 1,
+                        },
+                        new Uint8Array([1, 2, 3, 4]),
+                        new Uint8Array([5, 6, 7, 8]),
+                    );
+
+                    const placeholder = element.children[0];
+                    const clickHandler = placeholder.listeners.get('click');
+                    if (typeof clickHandler !== 'function') {
+                        throw new Error('expected image attachment placeholder click handler');
+                    }
+
+                    const outcome = await Promise.race([
+                        clickHandler().then(() => 'resolved'),
+                        new Promise((resolve) => setTimeout(() => resolve('timeout'), 0)),
+                    ]);
+
+                    if (outcome !== 'resolved') {
+                        throw new Error('expected immediate-complete image load to resolve without hanging');
+                    }
+
+                    const img = element.children[2];
+                    if (img.src !== 'blob:immediate-image' || img.classList.contains('hidden')) {
+                        throw new Error('expected immediate-complete image to become visible after load');
+                    }
+                } finally {
+                    globalThis.document = originalDocument;
+                    globalThis.IntersectionObserver = originalIntersectionObserver;
+                    globalThis.fetch = originalFetch;
+                    globalThis.crypto.subtle.importKey = originalImportKey;
+                    globalThis.crypto.subtle.deriveBits = originalDeriveBits;
+                    globalThis.crypto.subtle.decrypt = originalDecrypt;
+                    URL.createObjectURL = originalCreateObjectURL;
+                    URL.revokeObjectURL = originalRevokeObjectURL;
+                }
+            "#,
+        )
+    }
+
+    #[test]
     fn test_worker_message_paths_guard_malformed_payloads_and_report_generic_failures() {
         let auth_js = include_str!("../src/pages_assets/auth.js");
         assert!(

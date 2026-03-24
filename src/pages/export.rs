@@ -66,6 +66,17 @@ impl ExportEngine {
             );
         }
 
+        if let Some(parent) = self.output_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "Failed to create export output directory {}",
+                    parent.display()
+                )
+            })?;
+        }
+
         // 1. Open source DB
         let src = super::open_existing_sqlite_db(&self.source_db_path)
             .context("Failed to open source database")?;
@@ -644,12 +655,18 @@ pub fn run_pages_export(
 
     let db_path = db_path.unwrap_or_else(crate::default_db_path);
 
-    let since_dt = since
-        .as_deref()
-        .and_then(|s| parse_time_input(s).and_then(DateTime::from_timestamp_millis));
-    let until_dt = until
-        .as_deref()
-        .and_then(|s| parse_time_input(s).and_then(DateTime::from_timestamp_millis));
+    let since_dt = parse_export_time_arg("--since", since.as_deref())?;
+    let until_dt = parse_export_time_arg("--until", until.as_deref())?;
+
+    if let (Some(since_dt), Some(until_dt)) = (since_dt, until_dt)
+        && since_dt > until_dt
+    {
+        bail!(
+            "Invalid time range: --since ({}) is after --until ({})",
+            since_dt.to_rfc3339(),
+            until_dt.to_rfc3339()
+        );
+    }
 
     let workspaces_path = workspaces.map(|ws| ws.into_iter().map(PathBuf::from).collect());
 
@@ -680,6 +697,21 @@ pub fn run_pages_export(
     );
 
     Ok(())
+}
+
+fn parse_export_time_arg(
+    flag_name: &str,
+    raw_value: Option<&str>,
+) -> Result<Option<DateTime<Utc>>> {
+    let Some(raw_value) = raw_value else {
+        return Ok(None);
+    };
+
+    let timestamp = parse_time_input(raw_value)
+        .ok_or_else(|| anyhow::anyhow!("Invalid {flag_name} value: {raw_value}"))?;
+    let parsed = DateTime::from_timestamp_millis(timestamp)
+        .ok_or_else(|| anyhow::anyhow!("{flag_name} value is out of range: {raw_value}"))?;
+    Ok(Some(parsed))
 }
 
 #[cfg(test)]

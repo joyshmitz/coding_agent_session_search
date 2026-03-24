@@ -432,6 +432,7 @@ impl PagesWizard {
         )?;
 
         // Workspace selection (optional)
+        self.state.workspaces = None;
         if !db_workspaces.is_empty() {
             let include_all = Confirm::with_theme(theme)
                 .with_prompt("Include all workspaces?")
@@ -453,18 +454,23 @@ impl PagesWizard {
                     .items(&workspace_items)
                     .interact()?;
 
-                if !selected_ws.is_empty() {
-                    self.state.workspaces = Some(
-                        selected_ws
-                            .iter()
-                            .map(|&i| db_workspaces[i].path.clone())
-                            .collect(),
-                    );
+                self.state.workspaces = Some(
+                    selected_ws
+                        .iter()
+                        .map(|&i| db_workspaces[i].path.clone())
+                        .collect(),
+                );
+                writeln!(
+                    term,
+                    "  {} {} workspaces selected",
+                    style("✓").green(),
+                    selected_ws.len()
+                )?;
+                if selected_ws.is_empty() {
                     writeln!(
                         term,
-                        "  {} {} workspaces selected",
-                        style("✓").green(),
-                        selected_ws.len()
+                        "  {} No workspaces selected. The export will contain no conversations.",
+                        style("ℹ").yellow()
                     )?;
                 }
             }

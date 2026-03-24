@@ -850,19 +850,27 @@ fn build_where_clause(filters: &SecretScanFilters) -> Result<(String, Vec<ParamV
     let mut conditions: Vec<String> = Vec::new();
     let mut params: Vec<ParamValue> = Vec::new();
 
-    if let Some(agents) = filters.agents.as_ref().filter(|a| !a.is_empty()) {
-        let placeholders: Vec<&str> = agents.iter().map(|_| "?").collect();
-        conditions.push(format!("a.slug IN ({})", placeholders.join(", ")));
-        for agent in agents {
-            params.push(ParamValue::from(agent.as_str()));
+    if let Some(agents) = filters.agents.as_ref() {
+        if agents.is_empty() {
+            conditions.push("1=0".to_string());
+        } else {
+            let placeholders: Vec<&str> = agents.iter().map(|_| "?").collect();
+            conditions.push(format!("a.slug IN ({})", placeholders.join(", ")));
+            for agent in agents {
+                params.push(ParamValue::from(agent.as_str()));
+            }
         }
     }
 
-    if let Some(workspaces) = filters.workspaces.as_ref().filter(|w| !w.is_empty()) {
-        let placeholders: Vec<&str> = workspaces.iter().map(|_| "?").collect();
-        conditions.push(format!("w.path IN ({})", placeholders.join(", ")));
-        for ws in workspaces {
-            params.push(ParamValue::from(ws.to_string_lossy().to_string()));
+    if let Some(workspaces) = filters.workspaces.as_ref() {
+        if workspaces.is_empty() {
+            conditions.push("1=0".to_string());
+        } else {
+            let placeholders: Vec<&str> = workspaces.iter().map(|_| "?").collect();
+            conditions.push(format!("w.path IN ({})", placeholders.join(", ")));
+            for ws in workspaces {
+                params.push(ParamValue::from(ws.to_string_lossy().to_string()));
+            }
         }
     }
 
@@ -1283,7 +1291,7 @@ mod tests {
     }
 
     #[test]
-    fn build_where_clause_empty_agent_list_ignored() {
+    fn build_where_clause_empty_agent_list_matches_nothing() {
         let filters = SecretScanFilters {
             agents: Some(vec![]),
             workspaces: None,
@@ -1291,7 +1299,27 @@ mod tests {
             until_ts: None,
         };
         let (clause, _) = build_where_clause(&filters).unwrap();
-        assert!(clause.is_empty(), "empty agent list should be ignored");
+        assert!(
+            clause.contains("1=0"),
+            "empty agent list should match nothing: {}",
+            clause
+        );
+    }
+
+    #[test]
+    fn build_where_clause_empty_workspace_list_matches_nothing() {
+        let filters = SecretScanFilters {
+            agents: None,
+            workspaces: Some(vec![]),
+            since_ts: None,
+            until_ts: None,
+        };
+        let (clause, _) = build_where_clause(&filters).unwrap();
+        assert!(
+            clause.contains("1=0"),
+            "empty workspace list should match nothing: {}",
+            clause
+        );
     }
 
     // =========================================================================

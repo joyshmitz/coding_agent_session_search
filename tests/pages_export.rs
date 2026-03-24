@@ -1,7 +1,9 @@
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use coding_agent_search::pages::export::{ExportEngine, ExportFilter, PathMode};
+    use coding_agent_search::pages::export::{
+        ExportEngine, ExportFilter, PathMode, run_pages_export,
+    };
     use rusqlite::Connection;
     use std::path::Path;
     use tempfile::TempDir;
@@ -569,6 +571,83 @@ mod tests {
         // Should have been called for each conversation (2)
         assert_eq!(callback_count.load(Ordering::SeqCst), 2);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_export_engine_creates_missing_output_parent_directories() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let source_path = temp_dir.path().join("source.db");
+        let output_path = temp_dir.path().join("nested/site/export.db");
+
+        setup_source_db(&source_path)?;
+
+        let filter = ExportFilter {
+            agents: None,
+            workspaces: None,
+            since: None,
+            until: None,
+            path_mode: PathMode::Relative,
+        };
+
+        let engine = ExportEngine::new(&source_path, &output_path, filter);
+        let stats = engine.execute(|_, _| {}, None)?;
+
+        assert_eq!(stats.conversations_processed, 2);
+        assert!(output_path.exists(), "export db should be created");
+
+        let conn = Connection::open(&output_path)?;
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))?;
+        assert_eq!(count, 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_run_pages_export_rejects_invalid_since() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let source_path = temp_dir.path().join("source.db");
+        let output_path = temp_dir.path().join("export.db");
+
+        setup_source_db(&source_path)?;
+
+        let err = run_pages_export(
+            Some(source_path),
+            output_path,
+            None,
+            None,
+            Some("not-a-time".to_string()),
+            None,
+            PathMode::Relative,
+            false,
+        )
+        .expect_err("invalid --since should fail");
+
+        assert!(err.to_string().contains("Invalid --since value"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_run_pages_export_rejects_reversed_time_range() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let source_path = temp_dir.path().join("source.db");
+        let output_path = temp_dir.path().join("export.db");
+
+        setup_source_db(&source_path)?;
+
+        let err = run_pages_export(
+            Some(source_path),
+            output_path,
+            None,
+            None,
+            Some("2025-01-02".to_string()),
+            Some("2025-01-01".to_string()),
+            PathMode::Relative,
+            false,
+        )
+        .expect_err("reversed time range should fail");
+
+        assert!(err.to_string().contains("Invalid time range"));
         Ok(())
     }
 }

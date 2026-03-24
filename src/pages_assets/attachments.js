@@ -410,7 +410,8 @@ function validateManifest(rawManifest) {
         throw new Error('Attachment manifest entries must be an array');
     }
     if (
-        rawManifest.total_size_bytes != null
+        rawManifest.total_size_bytes !== null
+        && rawManifest.total_size_bytes !== undefined
         && (!Number.isSafeInteger(rawManifest.total_size_bytes) || rawManifest.total_size_bytes < 0)
     ) {
         throw new Error('Attachment manifest total_size_bytes must be a non-negative integer');
@@ -639,12 +640,7 @@ async function loadImageAttachment(container, img, hash, mimeType, dek, exportId
         loading.classList.remove('hidden');
 
         const url = await loadBlobAsUrl(hash, mimeType, dek, exportId);
-        img.src = url;
-
-        await new Promise((resolve, reject) => {
-            img.onload = resolve;
-            img.onerror = reject;
-        });
+        await waitForImageLoad(img, url);
 
         loading.classList.add('hidden');
         img.classList.remove('hidden');
@@ -661,6 +657,31 @@ async function loadImageAttachment(container, img, hash, mimeType, dek, exportId
             <span class="attachment-error">Failed to load</span>
         `;
     }
+}
+
+function waitForImageLoad(img, url) {
+    return new Promise((resolve, reject) => {
+        const cleanup = () => {
+            img.onload = null;
+            img.onerror = null;
+        };
+        const handleLoad = () => {
+            cleanup();
+            resolve();
+        };
+        const handleError = () => {
+            cleanup();
+            reject(new Error('Image failed to load'));
+        };
+
+        img.onload = handleLoad;
+        img.onerror = handleError;
+        img.src = url;
+
+        if (img.complete && (!('naturalWidth' in img) || img.naturalWidth > 0)) {
+            handleLoad();
+        }
+    });
 }
 
 /**

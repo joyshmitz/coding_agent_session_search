@@ -534,6 +534,37 @@ fn test_export_with_real_fixture_nonexistent_agent() {
 }
 
 #[test]
+fn test_export_with_real_fixture_explicit_empty_workspace_filter() {
+    let _tracker = PhaseTracker::new("pages_wizard", "export_real_fixture_empty_workspace_filter");
+
+    let db_path = fixture_db_path();
+    let tmp = TempDir::new().unwrap();
+    let output_path = tmp.path().join("export.db");
+
+    let filter = ExportFilter {
+        agents: None,
+        workspaces: Some(vec![]),
+        since: None,
+        until: None,
+        path_mode: PathMode::Relative,
+    };
+
+    let engine = ExportEngine::new(&db_path, &output_path, filter);
+    let stats = engine
+        .execute(|_, _| {}, None)
+        .expect("Export should succeed even with an explicit empty workspace filter");
+
+    assert_eq!(stats.conversations_processed, 0);
+    assert_eq!(stats.messages_processed, 0);
+
+    let conn = Connection::open(&output_path).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[test]
 fn test_export_with_real_fixture_path_modes() {
     let _tracker = PhaseTracker::new("pages_wizard", "export_real_fixture_path_modes");
 

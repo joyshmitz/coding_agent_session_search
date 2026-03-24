@@ -508,29 +508,33 @@ impl<'a> SummaryGenerator<'a> {
         let mut clauses = Vec::new();
         let mut params: Vec<ParamValue> = Vec::new();
 
-        if let Some(agents) = &filters.agents
-            && !agents.is_empty()
-        {
-            let placeholders: Vec<&str> = (0..agents.len()).map(|_| "?").collect();
-            clauses.push(format!(
-                "c.agent_id IN (SELECT id FROM agents WHERE slug IN ({}))",
-                placeholders.join(", ")
-            ));
-            for agent in agents {
-                params.push(ParamValue::from(agent.as_str()));
+        if let Some(agents) = &filters.agents {
+            if agents.is_empty() {
+                clauses.push("1=0".to_string());
+            } else {
+                let placeholders: Vec<&str> = (0..agents.len()).map(|_| "?").collect();
+                clauses.push(format!(
+                    "c.agent_id IN (SELECT id FROM agents WHERE slug IN ({}))",
+                    placeholders.join(", ")
+                ));
+                for agent in agents {
+                    params.push(ParamValue::from(agent.as_str()));
+                }
             }
         }
 
-        if let Some(workspaces) = &filters.workspaces
-            && !workspaces.is_empty()
-        {
-            let placeholders: Vec<&str> = (0..workspaces.len()).map(|_| "?").collect();
-            clauses.push(format!(
-                "c.workspace_id IN (SELECT id FROM workspaces WHERE path IN ({}))",
-                placeholders.join(", ")
-            ));
-            for ws in workspaces {
-                params.push(ParamValue::from(ws.as_str()));
+        if let Some(workspaces) = &filters.workspaces {
+            if workspaces.is_empty() {
+                clauses.push("1=0".to_string());
+            } else {
+                let placeholders: Vec<&str> = (0..workspaces.len()).map(|_| "?").collect();
+                clauses.push(format!(
+                    "c.workspace_id IN (SELECT id FROM workspaces WHERE path IN ({}))",
+                    placeholders.join(", ")
+                ));
+                for ws in workspaces {
+                    params.push(ParamValue::from(ws.as_str()));
+                }
             }
         }
 
@@ -1156,6 +1160,44 @@ mod tests {
 
         assert_eq!(summary.total_conversations, 2);
         assert_eq!(summary.total_messages, 8); // 5 + 3
+    }
+
+    #[test]
+    fn test_summary_with_empty_agent_filter_matches_nothing() {
+        let (_dir, conn) = create_test_db();
+        insert_test_data(&conn);
+
+        let filters = SummaryFilters {
+            agents: Some(vec![]),
+            ..Default::default()
+        };
+
+        let generator = SummaryGenerator::new(&conn);
+        let summary = generator.generate(Some(&filters)).unwrap();
+
+        assert_eq!(summary.total_conversations, 0);
+        assert_eq!(summary.total_messages, 0);
+        assert!(summary.workspaces.is_empty());
+        assert!(summary.agents.is_empty());
+    }
+
+    #[test]
+    fn test_summary_with_empty_workspace_filter_matches_nothing() {
+        let (_dir, conn) = create_test_db();
+        insert_test_data(&conn);
+
+        let filters = SummaryFilters {
+            workspaces: Some(vec![]),
+            ..Default::default()
+        };
+
+        let generator = SummaryGenerator::new(&conn);
+        let summary = generator.generate(Some(&filters)).unwrap();
+
+        assert_eq!(summary.total_conversations, 0);
+        assert_eq!(summary.total_messages, 0);
+        assert!(summary.workspaces.is_empty());
+        assert!(summary.agents.is_empty());
     }
 
     #[test]
