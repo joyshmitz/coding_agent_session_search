@@ -3,6 +3,7 @@ pub mod semantic;
 
 use std::collections::HashMap;
 use std::fs;
+use std::iter::Peekable;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -410,6 +411,77 @@ pub enum IndexMessage {
 /// too large defeats the purpose of backpressure.
 const STREAMING_CHANNEL_SIZE: usize = 32;
 
+#[derive(Debug, Clone, Copy)]
+struct StreamingBatchLimits {
+    max_conversations: usize,
+    max_messages: usize,
+    max_chars: usize,
+}
+
+const DEFAULT_STREAMING_BATCH_LIMITS: StreamingBatchLimits = StreamingBatchLimits {
+    max_conversations: 64,
+    max_messages: 2_000,
+    max_chars: 4 * 1024 * 1024,
+};
+
+fn conversation_batch_footprint(conv: &NormalizedConversation) -> (usize, usize) {
+    let message_count = conv.messages.len();
+    let char_count = conv.messages.iter().map(|msg| msg.content.len()).sum();
+    (message_count, char_count)
+}
+
+fn next_streaming_batch(
+    conversations: &mut Peekable<std::vec::IntoIter<NormalizedConversation>>,
+    limits: StreamingBatchLimits,
+) -> Option<(Vec<NormalizedConversation>, usize)> {
+    let first = conversations.next()?;
+    let (first_messages, first_chars) = conversation_batch_footprint(&first);
+    let mut batch = vec![first];
+    let mut total_messages = first_messages;
+    let mut total_chars = first_chars;
+
+    while let Some(next) = conversations.peek() {
+        let (next_messages, next_chars) = conversation_batch_footprint(next);
+        let would_exceed_limits = batch.len() >= limits.max_conversations
+            || total_messages.saturating_add(next_messages) > limits.max_messages
+            || total_chars.saturating_add(next_chars) > limits.max_chars;
+        if would_exceed_limits {
+            break;
+        }
+
+        let conv = conversations
+            .next()
+            .expect("peek indicated another conversation existed");
+        total_messages += next_messages;
+        total_chars += next_chars;
+        batch.push(conv);
+    }
+
+    Some((batch, total_messages))
+}
+
+fn send_conversation_batches(
+    tx: &Sender<IndexMessage>,
+    connector_name: &'static str,
+    conversations: Vec<NormalizedConversation>,
+    is_discovered: bool,
+) {
+    let mut iter = conversations.into_iter().peekable();
+    let mut batch_is_discovered = is_discovered;
+
+    while let Some((batch, message_count)) =
+        next_streaming_batch(&mut iter, DEFAULT_STREAMING_BATCH_LIMITS)
+    {
+        let _ = tx.send(IndexMessage::Batch {
+            connector_name,
+            conversations: batch,
+            is_discovered: batch_is_discovered,
+            message_count,
+        });
+        batch_is_discovered = false;
+    }
+}
+
 /// Check if streaming indexing is enabled via environment variable.
 ///
 /// Set `CASS_STREAMING_INDEX=0` to disable streaming and use batch mode.
@@ -459,16 +531,7 @@ fn spawn_connector_producer(
                     }
 
                     if !local_convs.is_empty() {
-                        // Count messages for stats
-                        let message_count: usize =
-                            local_convs.iter().map(|c| c.messages.len()).sum();
-                        // Send batch through channel (blocking if full - backpressure!)
-                        let _ = tx.send(IndexMessage::Batch {
-                            connector_name: name,
-                            conversations: local_convs,
-                            is_discovered,
-                            message_count,
-                        });
+                        send_conversation_batches(&tx, name, local_convs, is_discovered);
                     }
                 }
                 Err(e) => {
@@ -504,15 +567,7 @@ fn spawn_connector_producer(
                     }
 
                     if !remote_convs.is_empty() {
-                        // Count messages for stats
-                        let message_count: usize =
-                            remote_convs.iter().map(|c| c.messages.len()).sum();
-                        let _ = tx.send(IndexMessage::Batch {
-                            connector_name: name,
-                            conversations: remote_convs,
-                            is_discovered,
-                            message_count,
-                        });
+                        send_conversation_batches(&tx, name, remote_convs, is_discovered);
                     }
                 }
                 Err(e) => {
@@ -3258,6 +3313,134 @@ mod tests {
             ended_at: msgs.last().and_then(|m| m.created_at),
             metadata: serde_json::json!({}),
             messages: msgs,
+        }
+    }
+
+    #[test]
+    fn next_streaming_batch_splits_large_message_batches() {
+        let limits = StreamingBatchLimits {
+            max_conversations: 8,
+            max_messages: 1_000,
+            max_chars: usize::MAX,
+        };
+        let convs = vec![
+            norm_conv(
+                Some("a"),
+                (0..700).map(|i| norm_msg(i, 1_000 + i)).collect(),
+            ),
+            norm_conv(
+                Some("b"),
+                (0..400).map(|i| norm_msg(i, 2_000 + i)).collect(),
+            ),
+            norm_conv(
+                Some("c"),
+                (0..300).map(|i| norm_msg(i, 3_000 + i)).collect(),
+            ),
+        ];
+
+        let mut iter = convs.into_iter().peekable();
+        let (batch1, batch1_messages) = next_streaming_batch(&mut iter, limits).unwrap();
+        let (batch2, batch2_messages) = next_streaming_batch(&mut iter, limits).unwrap();
+
+        assert_eq!(
+            batch1
+                .iter()
+                .map(|conv| conv.external_id.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["a"]
+        );
+        assert_eq!(batch1_messages, 700);
+
+        assert_eq!(
+            batch2
+                .iter()
+                .map(|conv| conv.external_id.as_deref().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["b", "c"]
+        );
+        assert_eq!(batch2_messages, 700);
+        assert!(next_streaming_batch(&mut iter, limits).is_none());
+    }
+
+    #[test]
+    fn next_streaming_batch_keeps_single_oversized_conversation_isolated() {
+        let limits = StreamingBatchLimits {
+            max_conversations: 8,
+            max_messages: 8,
+            max_chars: 64,
+        };
+        let oversized = NormalizedMessage {
+            content: "x".repeat(256),
+            ..norm_msg(0, 1_000)
+        };
+        let convs = vec![
+            norm_conv(Some("huge"), vec![oversized]),
+            norm_conv(Some("small"), vec![norm_msg(0, 2_000)]),
+        ];
+
+        let mut iter = convs.into_iter().peekable();
+        let (batch1, batch1_messages) = next_streaming_batch(&mut iter, limits).unwrap();
+        let (batch2, batch2_messages) = next_streaming_batch(&mut iter, limits).unwrap();
+
+        assert_eq!(
+            batch1[0].external_id.as_deref(),
+            Some("huge"),
+            "oversized conversations should still index, but alone"
+        );
+        assert_eq!(batch1_messages, 1);
+        assert_eq!(batch2[0].external_id.as_deref(), Some("small"));
+        assert_eq!(batch2_messages, 1);
+        assert!(next_streaming_batch(&mut iter, limits).is_none());
+    }
+
+    #[test]
+    fn send_conversation_batches_marks_only_first_batch_as_discovered() {
+        let (tx, rx) = bounded(4);
+        let convs = vec![
+            norm_conv(
+                Some("a"),
+                (0..1_200).map(|i| norm_msg(i, 1_000 + i)).collect(),
+            ),
+            norm_conv(
+                Some("b"),
+                (0..1_200).map(|i| norm_msg(i, 2_000 + i)).collect(),
+            ),
+        ];
+
+        send_conversation_batches(&tx, "claude", convs, true);
+        drop(tx);
+
+        let batches = rx.try_iter().collect::<Vec<_>>();
+        assert_eq!(batches.len(), 2);
+
+        match &batches[0] {
+            IndexMessage::Batch {
+                connector_name,
+                is_discovered,
+                message_count,
+                conversations,
+            } => {
+                assert_eq!(*connector_name, "claude");
+                assert!(*is_discovered);
+                assert_eq!(*message_count, 1_200);
+                assert_eq!(conversations.len(), 1);
+            }
+            _ => panic!("expected first message to be a batch"),
+        }
+
+        match &batches[1] {
+            IndexMessage::Batch {
+                connector_name,
+                is_discovered,
+                message_count,
+                conversations,
+            } => {
+                assert_eq!(*connector_name, "claude");
+                assert!(!*is_discovered);
+                assert_eq!(*message_count, 1_200);
+                assert_eq!(conversations.len(), 1);
+            }
+            _ => panic!("expected second message to be a batch"),
         }
     }
 
