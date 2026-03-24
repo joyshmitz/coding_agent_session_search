@@ -8535,164 +8535,15 @@ fn rebuild_tantivy_from_db(
     total_conversations: usize,
     progress: Option<std::sync::Arc<indexer::IndexingProgress>>,
 ) -> CliResult<usize> {
-    use crate::connectors::{NormalizedConversation, NormalizedMessage};
-    use crate::model::types::MessageRole;
-    use crate::search::tantivy::TantivyIndex;
-    use crate::sources::provenance::{LOCAL_SOURCE_ID, SourceKind};
-    use crate::storage::sqlite::FrankenStorage;
-    use std::collections::HashMap;
-    use std::sync::atomic::Ordering;
-
-    let storage = FrankenStorage::open_readonly(db_path).map_err(|e| CliError {
-        code: 5,
-        kind: "doctor",
-        message: format!("failed to open database for rebuild: {e}"),
-        hint: None,
-        retryable: true,
-    })?;
-
-    let sources = storage.list_sources().unwrap_or_default();
-    let mut source_map: HashMap<String, (SourceKind, Option<String>)> = HashMap::new();
-    for source in sources {
-        source_map.insert(source.id, (source.kind, source.host_label));
-    }
-
-    let index_path = crate::search::tantivy::index_dir(data_dir).map_err(|e| CliError {
-        code: 5,
-        kind: "doctor",
-        message: format!("failed to resolve index path: {e}"),
-        hint: None,
-        retryable: true,
-    })?;
-
-    if let Err(e) = std::fs::remove_dir_all(&index_path)
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        return Err(CliError {
+    indexer::rebuild_tantivy_from_db(db_path, data_dir, total_conversations, progress).map_err(
+        |e| CliError {
             code: 5,
             kind: "doctor",
-            message: format!("failed to remove stale index directory: {e}"),
+            message: format!("failed to rebuild Tantivy index from database: {e}"),
             hint: None,
             retryable: true,
-        });
-    }
-    std::fs::create_dir_all(&index_path).map_err(|e| CliError {
-        code: 5,
-        kind: "doctor",
-        message: format!("failed to create index directory: {e}"),
-        hint: None,
-        retryable: true,
-    })?;
-
-    let mut t_index = TantivyIndex::open_or_create(&index_path).map_err(|e| CliError {
-        code: 5,
-        kind: "doctor",
-        message: format!("failed to create tantivy index: {e}"),
-        hint: None,
-        retryable: true,
-    })?;
-
-    if let Some(p) = &progress {
-        p.phase.store(2, Ordering::Relaxed);
-        p.is_rebuilding.store(true, Ordering::Relaxed);
-        p.total.store(total_conversations, Ordering::Relaxed);
-        p.current.store(0, Ordering::Relaxed);
-        p.discovered_agents.store(0, Ordering::Relaxed);
-    }
-
-    let page_size: i64 = 200;
-    let mut offset: i64 = 0;
-    let mut indexed_docs: usize = 0;
-
-    loop {
-        let batch = storage
-            .list_conversations(page_size, offset)
-            .map_err(|e| CliError::unknown(format!("failed to list conversations: {e}")))?;
-        if batch.is_empty() {
-            break;
-        }
-
-        for conv in batch {
-            let Some(conv_id) = conv.id else {
-                continue;
-            };
-
-            let messages = storage
-                .fetch_messages(conv_id)
-                .map_err(|e| CliError::unknown(format!("failed to fetch messages: {e}")))?;
-
-            let mut metadata = conv.metadata_json.clone();
-            let (kind, host_label) =
-                source_map.get(&conv.source_id).cloned().unwrap_or_else(|| {
-                    let fallback_kind = if conv.source_id == LOCAL_SOURCE_ID {
-                        SourceKind::Local
-                    } else {
-                        SourceKind::Ssh
-                    };
-                    (fallback_kind, None)
-                });
-
-            let host = conv.origin_host.as_deref().or(host_label.as_deref());
-            ensure_cass_origin(&mut metadata, &conv.source_id, kind, host);
-
-            let normalized_messages: Vec<NormalizedMessage> = messages
-                .into_iter()
-                .map(|msg| {
-                    let role = match msg.role {
-                        MessageRole::User => "user".to_string(),
-                        MessageRole::Agent => "assistant".to_string(),
-                        MessageRole::Tool => "tool".to_string(),
-                        MessageRole::System => "system".to_string(),
-                        MessageRole::Other(other) => other,
-                    };
-
-                    NormalizedMessage {
-                        idx: msg.idx,
-                        role,
-                        author: msg.author,
-                        created_at: msg.created_at,
-                        content: msg.content,
-                        extra: msg.extra_json,
-                        snippets: Vec::new(),
-                    }
-                })
-                .collect();
-
-            let normalized = NormalizedConversation {
-                agent_slug: conv.agent_slug,
-                external_id: conv.external_id,
-                title: conv.title,
-                workspace: conv.workspace,
-                source_path: conv.source_path,
-                started_at: conv.started_at,
-                ended_at: conv.ended_at,
-                metadata,
-                messages: normalized_messages,
-            };
-
-            indexed_docs += normalized.messages.len();
-            t_index
-                .add_messages(&normalized, &normalized.messages)
-                .map_err(|e| CliError::unknown(format!("failed to index messages: {e}")))?;
-
-            if let Some(p) = &progress {
-                p.current.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-
-        offset += page_size;
-    }
-
-    t_index
-        .commit()
-        .map_err(|e| CliError::unknown(format!("failed to commit index: {e}")))?;
-
-    if let Some(p) = &progress {
-        p.phase.store(0, Ordering::Relaxed);
-        p.is_rebuilding.store(false, Ordering::Relaxed);
-    }
-
-    Ok(indexed_docs)
+        },
+    )
 }
 
 fn wait_with_progress<T>(
@@ -15779,7 +15630,7 @@ fn run_sources_add(
     })?;
 
     // Check for duplicate
-    if config.sources.iter().any(|s| s.name == source_id) {
+    if config.find_source(&source_id).is_some() {
         return Err(CliError {
             code: 10,
             kind: "config",
@@ -15937,7 +15788,9 @@ fn test_ssh_connectivity(host: &str) -> CliResult<()> {
 
 /// Remove a configured source (P5.7)
 fn run_sources_remove(name: &str, purge: bool, skip_confirm: bool) -> CliResult<()> {
+    use crate::sources::SyncStatus;
     use crate::sources::config::SourcesConfig;
+    use colored::Colorize;
 
     // Load existing config
     let mut config = SourcesConfig::load().map_err(|e| CliError {
@@ -15949,7 +15802,8 @@ fn run_sources_remove(name: &str, purge: bool, skip_confirm: bool) -> CliResult<
     })?;
 
     // Check source exists
-    if !config.sources.iter().any(|s| s.name == name) {
+    let stored_source_name = config.find_source(name).map(|source| source.name.clone());
+    let Some(stored_source_name) = stored_source_name else {
         return Err(CliError {
             code: 13,
             kind: "not_found",
@@ -15957,16 +15811,17 @@ fn run_sources_remove(name: &str, purge: bool, skip_confirm: bool) -> CliResult<
             hint: Some("Run 'cass sources list' to see configured sources".into()),
             retryable: false,
         });
-    }
+    };
 
     // Confirmation prompt
     if !skip_confirm {
+        let display_name = &stored_source_name;
         let msg = if purge {
             format!(
-                "Remove source '{name}' and delete indexed data? This cannot be undone. [y/N]: "
+                "Remove source '{display_name}' and delete indexed data? This cannot be undone. [y/N]: "
             )
         } else {
-            format!("Remove source '{name}' from configuration? [y/N]: ")
+            format!("Remove source '{display_name}' from configuration? [y/N]: ")
         };
         print!("{msg}");
         std::io::Write::flush(&mut std::io::stdout()).ok();
@@ -15990,7 +15845,7 @@ fn run_sources_remove(name: &str, purge: bool, skip_confirm: bool) -> CliResult<
     }
 
     // Remove from config
-    config.remove_source(name);
+    config.remove_source(&stored_source_name);
     config.save().map_err(|e| CliError {
         code: 11,
         kind: "config",
@@ -15999,13 +15854,34 @@ fn run_sources_remove(name: &str, purge: bool, skip_confirm: bool) -> CliResult<
         retryable: false,
     })?;
 
-    println!("Removed '{name}' from configuration.");
+    println!("Removed '{}' from configuration.", stored_source_name);
+
+    let data_dir = default_data_dir();
+    match SyncStatus::load(&data_dir) {
+        Ok(mut sync_status) => {
+            if sync_status.retain_sources(config.sources.iter().map(|source| source.name.as_str()))
+                && let Err(error) = sync_status.save(&data_dir)
+            {
+                eprintln!(
+                    "{} Failed to save pruned sync status: {}",
+                    "Warning:".yellow().bold(),
+                    error
+                );
+            }
+        }
+        Err(error) => {
+            eprintln!(
+                "{} Failed to load sync status for pruning: {}",
+                "Warning:".yellow().bold(),
+                error
+            );
+        }
+    }
 
     // Handle purge
     if purge {
         // Find and remove synced data directory
-        let data_dir = default_data_dir();
-        let source_dir = data_dir.join("remotes").join(name);
+        let source_dir = data_dir.join("remotes").join(&stored_source_name);
         if source_dir.exists() {
             std::fs::remove_dir_all(&source_dir).map_err(|e| CliError {
                 code: 15,
@@ -16043,7 +15919,7 @@ struct SourceDiagnostics {
 
 /// Diagnose source connectivity and configuration issues (P5.6)
 fn run_sources_doctor(source_filter: Option<&str>, json_output: bool) -> CliResult<()> {
-    use crate::sources::config::SourcesConfig;
+    use crate::sources::config::{SourcesConfig, source_names_equal};
     use colored::Colorize;
 
     let config = SourcesConfig::load().map_err(|e| CliError {
@@ -16074,7 +15950,7 @@ fn run_sources_doctor(source_filter: Option<&str>, json_output: bool) -> CliResu
     let sources_to_check: Vec<_> = config
         .sources
         .iter()
-        .filter(|s| source_filter.is_none() || source_filter == Some(s.name.as_str()))
+        .filter(|s| source_filter.is_none_or(|filter| source_names_equal(filter, &s.name)))
         .collect();
 
     if sources_to_check.is_empty() {
@@ -16383,7 +16259,7 @@ fn run_sources_sync(
     dry_run: bool,
     json_output: bool,
 ) -> CliResult<()> {
-    use crate::sources::config::SourcesConfig;
+    use crate::sources::config::{SourcesConfig, source_names_equal};
     use crate::sources::sync::{SyncEngine, SyncReport, SyncStatus};
     use colored::Colorize;
 
@@ -16420,7 +16296,7 @@ fn run_sources_sync(
     let sources_to_sync: Vec<_> = if let Some(ref names) = source_filter {
         remote_sources
             .into_iter()
-            .filter(|s| names.contains(&s.name))
+            .filter(|s| names.iter().any(|name| source_names_equal(name, &s.name)))
             .collect()
     } else {
         remote_sources

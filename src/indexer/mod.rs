@@ -10,12 +10,11 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded};
 use notify::event::{AccessKind, AccessMode, MetadataKind, ModifyKind};
 use notify::{RecursiveMode, Watcher, recommended_watcher};
 
-use crate::connectors::NormalizedConversation;
 use crate::connectors::{
     Connector, ScanRoot, aider::AiderConnector, amp::AmpConnector, chatgpt::ChatGptConnector,
     claude_code::ClaudeCodeConnector, clawdbot::ClawdbotConnector, cline::ClineConnector,
@@ -24,13 +23,15 @@ use crate::connectors::{
     kimi::KimiConnector, openclaw::OpenClawConnector, opencode::OpenCodeConnector,
     pi_agent::PiAgentConnector, qwen::QwenConnector, vibe::VibeConnector,
 };
+use crate::connectors::{NormalizedConversation, NormalizedMessage};
 use crate::search::tantivy::{TantivyIndex, index_dir, schema_hash_matches};
 use crate::search::vector_index::{ROLE_ASSISTANT, ROLE_SYSTEM, ROLE_TOOL, ROLE_USER};
 
+use crate::ensure_cass_origin;
 use crate::sources::config::{Platform, SourcesConfig};
-use crate::sources::provenance::{Origin, Source};
+use crate::sources::provenance::{LOCAL_SOURCE_ID, Origin, Source, SourceKind};
 use crate::sources::sync::path_to_safe_dirname;
-use crate::storage::sqlite::{FrankenStorage, MigrationError};
+use crate::storage::sqlite::{FrankenStorage, HistoricalSalvageOutcome, MigrationError};
 use semantic::{EmbeddingInput, SemanticIndexer};
 
 #[cfg(test)]
@@ -1474,6 +1475,24 @@ pub fn run_index(
         t_index.commit()?;
     }
 
+    let canonical_sessions_before_salvage =
+        storage.count_sessions_in_range(None, None, None, None)?.0;
+    let should_salvage_historical =
+        opts.full || storage_rebuilt || canonical_sessions_before_salvage == 0;
+    let historical_salvage: HistoricalSalvageOutcome = if should_salvage_historical {
+        storage.salvage_historical_databases(&opts.db_path)?
+    } else {
+        HistoricalSalvageOutcome::default()
+    };
+    if historical_salvage.messages_imported > 0 {
+        tracing::info!(
+            bundles_imported = historical_salvage.bundles_imported,
+            conversations_imported = historical_salvage.conversations_imported,
+            messages_imported = historical_salvage.messages_imported,
+            "historical cass bundles merged into canonical database before scan"
+        );
+    }
+
     // Get last scan timestamp for incremental indexing.
     // If full rebuild or force_rebuild, scan everything (since_ts = None).
     // Otherwise, only scan files modified since last successful scan.
@@ -1529,6 +1548,17 @@ pub fn run_index(
     }
 
     t_index.commit()?;
+
+    if historical_salvage.messages_imported > 0 {
+        let total_conversations = storage.count_sessions_in_range(None, None, None, None)?.0;
+        rebuild_tantivy_from_db(
+            &opts.db_path,
+            &opts.data_dir,
+            usize::try_from(total_conversations.max(0)).unwrap_or(usize::MAX),
+            opts.progress.clone(),
+        )?;
+        t_index = TantivyIndex::open_or_create(&index_path)?;
+    }
 
     // Semantic indexing (if enabled)
     if opts.semantic {
@@ -1906,6 +1936,131 @@ fn open_storage_for_index(db_path: &Path) -> Result<(FrankenStorage, bool)> {
             "failed to open frankensqlite storage: {err}"
         )),
     }
+}
+
+pub(crate) fn rebuild_tantivy_from_db(
+    db_path: &Path,
+    data_dir: &Path,
+    total_conversations: usize,
+    progress: Option<Arc<IndexingProgress>>,
+) -> Result<usize> {
+    use crate::model::types::MessageRole;
+
+    let storage = FrankenStorage::open_readonly(db_path).with_context(|| {
+        format!(
+            "opening database for Tantivy rebuild: {}",
+            db_path.display()
+        )
+    })?;
+
+    let sources = storage.list_sources().unwrap_or_default();
+    let mut source_map: HashMap<String, (SourceKind, Option<String>)> = HashMap::new();
+    for source in sources {
+        source_map.insert(source.id, (source.kind, source.host_label));
+    }
+
+    let index_path = index_dir(data_dir)?;
+    if let Err(err) = std::fs::remove_dir_all(&index_path)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(err).with_context(|| format!("removing stale index {}", index_path.display()));
+    }
+    std::fs::create_dir_all(&index_path)
+        .with_context(|| format!("creating rebuilt index directory {}", index_path.display()))?;
+
+    let mut t_index = TantivyIndex::open_or_create(&index_path)?;
+
+    if let Some(p) = &progress {
+        p.phase.store(2, Ordering::Relaxed);
+        p.is_rebuilding.store(true, Ordering::Relaxed);
+        p.total.store(total_conversations, Ordering::Relaxed);
+        p.current.store(0, Ordering::Relaxed);
+        p.discovered_agents.store(0, Ordering::Relaxed);
+    }
+
+    let mut offset = 0_i64;
+    let page_size = 200_i64;
+    let mut indexed_docs = 0usize;
+
+    loop {
+        let batch = storage.list_conversations(page_size, offset)?;
+        if batch.is_empty() {
+            break;
+        }
+
+        for conv in batch {
+            let Some(conv_id) = conv.id else {
+                continue;
+            };
+            let messages = storage.fetch_messages(conv_id)?;
+
+            let mut metadata = conv.metadata_json.clone();
+            let (kind, host_label) =
+                source_map.get(&conv.source_id).cloned().unwrap_or_else(|| {
+                    let fallback_kind = if conv.source_id == LOCAL_SOURCE_ID {
+                        SourceKind::Local
+                    } else {
+                        SourceKind::Ssh
+                    };
+                    (fallback_kind, None)
+                });
+            let host = conv.origin_host.as_deref().or(host_label.as_deref());
+            ensure_cass_origin(&mut metadata, &conv.source_id, kind, host);
+
+            let normalized_messages: Vec<NormalizedMessage> = messages
+                .into_iter()
+                .map(|msg| {
+                    let role = match msg.role {
+                        MessageRole::User => "user".to_string(),
+                        MessageRole::Agent => "assistant".to_string(),
+                        MessageRole::Tool => "tool".to_string(),
+                        MessageRole::System => "system".to_string(),
+                        MessageRole::Other(other) => other,
+                    };
+
+                    NormalizedMessage {
+                        idx: msg.idx,
+                        role,
+                        author: msg.author,
+                        created_at: msg.created_at,
+                        content: msg.content,
+                        extra: msg.extra_json,
+                        snippets: Vec::new(),
+                    }
+                })
+                .collect();
+
+            let normalized = NormalizedConversation {
+                agent_slug: conv.agent_slug,
+                external_id: conv.external_id,
+                title: conv.title,
+                workspace: conv.workspace,
+                source_path: conv.source_path,
+                started_at: conv.started_at,
+                ended_at: conv.ended_at,
+                metadata,
+                messages: normalized_messages,
+            };
+
+            indexed_docs += normalized.messages.len();
+            t_index.add_messages(&normalized, &normalized.messages)?;
+
+            if let Some(p) = &progress {
+                p.current.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        offset += page_size;
+    }
+
+    t_index.commit()?;
+
+    if let Some(p) = &progress {
+        p.phase.store(0, Ordering::Relaxed);
+        p.is_rebuilding.store(false, Ordering::Relaxed);
+    }
+
+    Ok(indexed_docs)
 }
 
 fn ingest_batch(
@@ -3065,11 +3220,25 @@ pub mod persist {
     fn duplicate_conversation_keys_present(convs: &[NormalizedConversation]) -> bool {
         let mut seen = HashSet::with_capacity(convs.len());
         for conv in convs {
-            let Some(external_id) = conv.external_id.as_deref() else {
-                continue;
-            };
             let (source_id, _) = extract_provenance(&conv.metadata);
-            if !seen.insert((conv.agent_slug.clone(), source_id, external_id.to_owned())) {
+            let key = if let Some(external_id) = conv.external_id.as_deref() {
+                (
+                    conv.agent_slug.clone(),
+                    source_id,
+                    Some(external_id.to_owned()),
+                    None,
+                    conv.started_at,
+                )
+            } else {
+                (
+                    conv.agent_slug.clone(),
+                    source_id,
+                    None,
+                    Some(conv.source_path.to_string_lossy().to_string()),
+                    None,
+                )
+            };
+            if !seen.insert(key) {
                 return true;
             }
         }
@@ -3747,6 +3916,54 @@ pub mod persist {
             assert_eq!(stored_indices, vec![0, 1, 2]);
 
             t_index.commit().unwrap();
+        }
+
+        #[test]
+        fn duplicate_conversation_keys_present_for_shared_source_path_without_external_id() {
+            use crate::connectors::{NormalizedConversation, NormalizedMessage};
+
+            let convs = vec![
+                NormalizedConversation {
+                    agent_slug: "shared-agent".into(),
+                    external_id: None,
+                    title: Some("Shared Session".into()),
+                    workspace: Some(std::path::PathBuf::from("/ws/shared")),
+                    source_path: std::path::PathBuf::from("/log/shared.jsonl"),
+                    started_at: Some(1_000),
+                    ended_at: Some(1_010),
+                    metadata: serde_json::json!({}),
+                    messages: vec![NormalizedMessage {
+                        idx: 0,
+                        role: "user".into(),
+                        author: Some("tester".into()),
+                        created_at: Some(1_000),
+                        content: "first".into(),
+                        extra: serde_json::json!({}),
+                        snippets: vec![],
+                    }],
+                },
+                NormalizedConversation {
+                    agent_slug: "shared-agent".into(),
+                    external_id: None,
+                    title: Some("Shared Session".into()),
+                    workspace: Some(std::path::PathBuf::from("/ws/shared")),
+                    source_path: std::path::PathBuf::from("/log/shared.jsonl"),
+                    started_at: Some(9_999),
+                    ended_at: Some(10_010),
+                    metadata: serde_json::json!({}),
+                    messages: vec![NormalizedMessage {
+                        idx: 1,
+                        role: "assistant".into(),
+                        author: Some("tester".into()),
+                        created_at: Some(1_001),
+                        content: "second".into(),
+                        extra: serde_json::json!({}),
+                        snippets: vec![],
+                    }],
+                },
+            ];
+
+            assert!(duplicate_conversation_keys_present(&convs));
         }
 
         #[test]

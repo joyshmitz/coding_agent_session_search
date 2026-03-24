@@ -15,6 +15,8 @@ use frankensqlite::{
 };
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Command, Stdio};
 
 /// Frankensqlite parameter list builder.
 macro_rules! fparams {
@@ -843,6 +845,375 @@ pub fn cleanup_old_backups(db_path: &Path, keep_count: usize) -> Result<(), std:
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct HistoricalDatabaseBundle {
+    root_path: PathBuf,
+    total_bytes: u64,
+    modified_at_ms: i64,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct HistoricalSalvageOutcome {
+    pub bundles_considered: usize,
+    pub bundles_imported: usize,
+    pub conversations_imported: usize,
+    pub messages_imported: usize,
+}
+
+#[derive(Debug)]
+struct HistoricalReadConnection {
+    conn: rusqlite::Connection,
+    method: &'static str,
+    _tempdir: Option<tempfile::TempDir>,
+}
+
+const HISTORICAL_RECOVERY_CORE_SCHEMA: &str = r"
+CREATE TABLE sources (
+    id TEXT PRIMARY KEY,
+    kind TEXT,
+    host_label TEXT,
+    machine_id TEXT,
+    platform TEXT,
+    config_json TEXT,
+    created_at INTEGER,
+    updated_at INTEGER
+);
+CREATE TABLE agents (
+    id INTEGER PRIMARY KEY,
+    slug TEXT,
+    name TEXT,
+    version TEXT,
+    kind TEXT,
+    created_at INTEGER,
+    updated_at INTEGER
+);
+CREATE TABLE workspaces (
+    id INTEGER PRIMARY KEY,
+    path TEXT,
+    display_name TEXT
+);
+CREATE TABLE conversations (
+    id INTEGER PRIMARY KEY,
+    agent_id INTEGER,
+    workspace_id INTEGER,
+    source_id TEXT,
+    external_id TEXT,
+    title TEXT,
+    source_path TEXT,
+    started_at INTEGER,
+    ended_at INTEGER,
+    approx_tokens INTEGER,
+    metadata_json TEXT,
+    origin_host TEXT,
+    metadata_bin BLOB,
+    total_input_tokens INTEGER,
+    total_output_tokens INTEGER,
+    total_cache_read_tokens INTEGER,
+    total_cache_creation_tokens INTEGER,
+    grand_total_tokens INTEGER,
+    estimated_cost_usd REAL,
+    primary_model TEXT,
+    api_call_count INTEGER,
+    tool_call_count INTEGER,
+    user_message_count INTEGER,
+    assistant_message_count INTEGER
+);
+CREATE TABLE messages (
+    id INTEGER PRIMARY KEY,
+    conversation_id INTEGER,
+    idx INTEGER,
+    role TEXT,
+    author TEXT,
+    created_at INTEGER,
+    content TEXT,
+    extra_json TEXT,
+    extra_bin BLOB
+);
+CREATE TABLE snippets (
+    id INTEGER PRIMARY KEY,
+    message_id INTEGER,
+    file_path TEXT,
+    start_line INTEGER,
+    end_line INTEGER,
+    language TEXT,
+    snippet_text TEXT
+);
+";
+const HISTORICAL_SALVAGE_LEDGER_VERSION: u32 = 2;
+const SOURCE_PATH_MERGE_START_TOLERANCE_MS: i64 = 5 * 60 * 1000;
+
+fn historical_bundle_root_paths(db_path: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let Some(parent) = db_path.parent() else {
+        return roots;
+    };
+    let db_name = db_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("agent_search.db");
+    let db_stem = db_path
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or("agent_search");
+
+    let mut push_root = |path: PathBuf| {
+        if path == db_path {
+            return;
+        }
+        if !roots.iter().any(|existing| existing == &path) {
+            roots.push(path);
+        }
+    };
+
+    if let Ok(entries) = fs::read_dir(parent) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name.ends_with("-wal") || name.ends_with("-shm") {
+                continue;
+            }
+            if name.starts_with(&format!("{db_name}.backup."))
+                || name.starts_with(&format!("{db_stem}.corrupt."))
+            {
+                push_root(path);
+            }
+        }
+    }
+
+    let backups_dir = parent.join("backups");
+    if let Ok(entries) = fs::read_dir(backups_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name.ends_with("-wal") || name.ends_with("-shm") {
+                continue;
+            }
+            if name.starts_with(&format!("{db_name}.")) && name.ends_with(".bak") {
+                push_root(path);
+            }
+        }
+    }
+
+    roots
+}
+
+fn file_mtime_ms(path: &Path) -> i64 {
+    fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|ts| ts.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn bundle_total_bytes(root_path: &Path) -> u64 {
+    let mut total = fs::metadata(root_path).map(|meta| meta.len()).unwrap_or(0);
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = database_sidecar_path(root_path, suffix);
+        total = total.saturating_add(fs::metadata(sidecar).map(|meta| meta.len()).unwrap_or(0));
+    }
+    total
+}
+
+pub(crate) fn discover_historical_database_bundles(
+    db_path: &Path,
+) -> Vec<HistoricalDatabaseBundle> {
+    let mut bundles: Vec<_> = historical_bundle_root_paths(db_path)
+        .into_iter()
+        .filter(|root| root.exists())
+        .map(|root_path| HistoricalDatabaseBundle {
+            modified_at_ms: file_mtime_ms(&root_path),
+            total_bytes: bundle_total_bytes(&root_path),
+            root_path,
+        })
+        .filter(|bundle| bundle.total_bytes > 0)
+        .collect();
+
+    bundles.sort_by(|left, right| {
+        right
+            .total_bytes
+            .cmp(&left.total_bytes)
+            .then_with(|| right.modified_at_ms.cmp(&left.modified_at_ms))
+            .then_with(|| right.root_path.cmp(&left.root_path))
+    });
+    bundles
+}
+
+fn open_historical_bundle_readonly(root_path: &Path) -> Result<rusqlite::Connection> {
+    let uri = format!("file:{}?immutable=1", root_path.to_string_lossy());
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI;
+    let conn = rusqlite::Connection::open_with_flags(uri, flags)
+        .with_context(|| format!("opening historical database {}", root_path.display()))?;
+    conn.pragma_update(None, "writable_schema", "ON")
+        .with_context(|| format!("enabling writable_schema for {}", root_path.display()))?;
+    conn.pragma_update(None, "query_only", "ON")
+        .with_context(|| format!("enabling query_only for {}", root_path.display()))?;
+    conn.busy_timeout(Duration::from_secs(30))
+        .with_context(|| format!("configuring busy_timeout for {}", root_path.display()))?;
+    Ok(conn)
+}
+
+fn historical_bundle_has_queryable_core_tables(conn: &rusqlite::Connection) -> Result<()> {
+    let _: i64 = conn
+        .query_row("SELECT COUNT(*) FROM conversations", [], |row| row.get(0))
+        .context("counting conversations in historical database")?;
+    let _: i64 = conn
+        .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+        .context("counting messages in historical database")?;
+    Ok(())
+}
+
+fn is_recoverable_insert_line(line: &str) -> bool {
+    [
+        "sources",
+        "agents",
+        "workspaces",
+        "conversations",
+        "messages",
+        "snippets",
+    ]
+    .iter()
+    .any(|table| {
+        line.starts_with(&format!("INSERT INTO '{table}'"))
+            || line.starts_with(&format!("INSERT OR IGNORE INTO '{table}'"))
+            || line.starts_with(&format!("INSERT INTO \"{table}\""))
+            || line.starts_with(&format!("INSERT OR IGNORE INTO \"{table}\""))
+    })
+}
+
+fn recover_historical_bundle_via_sqlite3(
+    bundle: &HistoricalDatabaseBundle,
+) -> Result<HistoricalReadConnection> {
+    let tempdir = tempfile::TempDir::new().context("creating temporary salvage directory")?;
+    let recovered_db = tempdir.path().join("historical-recovered.db");
+    let temp_conn = rusqlite::Connection::open(&recovered_db)
+        .with_context(|| format!("creating recovered database {}", recovered_db.display()))?;
+    temp_conn
+        .execute_batch(HISTORICAL_RECOVERY_CORE_SCHEMA)
+        .with_context(|| format!("initializing recovered schema {}", recovered_db.display()))?;
+    drop(temp_conn);
+
+    let bundle_uri = format!("file:{}?immutable=1", bundle.root_path.to_string_lossy());
+    let mut recover = Command::new("sqlite3")
+        .arg(&bundle_uri)
+        .arg(".recover")
+        .stdout(Stdio::piped())
+        .spawn()
+        .with_context(|| {
+            format!(
+                "launching sqlite3 .recover for historical bundle {}",
+                bundle.root_path.display()
+            )
+        })?;
+    let recover_stdout = recover
+        .stdout
+        .take()
+        .context("capturing sqlite3 .recover stdout")?;
+
+    let mut importer = Command::new("sqlite3")
+        .arg(&recovered_db)
+        .stdin(Stdio::piped())
+        .spawn()
+        .with_context(|| {
+            format!(
+                "launching sqlite3 importer for recovered bundle {}",
+                recovered_db.display()
+            )
+        })?;
+
+    {
+        let importer_stdin = importer
+            .stdin
+            .as_mut()
+            .context("opening sqlite3 importer stdin")?;
+        importer_stdin
+            .write_all(b"BEGIN;\n")
+            .context("starting recovery import transaction")?;
+
+        let reader = BufReader::new(recover_stdout);
+        for line in reader.lines() {
+            let line = line.context("reading sqlite3 .recover output")?;
+            if is_recoverable_insert_line(&line) {
+                importer_stdin
+                    .write_all(line.as_bytes())
+                    .context("writing recovered INSERT")?;
+                importer_stdin
+                    .write_all(b"\n")
+                    .context("writing recovered INSERT newline")?;
+            }
+        }
+
+        importer_stdin
+            .write_all(b"COMMIT;\n")
+            .context("committing recovery import transaction")?;
+    }
+
+    let recover_status = recover
+        .wait()
+        .context("waiting for sqlite3 .recover process")?;
+    if !recover_status.success() {
+        anyhow::bail!(
+            "sqlite3 .recover exited with status {} for {}",
+            recover_status,
+            bundle.root_path.display()
+        );
+    }
+
+    let importer_status = importer
+        .wait()
+        .context("waiting for sqlite3 recovery importer")?;
+    if !importer_status.success() {
+        anyhow::bail!(
+            "sqlite3 recovery importer exited with status {} for {}",
+            importer_status,
+            recovered_db.display()
+        );
+    }
+
+    let conn = open_historical_bundle_readonly(&recovered_db)?;
+    historical_bundle_has_queryable_core_tables(&conn)?;
+    Ok(HistoricalReadConnection {
+        conn,
+        method: "sqlite3-recover",
+        _tempdir: Some(tempdir),
+    })
+}
+
+fn open_historical_bundle_for_salvage(
+    bundle: &HistoricalDatabaseBundle,
+) -> Result<HistoricalReadConnection> {
+    match open_historical_bundle_readonly(&bundle.root_path) {
+        Ok(conn) => {
+            if historical_bundle_has_queryable_core_tables(&conn).is_ok() {
+                return Ok(HistoricalReadConnection {
+                    conn,
+                    method: "direct-readonly",
+                    _tempdir: None,
+                });
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                path = %bundle.root_path.display(),
+                error = %err,
+                "historical bundle direct open failed; falling back to sqlite3 .recover"
+            );
+        }
+    }
+
+    recover_historical_bundle_via_sqlite3(bundle)
+}
+
+fn parse_json_column(value: Option<String>) -> serde_json::Value {
+    value
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or(serde_json::Value::Null)
 }
 
 fn is_backup_root_name(name: &str, prefix: &str) -> bool {
@@ -2144,6 +2515,180 @@ pub struct InsertOutcome {
     pub inserted_indices: Vec<i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum PendingConversationKey {
+    External {
+        source_id: String,
+        agent_id: i64,
+        external_id: String,
+    },
+    SourcePath {
+        source_id: String,
+        agent_id: i64,
+        source_path: String,
+        started_at: Option<i64>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct MessageMergeFingerprint {
+    idx: i64,
+    created_at: Option<i64>,
+    role: String,
+    author: Option<String>,
+    content_hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct MessageReplayFingerprint {
+    created_at: Option<i64>,
+    role: String,
+    author: Option<String>,
+    content_hash: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ConversationMergeEvidence {
+    exact_overlap: usize,
+    replay_overlap: usize,
+    smaller_replay_set: usize,
+    started_close: bool,
+    start_distance_ms: i64,
+}
+
+fn conversation_effective_started_at(conv: &Conversation) -> Option<i64> {
+    conv.started_at
+        .or_else(|| conv.messages.iter().filter_map(|msg| msg.created_at).min())
+}
+
+fn message_merge_fingerprint(msg: &Message) -> MessageMergeFingerprint {
+    MessageMergeFingerprint {
+        idx: msg.idx,
+        created_at: msg.created_at,
+        role: role_str(&msg.role).to_string(),
+        author: msg.author.clone(),
+        content_hash: blake3::hash(msg.content.as_bytes()).to_hex().to_string(),
+    }
+}
+
+fn message_replay_fingerprint(msg: &Message) -> MessageReplayFingerprint {
+    MessageReplayFingerprint {
+        created_at: msg.created_at,
+        role: role_str(&msg.role).to_string(),
+        author: msg.author.clone(),
+        content_hash: blake3::hash(msg.content.as_bytes()).to_hex().to_string(),
+    }
+}
+
+fn conversation_message_fingerprints(conv: &Conversation) -> HashSet<MessageMergeFingerprint> {
+    conv.messages
+        .iter()
+        .map(message_merge_fingerprint)
+        .collect()
+}
+
+fn conversation_message_replay_fingerprints(
+    conv: &Conversation,
+) -> HashSet<MessageReplayFingerprint> {
+    conv.messages
+        .iter()
+        .map(message_replay_fingerprint)
+        .collect()
+}
+
+fn replay_fingerprint_from_merge(
+    fingerprint: &MessageMergeFingerprint,
+) -> MessageReplayFingerprint {
+    MessageReplayFingerprint {
+        created_at: fingerprint.created_at,
+        role: fingerprint.role.clone(),
+        author: fingerprint.author.clone(),
+        content_hash: fingerprint.content_hash.clone(),
+    }
+}
+
+fn replay_fingerprints_from_merge_set(
+    fingerprints: &HashSet<MessageMergeFingerprint>,
+) -> HashSet<MessageReplayFingerprint> {
+    fingerprints
+        .iter()
+        .map(replay_fingerprint_from_merge)
+        .collect()
+}
+
+fn start_distance_ms(left: Option<i64>, right: Option<i64>) -> i64 {
+    match (left, right) {
+        (Some(left), Some(right)) => (i128::from(left) - i128::from(right))
+            .abs()
+            .try_into()
+            .unwrap_or(i64::MAX),
+        _ => i64::MAX,
+    }
+}
+
+fn conversation_merge_evidence(
+    incoming_exact: &HashSet<MessageMergeFingerprint>,
+    incoming_replay: &HashSet<MessageReplayFingerprint>,
+    existing_exact: &HashSet<MessageMergeFingerprint>,
+    existing_replay: &HashSet<MessageReplayFingerprint>,
+    incoming_started_at: Option<i64>,
+    existing_started_at: Option<i64>,
+) -> Option<ConversationMergeEvidence> {
+    let exact_overlap = incoming_exact.intersection(existing_exact).count();
+    let replay_overlap = incoming_replay.intersection(existing_replay).count();
+    if exact_overlap == 0 && replay_overlap == 0 {
+        return None;
+    }
+
+    let smaller_replay_set = incoming_replay.len().min(existing_replay.len());
+    let started_close = timestamps_within_tolerance(
+        incoming_started_at,
+        existing_started_at,
+        SOURCE_PATH_MERGE_START_TOLERANCE_MS,
+    );
+    let full_replay_subset_match = smaller_replay_set >= 2 && replay_overlap == smaller_replay_set;
+
+    let merge_allowed = if started_close {
+        exact_overlap >= 1 || replay_overlap >= 2
+    } else {
+        exact_overlap >= 2 || full_replay_subset_match
+    };
+
+    merge_allowed.then_some(ConversationMergeEvidence {
+        exact_overlap,
+        replay_overlap,
+        smaller_replay_set,
+        started_close,
+        start_distance_ms: start_distance_ms(incoming_started_at, existing_started_at),
+    })
+}
+
+fn timestamps_within_tolerance(left: Option<i64>, right: Option<i64>, tolerance_ms: i64) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            (i128::from(left) - i128::from(right)).abs() <= i128::from(tolerance_ms)
+        }
+        _ => false,
+    }
+}
+
+fn conversation_merge_key(agent_id: i64, conv: &Conversation) -> PendingConversationKey {
+    if let Some(external_id) = conv.external_id.clone() {
+        PendingConversationKey::External {
+            source_id: conv.source_id.clone(),
+            agent_id,
+            external_id,
+        }
+    } else {
+        PendingConversationKey::SourcePath {
+            source_id: conv.source_id.clone(),
+            agent_id,
+            source_path: path_to_string(&conv.source_path),
+            started_at: conversation_effective_started_at(conv),
+        }
+    }
+}
+
 /// Message data needed for semantic embedding generation.
 pub struct MessageForEmbedding {
     pub message_id: i64,
@@ -2469,6 +3014,271 @@ impl FrankenStorage {
         Ok(())
     }
 
+    fn historical_bundle_meta_key(bundle: &HistoricalDatabaseBundle) -> String {
+        let signature = format!(
+            "{}:{}:{}:{}",
+            HISTORICAL_SALVAGE_LEDGER_VERSION,
+            bundle.root_path.display(),
+            bundle.total_bytes,
+            bundle.modified_at_ms
+        );
+        format!(
+            "historical_bundle_salvaged:{}",
+            blake3::hash(signature.as_bytes()).to_hex()
+        )
+    }
+
+    fn historical_bundle_already_imported(
+        &self,
+        bundle: &HistoricalDatabaseBundle,
+    ) -> Result<bool> {
+        let key = Self::historical_bundle_meta_key(bundle);
+        let existing: Option<String> = self
+            .conn
+            .query_row_map(
+                "SELECT value FROM meta WHERE key = ?1",
+                fparams![key.as_str()],
+                |row| row.get_typed(0),
+            )
+            .optional()?;
+        Ok(existing.is_some())
+    }
+
+    fn record_historical_bundle_import(
+        &self,
+        bundle: &HistoricalDatabaseBundle,
+        method: &str,
+        conversations_imported: usize,
+        messages_imported: usize,
+    ) -> Result<()> {
+        let key = Self::historical_bundle_meta_key(bundle);
+        let value = serde_json::json!({
+            "salvage_version": HISTORICAL_SALVAGE_LEDGER_VERSION,
+            "path": bundle.root_path.display().to_string(),
+            "bytes": bundle.total_bytes,
+            "modified_at_ms": bundle.modified_at_ms,
+            "method": method,
+            "conversations_imported": conversations_imported,
+            "messages_imported": messages_imported,
+            "recorded_at_ms": Self::now_millis(),
+        });
+        let value_str = serde_json::to_string(&value)?;
+        self.conn.execute_compat(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, ?2)",
+            fparams![key.as_str(), value_str.as_str()],
+        )?;
+        Ok(())
+    }
+
+    fn import_historical_sources(&self, source_conn: &rusqlite::Connection) -> Result<()> {
+        let mut stmt = match source_conn.prepare(
+            "SELECT id, kind, host_label, machine_id, platform, config_json, created_at, updated_at
+             FROM sources",
+        ) {
+            Ok(stmt) => stmt,
+            Err(err) => {
+                tracing::warn!(error = %err, "historical sources table unavailable; skipping source import");
+                return Ok(());
+            }
+        };
+
+        let rows = stmt.query_map([], |row| {
+            let kind_str: String = row.get(1)?;
+            let config_json_raw: Option<String> = row.get(5)?;
+            Ok(Source {
+                id: row.get(0)?,
+                kind: SourceKind::parse(&kind_str).unwrap_or_default(),
+                host_label: row.get(2)?,
+                machine_id: row.get(3)?,
+                platform: row.get(4)?,
+                config_json: config_json_raw.and_then(|raw| serde_json::from_str(&raw).ok()),
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?;
+
+        for row in rows {
+            let source = row.context("reading historical source row")?;
+            self.upsert_source(&source)?;
+        }
+        Ok(())
+    }
+
+    fn import_historical_conversations(
+        &self,
+        source_conn: &rusqlite::Connection,
+    ) -> Result<(usize, usize)> {
+        let mut conv_stmt = source_conn.prepare(
+            "SELECT
+                c.id,
+                a.slug,
+                w.path,
+                c.external_id,
+                c.title,
+                c.source_path,
+                c.started_at,
+                c.ended_at,
+                c.approx_tokens,
+                c.metadata_json,
+                c.source_id,
+                c.origin_host
+             FROM conversations c
+             JOIN agents a ON c.agent_id = a.id
+             LEFT JOIN workspaces w ON c.workspace_id = w.id
+             ORDER BY c.id",
+        )?;
+
+        let mut rows = conv_stmt.query([])?;
+        let mut imported_conversations = 0usize;
+        let mut imported_messages = 0usize;
+
+        while let Some(row) = rows.next()? {
+            let conversation_row_id: i64 = row.get(0)?;
+            let agent_slug: String = row.get(1)?;
+            let workspace_path: Option<String> = row.get(2)?;
+            let source_path: String = row.get(5)?;
+            let source_id: Option<String> = row.get(10)?;
+
+            let mut message_stmt = source_conn.prepare(
+                "SELECT idx, role, author, created_at, content, extra_json
+                 FROM messages
+                 WHERE conversation_id = ?1
+                 ORDER BY idx",
+            )?;
+            let messages = message_stmt
+                .query_map(rusqlite::params![conversation_row_id], |msg_row| {
+                    let role: String = msg_row.get(1)?;
+                    Ok(Message {
+                        id: None,
+                        idx: msg_row.get(0)?,
+                        role: match role.as_str() {
+                            "user" => MessageRole::User,
+                            "agent" | "assistant" => MessageRole::Agent,
+                            "tool" => MessageRole::Tool,
+                            "system" => MessageRole::System,
+                            other => MessageRole::Other(other.to_string()),
+                        },
+                        author: msg_row.get(2)?,
+                        created_at: msg_row.get(3)?,
+                        content: msg_row.get(4)?,
+                        extra_json: parse_json_column(msg_row.get(5)?),
+                        snippets: Vec::new(),
+                    })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context("collecting historical message rows")?;
+
+            if messages.is_empty() {
+                continue;
+            }
+
+            let conversation = Conversation {
+                id: None,
+                agent_slug: agent_slug.clone(),
+                workspace: workspace_path.map(PathBuf::from),
+                external_id: row.get(3)?,
+                title: row.get(4)?,
+                source_path: PathBuf::from(source_path),
+                started_at: row.get(6)?,
+                ended_at: row.get(7)?,
+                approx_tokens: row.get(8)?,
+                metadata_json: parse_json_column(row.get(9)?),
+                messages,
+                source_id: source_id.unwrap_or_else(|| LOCAL_SOURCE_ID.to_string()),
+                origin_host: row.get(11)?,
+            };
+
+            if self.get_source(&conversation.source_id)?.is_none() {
+                let placeholder = if conversation.source_id == LOCAL_SOURCE_ID {
+                    Source::local()
+                } else {
+                    Source {
+                        id: conversation.source_id.clone(),
+                        kind: SourceKind::Ssh,
+                        host_label: conversation.origin_host.clone(),
+                        machine_id: None,
+                        platform: None,
+                        config_json: None,
+                        created_at: None,
+                        updated_at: None,
+                    }
+                };
+                self.upsert_source(&placeholder)?;
+            }
+
+            let agent = Agent {
+                id: None,
+                slug: agent_slug.clone(),
+                name: agent_slug,
+                version: None,
+                kind: AgentKind::Cli,
+            };
+            let agent_id = self.ensure_agent(&agent)?;
+            let workspace_id = if let Some(workspace) = &conversation.workspace {
+                Some(self.ensure_workspace(workspace, None)?)
+            } else {
+                None
+            };
+
+            let outcome = self.insert_conversation_tree(agent_id, workspace_id, &conversation)?;
+            if !outcome.inserted_indices.is_empty() {
+                imported_conversations += 1;
+                imported_messages += outcome.inserted_indices.len();
+            }
+        }
+
+        Ok((imported_conversations, imported_messages))
+    }
+
+    pub fn salvage_historical_databases(
+        &self,
+        canonical_db_path: &Path,
+    ) -> Result<HistoricalSalvageOutcome> {
+        let ordered_bundles = discover_historical_database_bundles(canonical_db_path);
+        let mut outcome = HistoricalSalvageOutcome {
+            bundles_considered: ordered_bundles.len(),
+            ..HistoricalSalvageOutcome::default()
+        };
+
+        for bundle in ordered_bundles {
+            if self.historical_bundle_already_imported(&bundle)? {
+                continue;
+            }
+
+            let source = open_historical_bundle_for_salvage(&bundle).with_context(|| {
+                format!(
+                    "opening historical bundle {} for salvage",
+                    bundle.root_path.display()
+                )
+            })?;
+
+            self.import_historical_sources(&source.conn)?;
+            let (imported_conversations, imported_messages) =
+                self.import_historical_conversations(&source.conn)?;
+            self.record_historical_bundle_import(
+                &bundle,
+                source.method,
+                imported_conversations,
+                imported_messages,
+            )?;
+
+            outcome.bundles_imported += 1;
+            outcome.conversations_imported += imported_conversations;
+            outcome.messages_imported += imported_messages;
+
+            tracing::info!(
+                path = %bundle.root_path.display(),
+                bytes = bundle.total_bytes,
+                method = source.method,
+                imported_conversations,
+                imported_messages,
+                "salvaged historical cass database bundle"
+            );
+        }
+
+        Ok(outcome)
+    }
+
     /// Delete a source by ID. Returns true if a row was deleted.
     pub fn delete_source(&self, id: &str, _cascade: bool) -> Result<bool> {
         if id == LOCAL_SOURCE_ID {
@@ -2487,22 +3297,15 @@ impl FrankenStorage {
         workspace_id: Option<i64>,
         conv: &Conversation,
     ) -> Result<InsertOutcome> {
-        // Check for existing conversation with same (source_id, agent_id, external_id)
-        if let Some(ext) = &conv.external_id {
-            let existing: Option<i64> = self
-                .conn
-                .query_row_map(
-                    "SELECT id FROM conversations WHERE source_id = ?1 AND agent_id = ?2 AND external_id = ?3",
-                    fparams![conv.source_id.as_str(), agent_id, ext.as_str()],
-                    |row| row.get_typed(0),
-                )
-                .optional()?;
-            if let Some(existing_id) = existing {
-                return self.franken_append_messages(existing_id, conv);
-            }
-        }
-
+        let conversation_key = conversation_merge_key(agent_id, conv);
         let mut tx = self.conn.transaction()?;
+        let existing =
+            franken_find_existing_conversation_by_key(&tx, &conversation_key, Some(conv))?;
+        if let Some(existing_id) = existing {
+            let outcome = self.franken_append_messages_in_tx(&tx, existing_id, conv)?;
+            tx.commit()?;
+            return Ok(outcome);
+        }
 
         let conv_id = match franken_insert_conversation_or_get_existing(
             &tx,
@@ -2512,7 +3315,10 @@ impl FrankenStorage {
         )? {
             ConversationInsertStatus::Inserted(conv_id) => conv_id,
             ConversationInsertStatus::Existing(existing_id) => {
-                let mut existing_indices = franken_existing_message_indices(&tx, existing_id)?;
+                let mut existing_messages =
+                    franken_existing_message_fingerprints_by_idx(&tx, existing_id)?;
+                let mut existing_replay_fingerprints =
+                    franken_existing_message_replay_fingerprints(&tx, existing_id)?;
                 let mut inserted_indices = Vec::new();
                 let mut fts_entries = Vec::new();
                 let mut fts_pending_chars = 0usize;
@@ -2520,7 +3326,26 @@ impl FrankenStorage {
                 let mut new_chars: i64 = 0;
 
                 for msg in &conv.messages {
-                    if !existing_indices.insert(msg.idx) {
+                    if let Some(existing_fingerprint) = existing_messages.get(&msg.idx) {
+                        let incoming_fingerprint = message_merge_fingerprint(msg);
+                        if existing_fingerprint != &incoming_fingerprint {
+                            tracing::warn!(
+                                conversation_id = existing_id,
+                                idx = msg.idx,
+                                source_path = %conv.source_path.display(),
+                                "message idx collision encountered while merging recovered conversation; retaining canonical message variant"
+                            );
+                        }
+                        continue;
+                    }
+                    let incoming_replay = message_replay_fingerprint(msg);
+                    if existing_replay_fingerprints.contains(&incoming_replay) {
+                        tracing::debug!(
+                            conversation_id = existing_id,
+                            idx = msg.idx,
+                            source_path = %conv.source_path.display(),
+                            "skipping replay-equivalent recovered message with shifted idx"
+                        );
                         continue;
                     }
                     let msg_id = franken_insert_message(&tx, existing_id, msg)?;
@@ -2539,6 +3364,8 @@ impl FrankenStorage {
                     }
                     inserted_indices.push(msg.idx);
                     new_chars += msg.content.len() as i64;
+                    existing_messages.insert(msg.idx, message_merge_fingerprint(msg));
+                    existing_replay_fingerprints.insert(incoming_replay);
                 }
 
                 flush_pending_fts_entries(
@@ -2560,7 +3387,7 @@ impl FrankenStorage {
                         &tx,
                         &conv.agent_slug,
                         &conv.source_id,
-                        conv.started_at,
+                        conversation_effective_started_at(conv),
                         0,
                         inserted_indices.len() as i64,
                         new_chars,
@@ -2606,7 +3433,7 @@ impl FrankenStorage {
             &tx,
             &conv.agent_slug,
             &conv.source_id,
-            conv.started_at,
+            conversation_effective_started_at(conv),
             1,
             conv.messages.len() as i64,
             total_chars,
@@ -2619,14 +3446,17 @@ impl FrankenStorage {
         })
     }
 
-    /// Append new messages to an existing conversation.
-    fn franken_append_messages(
+    /// Append new messages to an existing conversation within an active transaction.
+    fn franken_append_messages_in_tx(
         &self,
+        tx: &FrankenTransaction<'_>,
         conversation_id: i64,
         conv: &Conversation,
     ) -> Result<InsertOutcome> {
-        let mut tx = self.conn.transaction()?;
-        let mut existing_indices = franken_existing_message_indices(&tx, conversation_id)?;
+        let mut existing_messages =
+            franken_existing_message_fingerprints_by_idx(tx, conversation_id)?;
+        let mut existing_replay_fingerprints =
+            franken_existing_message_replay_fingerprints(tx, conversation_id)?;
 
         let mut inserted_indices = Vec::new();
         let mut fts_entries = Vec::new();
@@ -2634,18 +3464,37 @@ impl FrankenStorage {
         let mut _fts_inserted_total = 0usize;
         let mut new_chars: i64 = 0;
         for msg in &conv.messages {
-            if !existing_indices.insert(msg.idx) {
+            if let Some(existing_fingerprint) = existing_messages.get(&msg.idx) {
+                let incoming_fingerprint = message_merge_fingerprint(msg);
+                if existing_fingerprint != &incoming_fingerprint {
+                    tracing::warn!(
+                        conversation_id,
+                        idx = msg.idx,
+                        source_path = %conv.source_path.display(),
+                        "message idx collision encountered while appending to an existing conversation; retaining canonical message variant"
+                    );
+                }
                 continue;
             }
-            let msg_id = franken_insert_message(&tx, conversation_id, msg)?;
-            franken_insert_snippets(&tx, msg_id, &msg.snippets)?;
+            let incoming_replay = message_replay_fingerprint(msg);
+            if existing_replay_fingerprints.contains(&incoming_replay) {
+                tracing::debug!(
+                    conversation_id,
+                    idx = msg.idx,
+                    source_path = %conv.source_path.display(),
+                    "skipping replay-equivalent recovered message with shifted idx"
+                );
+                continue;
+            }
+            let msg_id = franken_insert_message(tx, conversation_id, msg)?;
+            franken_insert_snippets(tx, msg_id, &msg.snippets)?;
             fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
             fts_pending_chars = fts_pending_chars.saturating_add(msg.content.len());
             if fts_entries.len() >= FTS_ENTRY_BATCH_MAX_DOCS
                 || fts_pending_chars >= FTS_ENTRY_BATCH_MAX_CHARS
             {
                 flush_pending_fts_entries(
-                    &tx,
+                    tx,
                     &mut fts_entries,
                     &mut fts_pending_chars,
                     &mut _fts_inserted_total,
@@ -2653,10 +3502,12 @@ impl FrankenStorage {
             }
             inserted_indices.push(msg.idx);
             new_chars += msg.content.len() as i64;
+            existing_messages.insert(msg.idx, message_merge_fingerprint(msg));
+            existing_replay_fingerprints.insert(incoming_replay);
         }
 
         flush_pending_fts_entries(
-            &tx,
+            tx,
             &mut fts_entries,
             &mut fts_pending_chars,
             &mut _fts_inserted_total,
@@ -2672,17 +3523,16 @@ impl FrankenStorage {
         if !inserted_indices.is_empty() {
             let message_count = inserted_indices.len() as i64;
             franken_update_daily_stats_in_tx(
-                &tx,
+                tx,
                 &conv.agent_slug,
                 &conv.source_id,
-                conv.started_at,
+                conversation_effective_started_at(conv),
                 0,
                 message_count,
                 new_chars,
             )?;
         }
 
-        tx.commit()?;
         Ok(InsertOutcome {
             conversation_id,
             inserted_indices,
@@ -3087,8 +3937,13 @@ impl FrankenStorage {
         let mut metrics_entries: Vec<MessageMetricsEntry> = Vec::new();
         let mut rollup_agg = AnalyticsRollupAggregator::new();
         let mut conv_ids_to_summarize: Vec<i64> = Vec::new();
-        let mut pending_conversation_ids: HashMap<(String, i64, String), i64> = HashMap::new();
-        let mut pending_message_indices: HashMap<i64, HashSet<i64>> = HashMap::new();
+        let mut pending_conversation_ids: HashMap<PendingConversationKey, i64> = HashMap::new();
+        let mut pending_message_fingerprints: HashMap<i64, HashMap<i64, MessageMergeFingerprint>> =
+            HashMap::new();
+        let mut pending_message_replay_fingerprints: HashMap<
+            i64,
+            HashSet<MessageReplayFingerprint>,
+        > = HashMap::new();
 
         for &(agent_id, workspace_id, conv) in conversations {
             let mut total_chars: i64 = 0;
@@ -3096,44 +3951,64 @@ impl FrankenStorage {
             let mut inserted_messages: Vec<(i64, &Message)> =
                 Vec::with_capacity(conv.messages.len());
             let mut session_count_delta = 1_i64;
-            let conversation_key = conv
-                .external_id
-                .as_ref()
-                .map(|ext| (conv.source_id.clone(), agent_id, ext.clone()));
+            let conversation_key = conversation_merge_key(agent_id, conv);
 
-            let existing_conv_id = if let Some(key) = &conversation_key {
-                if let Some(existing_id) = pending_conversation_ids.get(key) {
-                    Some(*existing_id)
-                } else {
-                    let existing_id = tx
-                        .query_row_map(
-                            "SELECT id FROM conversations WHERE source_id = ?1 AND agent_id = ?2 AND external_id = ?3",
-                            fparams![key.0.as_str(), key.1, key.2.as_str()],
-                            |row| row.get_typed(0),
-                        )
-                        .optional()?;
-                    if let Some(existing_id) = existing_id {
-                        pending_conversation_ids.insert(key.clone(), existing_id);
-                    }
-                    existing_id
-                }
+            let existing_conv_id = if let Some(existing_id) =
+                pending_conversation_ids.get(&conversation_key)
+            {
+                Some(*existing_id)
             } else {
-                None
+                let existing_id =
+                    franken_find_existing_conversation_by_key(&tx, &conversation_key, Some(conv))?;
+                if let Some(existing_id) = existing_id {
+                    pending_conversation_ids.insert(conversation_key.clone(), existing_id);
+                }
+                existing_id
             };
 
             let conv_id = if let Some(existing_id) = existing_conv_id {
                 session_count_delta = 0;
-                let mut existing_indices =
-                    if let Some(indices) = pending_message_indices.get(&existing_id) {
-                        indices.clone()
+                let mut existing_messages =
+                    if let Some(fingerprints) = pending_message_fingerprints.get(&existing_id) {
+                        fingerprints.clone()
                     } else {
-                        let indices = franken_existing_message_indices(&tx, existing_id)?;
-                        pending_message_indices.insert(existing_id, indices.clone());
-                        indices
+                        let fingerprints =
+                            franken_existing_message_fingerprints_by_idx(&tx, existing_id)?;
+                        pending_message_fingerprints.insert(existing_id, fingerprints.clone());
+                        fingerprints
                     };
+                let mut existing_replay_fingerprints = if let Some(fingerprints) =
+                    pending_message_replay_fingerprints.get(&existing_id)
+                {
+                    fingerprints.clone()
+                } else {
+                    let fingerprints =
+                        franken_existing_message_replay_fingerprints(&tx, existing_id)?;
+                    pending_message_replay_fingerprints.insert(existing_id, fingerprints.clone());
+                    fingerprints
+                };
 
                 for msg in &conv.messages {
-                    if !existing_indices.insert(msg.idx) {
+                    if let Some(existing_fingerprint) = existing_messages.get(&msg.idx) {
+                        let incoming_fingerprint = message_merge_fingerprint(msg);
+                        if existing_fingerprint != &incoming_fingerprint {
+                            tracing::warn!(
+                                conversation_id = existing_id,
+                                idx = msg.idx,
+                                source_path = %conv.source_path.display(),
+                                "message idx collision encountered during batched conversation merge; retaining canonical message variant"
+                            );
+                        }
+                        continue;
+                    }
+                    let incoming_replay = message_replay_fingerprint(msg);
+                    if existing_replay_fingerprints.contains(&incoming_replay) {
+                        tracing::debug!(
+                            conversation_id = existing_id,
+                            idx = msg.idx,
+                            source_path = %conv.source_path.display(),
+                            "skipping replay-equivalent recovered message with shifted idx during batched merge"
+                        );
                         continue;
                     }
                     let msg_id = franken_insert_message(&tx, existing_id, msg)?;
@@ -3154,6 +4029,8 @@ impl FrankenStorage {
                     total_chars += msg.content.len() as i64;
                     inserted_indices.push(msg.idx);
                     inserted_messages.push((msg_id, msg));
+                    existing_messages.insert(msg.idx, message_merge_fingerprint(msg));
+                    existing_replay_fingerprints.insert(incoming_replay);
                 }
 
                 if let Some(last_ts) = conv.messages.iter().filter_map(|m| m.created_at).max() {
@@ -3163,7 +4040,9 @@ impl FrankenStorage {
                     )?;
                 }
 
-                pending_message_indices.insert(existing_id, existing_indices);
+                pending_message_fingerprints.insert(existing_id, existing_messages);
+                pending_message_replay_fingerprints
+                    .insert(existing_id, existing_replay_fingerprints);
 
                 existing_id
             } else {
@@ -3174,13 +4053,17 @@ impl FrankenStorage {
                     conv,
                 )? {
                     ConversationInsertStatus::Inserted(new_conv_id) => {
-                        if let Some(key) = conversation_key {
-                            pending_conversation_ids.insert(key, new_conv_id);
-                        }
-                        let pending_indices =
-                            pending_message_indices.entry(new_conv_id).or_default();
+                        pending_conversation_ids.insert(conversation_key.clone(), new_conv_id);
+                        let pending_messages =
+                            pending_message_fingerprints.entry(new_conv_id).or_default();
+                        let pending_replay_fingerprints = pending_message_replay_fingerprints
+                            .entry(new_conv_id)
+                            .or_default();
                         for msg in &conv.messages {
-                            if !pending_indices.insert(msg.idx) {
+                            let incoming_replay = message_replay_fingerprint(msg);
+                            if pending_messages.contains_key(&msg.idx)
+                                || pending_replay_fingerprints.contains(&incoming_replay)
+                            {
                                 continue;
                             }
                             let msg_id = franken_insert_message(&tx, new_conv_id, msg)?;
@@ -3201,25 +4084,57 @@ impl FrankenStorage {
                             total_chars += msg.content.len() as i64;
                             inserted_indices.push(msg.idx);
                             inserted_messages.push((msg_id, msg));
+                            pending_messages.insert(msg.idx, message_merge_fingerprint(msg));
+                            pending_replay_fingerprints.insert(incoming_replay);
                         }
                         new_conv_id
                     }
                     ConversationInsertStatus::Existing(existing_id) => {
                         session_count_delta = 0;
-                        if let Some(key) = conversation_key {
-                            pending_conversation_ids.insert(key, existing_id);
-                        }
-                        let mut existing_indices =
-                            if let Some(indices) = pending_message_indices.get(&existing_id) {
-                                indices.clone()
-                            } else {
-                                let indices = franken_existing_message_indices(&tx, existing_id)?;
-                                pending_message_indices.insert(existing_id, indices.clone());
-                                indices
-                            };
+                        pending_conversation_ids.insert(conversation_key.clone(), existing_id);
+                        let mut existing_messages = if let Some(fingerprints) =
+                            pending_message_fingerprints.get(&existing_id)
+                        {
+                            fingerprints.clone()
+                        } else {
+                            let fingerprints =
+                                franken_existing_message_fingerprints_by_idx(&tx, existing_id)?;
+                            pending_message_fingerprints.insert(existing_id, fingerprints.clone());
+                            fingerprints
+                        };
+                        let mut existing_replay_fingerprints = if let Some(fingerprints) =
+                            pending_message_replay_fingerprints.get(&existing_id)
+                        {
+                            fingerprints.clone()
+                        } else {
+                            let fingerprints =
+                                franken_existing_message_replay_fingerprints(&tx, existing_id)?;
+                            pending_message_replay_fingerprints
+                                .insert(existing_id, fingerprints.clone());
+                            fingerprints
+                        };
 
                         for msg in &conv.messages {
-                            if !existing_indices.insert(msg.idx) {
+                            if let Some(existing_fingerprint) = existing_messages.get(&msg.idx) {
+                                let incoming_fingerprint = message_merge_fingerprint(msg);
+                                if existing_fingerprint != &incoming_fingerprint {
+                                    tracing::warn!(
+                                        conversation_id = existing_id,
+                                        idx = msg.idx,
+                                        source_path = %conv.source_path.display(),
+                                        "message idx collision encountered after duplicate conversation recovery; retaining canonical message variant"
+                                    );
+                                }
+                                continue;
+                            }
+                            let incoming_replay = message_replay_fingerprint(msg);
+                            if existing_replay_fingerprints.contains(&incoming_replay) {
+                                tracing::debug!(
+                                    conversation_id = existing_id,
+                                    idx = msg.idx,
+                                    source_path = %conv.source_path.display(),
+                                    "skipping replay-equivalent recovered message with shifted idx after duplicate conversation recovery"
+                                );
                                 continue;
                             }
                             let msg_id = franken_insert_message(&tx, existing_id, msg)?;
@@ -3240,6 +4155,8 @@ impl FrankenStorage {
                             total_chars += msg.content.len() as i64;
                             inserted_indices.push(msg.idx);
                             inserted_messages.push((msg_id, msg));
+                            existing_messages.insert(msg.idx, message_merge_fingerprint(msg));
+                            existing_replay_fingerprints.insert(incoming_replay);
                         }
 
                         if let Some(last_ts) =
@@ -3251,7 +4168,9 @@ impl FrankenStorage {
                             )?;
                         }
 
-                        pending_message_indices.insert(existing_id, existing_indices);
+                        pending_message_fingerprints.insert(existing_id, existing_messages);
+                        pending_message_replay_fingerprints
+                            .insert(existing_id, existing_replay_fingerprints);
 
                         existing_id
                     }
@@ -3264,8 +4183,8 @@ impl FrankenStorage {
                 total_chars_delta: total_chars,
             };
 
-            let day_id = conv
-                .started_at
+            let effective_started_at = conversation_effective_started_at(conv);
+            let day_id = effective_started_at
                 .map(FrankenStorage::day_id_from_millis)
                 .unwrap_or(0);
             stats.record_delta(
@@ -3291,7 +4210,7 @@ impl FrankenStorage {
                     &role_s,
                 );
 
-                let msg_ts = msg.created_at.or(conv.started_at).unwrap_or(0);
+                let msg_ts = msg.created_at.or(effective_started_at).unwrap_or(0);
                 let msg_day_id = if msg_ts > 0 {
                     FrankenStorage::day_id_from_millis(msg_ts)
                 } else {
@@ -3545,6 +4464,139 @@ enum ConversationInsertStatus {
     Existing(i64),
 }
 
+fn franken_find_existing_conversation_by_key(
+    tx: &FrankenTransaction<'_>,
+    key: &PendingConversationKey,
+    conv: Option<&Conversation>,
+) -> Result<Option<i64>> {
+    match key {
+        PendingConversationKey::External {
+            source_id,
+            agent_id,
+            external_id,
+        } => tx
+            .query_row_map(
+                "SELECT id FROM conversations WHERE source_id = ?1 AND agent_id = ?2 AND external_id = ?3",
+                fparams![source_id.as_str(), *agent_id, external_id.as_str()],
+                |row| row.get_typed(0),
+            )
+            .optional()
+            .map_err(Into::into),
+        PendingConversationKey::SourcePath {
+            source_id,
+            agent_id,
+            source_path,
+            started_at,
+        } => {
+            let exact_match = tx
+                .query_row_map(
+                    "SELECT c.id
+                     FROM conversations c
+                     WHERE c.source_id = ?1
+                       AND c.agent_id = ?2
+                       AND c.source_path = ?3
+                       AND ((
+                            COALESCE(
+                                c.started_at,
+                                (SELECT MIN(created_at)
+                                 FROM messages
+                                 WHERE conversation_id = c.id
+                                   AND created_at IS NOT NULL)
+                            ) IS NULL
+                            AND ?4 IS NULL
+                       ) OR COALESCE(
+                            c.started_at,
+                            (SELECT MIN(created_at)
+                             FROM messages
+                             WHERE conversation_id = c.id
+                               AND created_at IS NOT NULL)
+                       ) = ?4)
+                     ORDER BY c.id
+                     LIMIT 1",
+                    fparams![source_id.as_str(), *agent_id, source_path.as_str(), *started_at],
+                    |row| row.get_typed(0),
+                )
+                .optional()?;
+            if exact_match.is_some() {
+                return Ok(exact_match);
+            }
+
+            let Some(conv) = conv else {
+                return Ok(None);
+            };
+            let incoming_fingerprints = conversation_message_fingerprints(conv);
+            if incoming_fingerprints.is_empty() {
+                return Ok(None);
+            }
+            let incoming_replay_fingerprints = conversation_message_replay_fingerprints(conv);
+
+            let candidates: Vec<(i64, Option<i64>)> = tx.query_map_collect(
+                "SELECT
+                     c.id,
+                     COALESCE(
+                         c.started_at,
+                         (SELECT MIN(created_at)
+                          FROM messages
+                          WHERE conversation_id = c.id
+                            AND created_at IS NOT NULL)
+                     ) AS effective_started_at
+                 FROM conversations c
+                 WHERE c.source_id = ?1
+                   AND c.agent_id = ?2
+                   AND c.source_path = ?3
+                 ORDER BY c.id",
+                fparams![source_id.as_str(), *agent_id, source_path.as_str()],
+                |row| Ok((row.get_typed(0)?, row.get_typed(1)?)),
+            )?;
+
+            let mut best_candidate: Option<(i64, ConversationMergeEvidence)> = None;
+            for (candidate_id, candidate_started_at) in candidates {
+                let existing_fingerprints =
+                    franken_existing_message_fingerprints(tx, candidate_id)?;
+                let existing_replay_fingerprints =
+                    replay_fingerprints_from_merge_set(&existing_fingerprints);
+                let Some(evidence) = conversation_merge_evidence(
+                    &incoming_fingerprints,
+                    &incoming_replay_fingerprints,
+                    &existing_fingerprints,
+                    &existing_replay_fingerprints,
+                    *started_at,
+                    candidate_started_at,
+                ) else {
+                    continue;
+                };
+
+                let candidate_key = (
+                    evidence.exact_overlap,
+                    evidence.replay_overlap,
+                    evidence.started_close,
+                    evidence.smaller_replay_set,
+                    std::cmp::Reverse(evidence.start_distance_ms),
+                );
+                let should_replace = best_candidate
+                    .as_ref()
+                    .map(|(_, best_evidence)| {
+                        candidate_key
+                            > (
+                                best_evidence.exact_overlap,
+                                best_evidence.replay_overlap,
+                                best_evidence.started_close,
+                                best_evidence.smaller_replay_set,
+                                std::cmp::Reverse(best_evidence.start_distance_ms),
+                            )
+                    })
+                    .unwrap_or(true);
+
+                if should_replace {
+                    best_candidate = Some((candidate_id, evidence));
+                }
+            }
+
+            Ok(best_candidate.map(|(candidate_id, _)| candidate_id))
+        }
+    }
+}
+
 fn is_conversation_identity_conflict(error: &anyhow::Error) -> bool {
     let rendered = error.to_string();
     rendered.contains("UNIQUE constraint failed")
@@ -3685,19 +4737,82 @@ fn franken_insert_snippets(
     Ok(())
 }
 
-fn franken_existing_message_indices(
+fn franken_existing_message_fingerprints(
     tx: &FrankenTransaction<'_>,
     conversation_id: i64,
-) -> Result<HashSet<i64>> {
+) -> Result<HashSet<MessageMergeFingerprint>> {
     let rows = tx.query_params(
-        "SELECT idx FROM messages WHERE conversation_id = ?1",
+        "SELECT idx, role, author, created_at, content
+         FROM messages
+         WHERE conversation_id = ?1",
         fparams![conversation_id],
     )?;
-    let mut indices = HashSet::with_capacity(rows.len());
+    let mut fingerprints = HashSet::with_capacity(rows.len());
     for row in rows {
-        indices.insert(row.get_typed(0)?);
+        let role: String = row.get_typed(1)?;
+        let content: String = row.get_typed(4)?;
+        fingerprints.insert(MessageMergeFingerprint {
+            idx: row.get_typed(0)?,
+            created_at: row.get_typed(3)?,
+            role,
+            author: row.get_typed(2)?,
+            content_hash: blake3::hash(content.as_bytes()).to_hex().to_string(),
+        });
     }
-    Ok(indices)
+    Ok(fingerprints)
+}
+
+fn franken_existing_message_fingerprints_by_idx(
+    tx: &FrankenTransaction<'_>,
+    conversation_id: i64,
+) -> Result<HashMap<i64, MessageMergeFingerprint>> {
+    let rows = tx.query_params(
+        "SELECT idx, role, author, created_at, content
+         FROM messages
+         WHERE conversation_id = ?1",
+        fparams![conversation_id],
+    )?;
+    let mut fingerprints = HashMap::with_capacity(rows.len());
+    for row in rows {
+        let idx: i64 = row.get_typed(0)?;
+        let role: String = row.get_typed(1)?;
+        let content: String = row.get_typed(4)?;
+        fingerprints.insert(
+            idx,
+            MessageMergeFingerprint {
+                idx,
+                created_at: row.get_typed(3)?,
+                role,
+                author: row.get_typed(2)?,
+                content_hash: blake3::hash(content.as_bytes()).to_hex().to_string(),
+            },
+        );
+    }
+    Ok(fingerprints)
+}
+
+fn franken_existing_message_replay_fingerprints(
+    tx: &FrankenTransaction<'_>,
+    conversation_id: i64,
+) -> Result<HashSet<MessageReplayFingerprint>> {
+    let rows = tx.query_params(
+        "SELECT role, author, created_at, content
+         FROM messages
+         WHERE conversation_id = ?1",
+        fparams![conversation_id],
+    )?;
+    let mut fingerprints = HashSet::with_capacity(rows.len());
+    for row in rows {
+        let role: String = row.get_typed(0)?;
+        let content: String = row.get_typed(3)?;
+        fingerprints.insert(MessageReplayFingerprint {
+            created_at: row.get_typed(2)?,
+            role,
+            author: row.get_typed(1)?,
+            content_hash: blake3::hash(content.as_bytes()).to_hex().to_string(),
+        });
+    }
+    Ok(fingerprints)
 }
 
 /// Batch insert FTS5 entries within a frankensqlite transaction.
@@ -3830,39 +4945,31 @@ fn franken_update_daily_stats_batched_in_tx(
     }
 
     let now = FrankenStorage::now_millis();
-    const BATCH_SIZE: usize = 100;
     let mut total_affected = 0;
 
-    for chunk in entries.chunks(BATCH_SIZE) {
-        let placeholders: String = (0..chunk.len())
-            .map(|_| "(?, ?, ?, ?, ?, ?, ?)")
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let sql = format!(
+    // Keep frankensqlite UPSERTs row-wise inside the transaction. The
+    // multi-row VALUES ... ON CONFLICT form still falls back through
+    // INSERT...SELECT in fsqlite-core, which rejects UPSERT/RETURNING during
+    // real cass indexing.
+    for (day_id, agent, source, delta) in entries {
+        total_affected += tx.execute_compat(
             "INSERT INTO daily_stats (day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated)
-             VALUES {}
+             VALUES(?1,?2,?3,?4,?5,?6,?7)
              ON CONFLICT(day_id, agent_slug, source_id) DO UPDATE SET
                  session_count = session_count + excluded.session_count,
                  message_count = message_count + excluded.message_count,
                  total_chars = total_chars + excluded.total_chars,
                  last_updated = excluded.last_updated",
-            placeholders
-        );
-
-        let mut params_vec: Vec<ParamValue> = Vec::with_capacity(chunk.len() * 7);
-        for (day_id, agent, source, delta) in chunk {
-            params_vec.push(ParamValue::from(*day_id));
-            params_vec.push(ParamValue::from(agent.clone()));
-            params_vec.push(ParamValue::from(source.clone()));
-            params_vec.push(ParamValue::from(delta.session_count_delta));
-            params_vec.push(ParamValue::from(delta.message_count_delta));
-            params_vec.push(ParamValue::from(delta.total_chars_delta));
-            params_vec.push(ParamValue::from(now));
-        }
-
-        let values = param_slice_to_values(&params_vec);
-        total_affected += tx.execute_with_params(&sql, &values)?;
+            fparams![
+                *day_id,
+                agent.as_str(),
+                source.as_str(),
+                delta.session_count_delta,
+                delta.message_count_delta,
+                delta.total_chars_delta,
+                now
+            ],
+        )?;
     }
 
     Ok(total_affected)
@@ -3945,17 +5052,10 @@ fn franken_update_token_daily_stats_batched_in_tx(
     }
 
     let now = FrankenStorage::now_millis();
-    const BATCH_SIZE: usize = 25; // 19 params per row → ~52 rows max, use 25 for safety
-
     let mut total_affected = 0;
 
-    for chunk in entries.chunks(BATCH_SIZE) {
-        let placeholders: String = (0..chunk.len())
-            .map(|_| "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let sql = format!(
+    for (day_id, agent, source, model, delta) in entries {
+        total_affected += tx.execute_compat(
             "INSERT INTO token_daily_stats (
                 day_id, agent_slug, source_id, model_family,
                 api_call_count, user_message_count, assistant_message_count, tool_message_count,
@@ -3964,7 +5064,7 @@ fn franken_update_token_daily_stats_batched_in_tx(
                 total_content_chars, total_tool_calls, estimated_cost_usd, session_count,
                 last_updated
             )
-            VALUES {}
+            VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)
             ON CONFLICT(day_id, agent_slug, source_id, model_family) DO UPDATE SET
                 api_call_count = api_call_count + excluded.api_call_count,
                 user_message_count = user_message_count + excluded.user_message_count,
@@ -3981,34 +5081,28 @@ fn franken_update_token_daily_stats_batched_in_tx(
                 estimated_cost_usd = estimated_cost_usd + excluded.estimated_cost_usd,
                 session_count = session_count + excluded.session_count,
                 last_updated = excluded.last_updated",
-            placeholders
-        );
-
-        let mut params_vec: Vec<ParamValue> = Vec::with_capacity(chunk.len() * 19);
-        for (day_id, agent, source, model, delta) in chunk {
-            params_vec.push(ParamValue::from(*day_id));
-            params_vec.push(ParamValue::from(agent.clone()));
-            params_vec.push(ParamValue::from(source.clone()));
-            params_vec.push(ParamValue::from(model.clone()));
-            params_vec.push(ParamValue::from(delta.api_call_count));
-            params_vec.push(ParamValue::from(delta.user_message_count));
-            params_vec.push(ParamValue::from(delta.assistant_message_count));
-            params_vec.push(ParamValue::from(delta.tool_message_count));
-            params_vec.push(ParamValue::from(delta.total_input_tokens));
-            params_vec.push(ParamValue::from(delta.total_output_tokens));
-            params_vec.push(ParamValue::from(delta.total_cache_read_tokens));
-            params_vec.push(ParamValue::from(delta.total_cache_creation_tokens));
-            params_vec.push(ParamValue::from(delta.total_thinking_tokens));
-            params_vec.push(ParamValue::from(delta.grand_total_tokens));
-            params_vec.push(ParamValue::from(delta.total_content_chars));
-            params_vec.push(ParamValue::from(delta.total_tool_calls));
-            params_vec.push(ParamValue::from(delta.estimated_cost_usd));
-            params_vec.push(ParamValue::from(delta.session_count));
-            params_vec.push(ParamValue::from(now));
-        }
-
-        let values = param_slice_to_values(&params_vec);
-        total_affected += tx.execute_with_params(&sql, &values)?;
+            fparams![
+                *day_id,
+                agent.as_str(),
+                source.as_str(),
+                model.as_str(),
+                delta.api_call_count,
+                delta.user_message_count,
+                delta.assistant_message_count,
+                delta.tool_message_count,
+                delta.total_input_tokens,
+                delta.total_output_tokens,
+                delta.total_cache_read_tokens,
+                delta.total_cache_creation_tokens,
+                delta.total_thinking_tokens,
+                delta.grand_total_tokens,
+                delta.total_content_chars,
+                delta.total_tool_calls,
+                delta.estimated_cost_usd,
+                delta.session_count,
+                now
+            ],
+        )?;
     }
 
     Ok(total_affected)
@@ -4095,18 +5189,9 @@ fn franken_flush_rollup_table(
         return Ok(0);
     }
 
-    // 22 params per row → ~44 rows max, use 30 for safety
-    const BATCH_SIZE: usize = 30;
     let mut total_affected = 0;
 
-    let entries: Vec<_> = deltas.iter().collect();
-
-    for chunk in entries.chunks(BATCH_SIZE) {
-        let placeholders: String = (0..chunk.len())
-            .map(|_| "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-            .collect::<Vec<_>>()
-            .join(", ");
-
+    for ((bucket_id, agent, workspace_id, source), d) in deltas {
         let sql = format!(
             "INSERT INTO {table} (
                 {bucket_col}, agent_slug, workspace_id, source_id,
@@ -4118,7 +5203,7 @@ fn franken_flush_rollup_table(
                 api_cache_read_tokens_total, api_cache_creation_tokens_total,
                 api_thinking_tokens_total, last_updated
             )
-            VALUES {placeholders}
+            VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)
             ON CONFLICT({bucket_col}, agent_slug, workspace_id, source_id) DO UPDATE SET
                 message_count = message_count + excluded.message_count,
                 user_message_count = user_message_count + excluded.user_message_count,
@@ -4140,34 +5225,33 @@ fn franken_flush_rollup_table(
                 last_updated = excluded.last_updated"
         );
 
-        let mut params_vec: Vec<ParamValue> = Vec::with_capacity(chunk.len() * 22);
-        for &((bucket_id, agent, workspace_id, source), d) in chunk {
-            params_vec.push(ParamValue::from(*bucket_id));
-            params_vec.push(ParamValue::from(agent.clone()));
-            params_vec.push(ParamValue::from(*workspace_id));
-            params_vec.push(ParamValue::from(source.clone()));
-            params_vec.push(ParamValue::from(d.message_count));
-            params_vec.push(ParamValue::from(d.user_message_count));
-            params_vec.push(ParamValue::from(d.assistant_message_count));
-            params_vec.push(ParamValue::from(d.tool_call_count));
-            params_vec.push(ParamValue::from(d.plan_message_count));
-            params_vec.push(ParamValue::from(d.plan_content_tokens_est_total));
-            params_vec.push(ParamValue::from(d.plan_api_tokens_total));
-            params_vec.push(ParamValue::from(d.api_coverage_message_count));
-            params_vec.push(ParamValue::from(d.content_tokens_est_total));
-            params_vec.push(ParamValue::from(d.content_tokens_est_user));
-            params_vec.push(ParamValue::from(d.content_tokens_est_assistant));
-            params_vec.push(ParamValue::from(d.api_tokens_total));
-            params_vec.push(ParamValue::from(d.api_input_tokens_total));
-            params_vec.push(ParamValue::from(d.api_output_tokens_total));
-            params_vec.push(ParamValue::from(d.api_cache_read_tokens_total));
-            params_vec.push(ParamValue::from(d.api_cache_creation_tokens_total));
-            params_vec.push(ParamValue::from(d.api_thinking_tokens_total));
-            params_vec.push(ParamValue::from(now));
-        }
-
-        let values = param_slice_to_values(&params_vec);
-        total_affected += tx.execute_with_params(&sql, &values)?;
+        total_affected += tx.execute_compat(
+            &sql,
+            fparams![
+                *bucket_id,
+                agent.as_str(),
+                *workspace_id,
+                source.as_str(),
+                d.message_count,
+                d.user_message_count,
+                d.assistant_message_count,
+                d.tool_call_count,
+                d.plan_message_count,
+                d.plan_content_tokens_est_total,
+                d.plan_api_tokens_total,
+                d.api_coverage_message_count,
+                d.content_tokens_est_total,
+                d.content_tokens_est_user,
+                d.content_tokens_est_assistant,
+                d.api_tokens_total,
+                d.api_input_tokens_total,
+                d.api_output_tokens_total,
+                d.api_cache_read_tokens_total,
+                d.api_cache_creation_tokens_total,
+                d.api_thinking_tokens_total,
+                now
+            ],
+        )?;
     }
 
     Ok(total_affected)
@@ -4183,18 +5267,10 @@ fn franken_flush_model_daily_rollup_table(
         return Ok(0);
     }
 
-    const BATCH_SIZE: usize = 25;
     let mut total_affected = 0;
 
-    let entries: Vec<_> = deltas.iter().collect();
-
-    for chunk in entries.chunks(BATCH_SIZE) {
-        let placeholders: String = (0..chunk.len())
-            .map(|_| "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let sql = format!(
+    for ((day_id, agent, workspace_id, source, model_family, model_tier), d) in deltas {
+        total_affected += tx.execute_compat(
             "INSERT INTO usage_models_daily (
                 day_id, agent_slug, workspace_id, source_id, model_family, model_tier,
                 message_count, user_message_count, assistant_message_count,
@@ -4204,7 +5280,7 @@ fn franken_flush_model_daily_rollup_table(
                 api_cache_read_tokens_total, api_cache_creation_tokens_total,
                 api_thinking_tokens_total, last_updated
             )
-            VALUES {placeholders}
+            VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)
             ON CONFLICT(day_id, agent_slug, workspace_id, source_id, model_family, model_tier) DO UPDATE SET
                 message_count = message_count + excluded.message_count,
                 user_message_count = user_message_count + excluded.user_message_count,
@@ -4221,37 +5297,32 @@ fn franken_flush_model_daily_rollup_table(
                 api_cache_read_tokens_total = api_cache_read_tokens_total + excluded.api_cache_read_tokens_total,
                 api_cache_creation_tokens_total = api_cache_creation_tokens_total + excluded.api_cache_creation_tokens_total,
                 api_thinking_tokens_total = api_thinking_tokens_total + excluded.api_thinking_tokens_total,
-                last_updated = excluded.last_updated"
-        );
-
-        let mut params_vec: Vec<ParamValue> = Vec::with_capacity(chunk.len() * 22);
-        for &((day_id, agent, workspace_id, source, model_family, model_tier), d) in chunk {
-            params_vec.push(ParamValue::from(*day_id));
-            params_vec.push(ParamValue::from(agent.clone()));
-            params_vec.push(ParamValue::from(*workspace_id));
-            params_vec.push(ParamValue::from(source.clone()));
-            params_vec.push(ParamValue::from(model_family.clone()));
-            params_vec.push(ParamValue::from(model_tier.clone()));
-            params_vec.push(ParamValue::from(d.message_count));
-            params_vec.push(ParamValue::from(d.user_message_count));
-            params_vec.push(ParamValue::from(d.assistant_message_count));
-            params_vec.push(ParamValue::from(d.tool_call_count));
-            params_vec.push(ParamValue::from(d.plan_message_count));
-            params_vec.push(ParamValue::from(d.api_coverage_message_count));
-            params_vec.push(ParamValue::from(d.content_tokens_est_total));
-            params_vec.push(ParamValue::from(d.content_tokens_est_user));
-            params_vec.push(ParamValue::from(d.content_tokens_est_assistant));
-            params_vec.push(ParamValue::from(d.api_tokens_total));
-            params_vec.push(ParamValue::from(d.api_input_tokens_total));
-            params_vec.push(ParamValue::from(d.api_output_tokens_total));
-            params_vec.push(ParamValue::from(d.api_cache_read_tokens_total));
-            params_vec.push(ParamValue::from(d.api_cache_creation_tokens_total));
-            params_vec.push(ParamValue::from(d.api_thinking_tokens_total));
-            params_vec.push(ParamValue::from(now));
-        }
-
-        let values = param_slice_to_values(&params_vec);
-        total_affected += tx.execute_with_params(&sql, &values)?;
+                last_updated = excluded.last_updated",
+            fparams![
+                *day_id,
+                agent.as_str(),
+                *workspace_id,
+                source.as_str(),
+                model_family.as_str(),
+                model_tier.as_str(),
+                d.message_count,
+                d.user_message_count,
+                d.assistant_message_count,
+                d.tool_call_count,
+                d.plan_message_count,
+                d.api_coverage_message_count,
+                d.content_tokens_est_total,
+                d.content_tokens_est_user,
+                d.content_tokens_est_assistant,
+                d.api_tokens_total,
+                d.api_input_tokens_total,
+                d.api_output_tokens_total,
+                d.api_cache_read_tokens_total,
+                d.api_cache_creation_tokens_total,
+                d.api_thinking_tokens_total,
+                now
+            ],
+        )?;
     }
 
     Ok(total_affected)
@@ -7619,6 +8690,643 @@ mod tests {
         assert_eq!(stored_indices, vec![0, 1, 2, 3]);
     }
 
+    #[test]
+    fn insert_conversation_tree_merges_duplicate_source_path_without_external_id() {
+        use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
+        use std::path::PathBuf;
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let agent = Agent {
+            id: None,
+            slug: "codex".into(),
+            name: "Codex".into(),
+            version: Some("0.2.3".into()),
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).unwrap();
+
+        let base_conv = |messages: Vec<Message>| Conversation {
+            id: None,
+            agent_slug: "codex".into(),
+            workspace: Some(PathBuf::from("/tmp/workspace")),
+            external_id: None,
+            title: Some("Source Path Merge".into()),
+            source_path: PathBuf::from("/tmp/shared-session.jsonl"),
+            started_at: Some(1_700_000_000_000),
+            ended_at: Some(1_700_000_000_999),
+            approx_tokens: None,
+            metadata_json: serde_json::Value::Null,
+            messages,
+            source_id: "local".into(),
+            origin_host: None,
+        };
+
+        let first = storage
+            .insert_conversation_tree(
+                agent_id,
+                None,
+                &base_conv(vec![
+                    Message {
+                        id: None,
+                        idx: 0,
+                        role: MessageRole::User,
+                        author: None,
+                        created_at: Some(1_700_000_000_000),
+                        content: "first".into(),
+                        extra_json: serde_json::Value::Null,
+                        snippets: Vec::new(),
+                    },
+                    Message {
+                        id: None,
+                        idx: 1,
+                        role: MessageRole::Agent,
+                        author: None,
+                        created_at: Some(1_700_000_000_100),
+                        content: "second".into(),
+                        extra_json: serde_json::Value::Null,
+                        snippets: Vec::new(),
+                    },
+                ]),
+            )
+            .unwrap();
+
+        let second = storage
+            .insert_conversation_tree(
+                agent_id,
+                None,
+                &base_conv(vec![
+                    Message {
+                        id: None,
+                        idx: 1,
+                        role: MessageRole::Agent,
+                        author: None,
+                        created_at: Some(1_700_000_000_100),
+                        content: "second".into(),
+                        extra_json: serde_json::Value::Null,
+                        snippets: Vec::new(),
+                    },
+                    Message {
+                        id: None,
+                        idx: 2,
+                        role: MessageRole::User,
+                        author: None,
+                        created_at: Some(1_700_000_000_200),
+                        content: "third".into(),
+                        extra_json: serde_json::Value::Null,
+                        snippets: Vec::new(),
+                    },
+                ]),
+            )
+            .unwrap();
+
+        assert_eq!(first.conversation_id, second.conversation_id);
+        assert_eq!(first.inserted_indices, vec![0, 1]);
+        assert_eq!(second.inserted_indices, vec![2]);
+
+        let stored_indices: Vec<i64> = storage
+            .conn
+            .query_map_collect("SELECT idx FROM messages ORDER BY idx", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        assert_eq!(stored_indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn insert_conversation_tree_merges_source_path_duplicates_with_start_drift() {
+        use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
+        use std::path::PathBuf;
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let agent = Agent {
+            id: None,
+            slug: "codex".into(),
+            name: "Codex".into(),
+            version: Some("0.2.3".into()),
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).unwrap();
+
+        let base_conv = |started_at: Option<i64>, messages: Vec<Message>| Conversation {
+            id: None,
+            agent_slug: "codex".into(),
+            workspace: Some(PathBuf::from("/tmp/workspace")),
+            external_id: None,
+            title: Some("Drift Merge".into()),
+            source_path: PathBuf::from("/tmp/drift-session.jsonl"),
+            started_at,
+            ended_at: Some(1_700_000_000_999),
+            approx_tokens: None,
+            metadata_json: serde_json::Value::Null,
+            messages,
+            source_id: "local".into(),
+            origin_host: None,
+        };
+
+        let first = storage
+            .insert_conversation_tree(
+                agent_id,
+                None,
+                &base_conv(
+                    Some(1_700_000_000_000),
+                    vec![
+                        Message {
+                            id: None,
+                            idx: 0,
+                            role: MessageRole::User,
+                            author: None,
+                            created_at: Some(1_700_000_000_000),
+                            content: "first".into(),
+                            extra_json: serde_json::Value::Null,
+                            snippets: Vec::new(),
+                        },
+                        Message {
+                            id: None,
+                            idx: 1,
+                            role: MessageRole::Agent,
+                            author: None,
+                            created_at: Some(1_700_000_000_100),
+                            content: "second".into(),
+                            extra_json: serde_json::Value::Null,
+                            snippets: Vec::new(),
+                        },
+                    ],
+                ),
+            )
+            .unwrap();
+
+        let second = storage
+            .insert_conversation_tree(
+                agent_id,
+                None,
+                &base_conv(
+                    Some(1_700_000_004_000),
+                    vec![
+                        Message {
+                            id: None,
+                            idx: 1,
+                            role: MessageRole::Agent,
+                            author: None,
+                            created_at: Some(1_700_000_000_100),
+                            content: "second".into(),
+                            extra_json: serde_json::Value::Null,
+                            snippets: Vec::new(),
+                        },
+                        Message {
+                            id: None,
+                            idx: 2,
+                            role: MessageRole::User,
+                            author: None,
+                            created_at: Some(1_700_000_004_200),
+                            content: "third".into(),
+                            extra_json: serde_json::Value::Null,
+                            snippets: Vec::new(),
+                        },
+                    ],
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(first.conversation_id, second.conversation_id);
+        assert_eq!(second.inserted_indices, vec![2]);
+    }
+
+    #[test]
+    fn insert_conversation_tree_keeps_single_message_overlap_sessions_separate() {
+        use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
+        use std::path::PathBuf;
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let agent = Agent {
+            id: None,
+            slug: "codex".into(),
+            name: "Codex".into(),
+            version: Some("0.2.3".into()),
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).unwrap();
+
+        let make_conv = |started_at: i64, idx: i64, content: &str| Conversation {
+            id: None,
+            agent_slug: "codex".into(),
+            workspace: Some(PathBuf::from("/tmp/workspace")),
+            external_id: None,
+            title: Some("Partial overlap".into()),
+            source_path: PathBuf::from("/tmp/reused-session.jsonl"),
+            started_at: Some(started_at),
+            ended_at: Some(started_at + 500),
+            approx_tokens: None,
+            metadata_json: serde_json::Value::Null,
+            messages: vec![Message {
+                id: None,
+                idx,
+                role: MessageRole::User,
+                author: None,
+                created_at: Some(started_at),
+                content: content.into(),
+                extra_json: serde_json::Value::Null,
+                snippets: Vec::new(),
+            }],
+            source_id: "local".into(),
+            origin_host: None,
+        };
+
+        storage
+            .insert_conversation_tree(
+                agent_id,
+                None,
+                &Conversation {
+                    messages: vec![
+                        Message {
+                            id: None,
+                            idx: 0,
+                            role: MessageRole::User,
+                            author: None,
+                            created_at: Some(1_700_000_000_000),
+                            content: "shared opener".into(),
+                            extra_json: serde_json::Value::Null,
+                            snippets: Vec::new(),
+                        },
+                        Message {
+                            id: None,
+                            idx: 1,
+                            role: MessageRole::Agent,
+                            author: None,
+                            created_at: Some(1_700_000_000_100),
+                            content: "first session unique".into(),
+                            extra_json: serde_json::Value::Null,
+                            snippets: Vec::new(),
+                        },
+                    ],
+                    ..make_conv(1_700_000_000_000, 0, "unused")
+                },
+            )
+            .unwrap();
+        storage
+            .insert_conversation_tree(
+                agent_id,
+                None,
+                &make_conv(1_700_000_900_000, 0, "shared opener"),
+            )
+            .unwrap();
+
+        let conversation_count: i64 = storage
+            .conn
+            .query_row_map("SELECT COUNT(*) FROM conversations", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        assert_eq!(conversation_count, 2);
+    }
+
+    #[test]
+    fn insert_conversation_tree_keeps_distinct_source_path_sessions_separate() {
+        use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
+        use std::path::PathBuf;
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let agent = Agent {
+            id: None,
+            slug: "codex".into(),
+            name: "Codex".into(),
+            version: Some("0.2.3".into()),
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).unwrap();
+
+        let make_conv = |started_at: i64, created_at: i64, content: &str| Conversation {
+            id: None,
+            agent_slug: "codex".into(),
+            workspace: Some(PathBuf::from("/tmp/workspace")),
+            external_id: None,
+            title: Some("Same Path Different Session".into()),
+            source_path: PathBuf::from("/tmp/reused-session.jsonl"),
+            started_at: Some(started_at),
+            ended_at: Some(started_at + 500),
+            approx_tokens: None,
+            metadata_json: serde_json::Value::Null,
+            messages: vec![Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: None,
+                created_at: Some(created_at),
+                content: content.into(),
+                extra_json: serde_json::Value::Null,
+                snippets: Vec::new(),
+            }],
+            source_id: "local".into(),
+            origin_host: None,
+        };
+
+        storage
+            .insert_conversation_tree(
+                agent_id,
+                None,
+                &make_conv(1_700_000_000_000, 1_700_000_000_000, "first session"),
+            )
+            .unwrap();
+        storage
+            .insert_conversation_tree(
+                agent_id,
+                None,
+                &make_conv(1_700_000_900_000, 1_700_000_900_000, "second session"),
+            )
+            .unwrap();
+
+        let conversation_count: i64 = storage
+            .conn
+            .query_row_map("SELECT COUNT(*) FROM conversations", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        assert_eq!(conversation_count, 2);
+    }
+
+    #[test]
+    fn insert_conversation_tree_merges_replay_equivalent_messages_with_shifted_idx() {
+        use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
+        use std::path::PathBuf;
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let agent = Agent {
+            id: None,
+            slug: "codex".into(),
+            name: "Codex".into(),
+            version: Some("0.2.3".into()),
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).unwrap();
+
+        let make_conv = |started_at: i64, messages: Vec<Message>| Conversation {
+            id: None,
+            agent_slug: "codex".into(),
+            workspace: Some(PathBuf::from("/tmp/workspace")),
+            external_id: None,
+            title: Some("Shifted replay".into()),
+            source_path: PathBuf::from("/tmp/replay-session.jsonl"),
+            started_at: Some(started_at),
+            ended_at: Some(started_at + 500),
+            approx_tokens: None,
+            metadata_json: serde_json::Value::Null,
+            messages,
+            source_id: "local".into(),
+            origin_host: None,
+        };
+
+        let first = storage
+            .insert_conversation_tree(
+                agent_id,
+                None,
+                &make_conv(
+                    1_700_000_000_000,
+                    vec![
+                        Message {
+                            id: None,
+                            idx: 0,
+                            role: MessageRole::User,
+                            author: None,
+                            created_at: Some(1_700_000_000_000),
+                            content: "first".into(),
+                            extra_json: serde_json::Value::Null,
+                            snippets: Vec::new(),
+                        },
+                        Message {
+                            id: None,
+                            idx: 1,
+                            role: MessageRole::Agent,
+                            author: None,
+                            created_at: Some(1_700_000_000_100),
+                            content: "second".into(),
+                            extra_json: serde_json::Value::Null,
+                            snippets: Vec::new(),
+                        },
+                    ],
+                ),
+            )
+            .unwrap();
+
+        let second = storage
+            .insert_conversation_tree(
+                agent_id,
+                None,
+                &make_conv(
+                    1_700_000_900_000,
+                    vec![
+                        Message {
+                            id: None,
+                            idx: 10,
+                            role: MessageRole::User,
+                            author: None,
+                            created_at: Some(1_700_000_000_000),
+                            content: "first".into(),
+                            extra_json: serde_json::Value::Null,
+                            snippets: Vec::new(),
+                        },
+                        Message {
+                            id: None,
+                            idx: 11,
+                            role: MessageRole::Agent,
+                            author: None,
+                            created_at: Some(1_700_000_000_100),
+                            content: "second".into(),
+                            extra_json: serde_json::Value::Null,
+                            snippets: Vec::new(),
+                        },
+                        Message {
+                            id: None,
+                            idx: 12,
+                            role: MessageRole::User,
+                            author: None,
+                            created_at: Some(1_700_000_000_200),
+                            content: "third".into(),
+                            extra_json: serde_json::Value::Null,
+                            snippets: Vec::new(),
+                        },
+                    ],
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(first.conversation_id, second.conversation_id);
+        assert_eq!(second.inserted_indices, vec![12]);
+
+        let stored_indices: Vec<i64> = storage
+            .conn
+            .query_map_collect(
+                "SELECT idx FROM messages WHERE conversation_id = ?1 ORDER BY idx",
+                fparams![first.conversation_id],
+                |row| row.get_typed(0),
+            )
+            .unwrap();
+        assert_eq!(stored_indices, vec![0, 1, 12]);
+    }
+
+    #[test]
+    fn salvage_historical_databases_imports_backups_once_and_merges_overlap() {
+        use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
+        use std::path::PathBuf;
+
+        fn seed_historical_db(db_path: &Path, conversations: &[Conversation]) {
+            if let Some(parent) = db_path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            let storage = SqliteStorage::open(db_path).unwrap();
+            let agent = Agent {
+                id: None,
+                slug: "codex".into(),
+                name: "Codex".into(),
+                version: Some("0.2.3".into()),
+                kind: AgentKind::Cli,
+            };
+            let agent_id = storage.ensure_agent(&agent).unwrap();
+            for conv in conversations {
+                storage
+                    .insert_conversation_tree(agent_id, None, conv)
+                    .unwrap();
+            }
+        }
+
+        fn base_conv(source_path: &str, messages: Vec<Message>) -> Conversation {
+            Conversation {
+                id: None,
+                agent_slug: "codex".into(),
+                workspace: Some(PathBuf::from("/tmp/workspace")),
+                external_id: None,
+                title: Some("Recovered".into()),
+                source_path: PathBuf::from(source_path),
+                started_at: Some(1_700_000_000_000),
+                ended_at: Some(1_700_000_000_999),
+                approx_tokens: None,
+                metadata_json: serde_json::Value::Null,
+                messages,
+                source_id: "local".into(),
+                origin_host: None,
+            }
+        }
+
+        let dir = TempDir::new().unwrap();
+        let canonical_db = dir.path().join("agent_search.db");
+        let storage = SqliteStorage::open(&canonical_db).unwrap();
+
+        let overlapping_a = base_conv(
+            "/tmp/shared-history.jsonl",
+            vec![
+                Message {
+                    id: None,
+                    idx: 0,
+                    role: MessageRole::User,
+                    author: None,
+                    created_at: Some(1_700_000_000_000),
+                    content: "first".into(),
+                    extra_json: serde_json::Value::Null,
+                    snippets: Vec::new(),
+                },
+                Message {
+                    id: None,
+                    idx: 1,
+                    role: MessageRole::Agent,
+                    author: None,
+                    created_at: Some(1_700_000_000_100),
+                    content: "second".into(),
+                    extra_json: serde_json::Value::Null,
+                    snippets: Vec::new(),
+                },
+            ],
+        );
+        let overlapping_b = base_conv(
+            "/tmp/shared-history.jsonl",
+            vec![
+                Message {
+                    id: None,
+                    idx: 1,
+                    role: MessageRole::Agent,
+                    author: None,
+                    created_at: Some(1_700_000_000_100),
+                    content: "second".into(),
+                    extra_json: serde_json::Value::Null,
+                    snippets: Vec::new(),
+                },
+                Message {
+                    id: None,
+                    idx: 2,
+                    role: MessageRole::User,
+                    author: None,
+                    created_at: Some(1_700_000_000_200),
+                    content: "third".into(),
+                    extra_json: serde_json::Value::Null,
+                    snippets: Vec::new(),
+                },
+            ],
+        );
+        let unique = Conversation {
+            source_path: PathBuf::from("/tmp/unique-history.jsonl"),
+            messages: vec![Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: None,
+                created_at: Some(1_700_000_001_000),
+                content: "unique".into(),
+                extra_json: serde_json::Value::Null,
+                snippets: Vec::new(),
+            }],
+            started_at: Some(1_700_000_001_000),
+            ended_at: Some(1_700_000_001_100),
+            ..base_conv("/tmp/unique-history.jsonl", Vec::new())
+        };
+
+        seed_historical_db(
+            &dir.path()
+                .join("backups/agent_search.db.20260322T020200.bak"),
+            &[overlapping_a.clone()],
+        );
+        seed_historical_db(
+            &dir.path().join("agent_search.corrupt.20260324_212907"),
+            &[overlapping_b, unique],
+        );
+
+        let first = storage.salvage_historical_databases(&canonical_db).unwrap();
+        assert_eq!(first.bundles_considered, 2);
+        assert_eq!(first.bundles_imported, 2);
+        assert_eq!(first.messages_imported, 4);
+
+        let conversations = storage.list_conversations(10, 0).unwrap();
+        assert_eq!(conversations.len(), 2);
+
+        let shared_id = conversations
+            .iter()
+            .find(|conv| conv.source_path == PathBuf::from("/tmp/shared-history.jsonl"))
+            .and_then(|conv| conv.id)
+            .unwrap();
+        let shared_indices: Vec<i64> = storage
+            .fetch_messages(shared_id)
+            .unwrap()
+            .into_iter()
+            .map(|msg| msg.idx)
+            .collect();
+        assert_eq!(shared_indices, vec![0, 1, 2]);
+
+        let second = storage.salvage_historical_databases(&canonical_db).unwrap();
+        assert_eq!(second.bundles_imported, 0);
+        assert_eq!(second.messages_imported, 0);
+    }
+
     // =========================================================================
     // Agent storage tests (bead yln.4)
     // =========================================================================
@@ -8795,6 +10503,120 @@ mod tests {
             "should apply combined V13 + FTS contentless V14"
         );
         assert_eq!(result.current, 14);
+    }
+
+    #[test]
+    fn franken_insert_conversations_batched_populates_analytics_rollups() {
+        use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
+        use frankensqlite::compat::{ConnectionExt, RowExt};
+        use std::path::PathBuf;
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("franken-index.db");
+        let storage = FrankenStorage::open(&db_path).unwrap();
+
+        let agent = Agent {
+            id: None,
+            slug: "claude_code".into(),
+            name: "Claude Code".into(),
+            version: Some("1.0".into()),
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).unwrap();
+
+        let ts_ms = 1_770_551_400_000_i64;
+        let usage_json = serde_json::json!({
+            "message": {
+                "model": "claude-opus-4-6",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "cache_read_input_tokens": 25,
+                    "cache_creation_input_tokens": 10,
+                    "service_tier": "standard"
+                }
+            }
+        });
+
+        let conv = Conversation {
+            id: None,
+            agent_slug: "claude_code".into(),
+            workspace: Some(PathBuf::from("/tmp/workspace")),
+            external_id: Some("franken-batch-upsert".into()),
+            title: Some("Franken batch upsert".into()),
+            source_path: PathBuf::from("/tmp/franken.jsonl"),
+            started_at: Some(ts_ms),
+            ended_at: Some(ts_ms + 60_000),
+            approx_tokens: None,
+            metadata_json: serde_json::Value::Null,
+            messages: vec![
+                Message {
+                    id: None,
+                    idx: 0,
+                    role: MessageRole::User,
+                    author: None,
+                    created_at: Some(ts_ms),
+                    content: "Please make a plan.".into(),
+                    extra_json: serde_json::Value::Null,
+                    snippets: vec![],
+                },
+                Message {
+                    id: None,
+                    idx: 1,
+                    role: MessageRole::Agent,
+                    author: None,
+                    created_at: Some(ts_ms + 30_000),
+                    content: "## Plan\n\n1. Reproduce\n2. Patch\n3. Verify".into(),
+                    extra_json: usage_json,
+                    snippets: vec![],
+                },
+            ],
+            source_id: "local".into(),
+            origin_host: None,
+        };
+
+        let outcomes = storage
+            .insert_conversations_batched(&[(agent_id, None, &conv)])
+            .unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].inserted_indices, vec![0, 1]);
+
+        let conn = storage.raw();
+        let daily_stats_rows: i64 = conn
+            .query_row_map("SELECT COUNT(*) FROM daily_stats", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        let token_daily_rows: i64 = conn
+            .query_row_map(
+                "SELECT COUNT(*) FROM token_daily_stats",
+                fparams![],
+                |row| row.get_typed(0),
+            )
+            .unwrap();
+        let usage_daily_rows: i64 = conn
+            .query_row_map("SELECT COUNT(*) FROM usage_daily", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        let model_daily_rows: i64 = conn
+            .query_row_map(
+                "SELECT COUNT(*) FROM usage_models_daily",
+                fparams![],
+                |row| row.get_typed(0),
+            )
+            .unwrap();
+
+        assert!(daily_stats_rows > 0, "daily_stats should be populated");
+        assert!(
+            token_daily_rows > 0,
+            "token_daily_stats should be populated"
+        );
+        assert!(usage_daily_rows > 0, "usage_daily should be populated");
+        assert!(
+            model_daily_rows > 0,
+            "usage_models_daily should be populated"
+        );
     }
 
     // =========================================================================
