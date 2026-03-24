@@ -30,12 +30,57 @@ if (-not [Environment]::Is64BitOperatingSystem) {
   exit 1
 }
 
+function Get-ArtifactNameFromUrl {
+  param([string]$Url)
+
+  try {
+    $uri = [System.Uri]$Url
+    $path = $uri.AbsolutePath
+  } catch {
+    $path = ($Url -replace '[?#].*$', '')
+  }
+
+  if (-not $path) { return $null }
+  return [System.IO.Path]::GetFileName($path)
+}
+
+function Get-SiblingUrl {
+  param(
+    [string]$Url,
+    [string]$SiblingName
+  )
+
+  try {
+    $uri = [System.Uri]$Url
+    $builder = [System.UriBuilder]::new($uri)
+    $path = $builder.Path
+    if (-not $path) { return $null }
+    $directory = [System.IO.Path]::GetDirectoryName($path.TrimEnd('/'))
+    if ([string]::IsNullOrEmpty($directory)) {
+      $builder.Path = "/$SiblingName"
+    } else {
+      $builder.Path = ($directory.TrimEnd('/') + "/$SiblingName")
+    }
+    $builder.Query = ""
+    $builder.Fragment = ""
+    return $builder.Uri.AbsoluteUri
+  } catch {
+    $base = ($Url -replace '[?#].*$', '')
+    if (-not $base) { return $null }
+    $lastSlash = $base.LastIndexOf('/')
+    if ($lastSlash -lt 0) { return $SiblingName }
+    return $base.Substring(0, $lastSlash + 1) + $SiblingName
+  }
+}
+
 # Map architecture to the naming convention used by release.yml
 $arch = "amd64"
 $zip = "cass-windows-${arch}.zip"
 
 if ($ArtifactUrl) {
   $url = $ArtifactUrl
+  $artifactName = Get-ArtifactNameFromUrl $ArtifactUrl
+  if ($artifactName) { $zip = $artifactName }
 } else {
   # Release asset names follow the pattern: cass-windows-amd64.zip
   # (produced by the release.yml workflow matrix `asset_name` field)
@@ -53,12 +98,14 @@ try {
 
   $checksumToUse = $Checksum
   if (-not $checksumToUse) {
-    if (-not $ChecksumUrl) { $ChecksumUrl = "$url.sha256" }
+    if (-not $ChecksumUrl) { $ChecksumUrl = Get-SiblingUrl $url "$zip.sha256" }
     Write-Host "Fetching checksum from $ChecksumUrl"
     $checksumFetched = $false
     # Try per-file .sha256 first, then fall back to SHA256SUMS.txt
-    foreach ($tryUrl in @($ChecksumUrl, "https://github.com/$Owner/$Repo/releases/download/$Version/SHA256SUMS.txt")) {
+    $sha256SumsUrl = Get-SiblingUrl $url "SHA256SUMS.txt"
+    foreach ($tryUrl in @($ChecksumUrl, $sha256SumsUrl)) {
       if ($checksumFetched) { break }
+      if (-not $tryUrl) { continue }
       try {
         # Use Invoke-RestMethod which returns the body as a string and follows
         # redirects reliably across all PowerShell versions (Windows PS 5.x and
@@ -68,15 +115,22 @@ try {
         if ($tryUrl -like "*/SHA256SUMS.txt") {
           # SHA256SUMS.txt contains lines like: <hash>  <filename>
           foreach ($line in $raw -split "`n") {
-            if ($line -match $zip) {
-              $checksumToUse = ($line.Trim() -split '\s+')[0]
+            $parts = $line.Trim() -split '\s+', 2
+            if ($parts.Count -ge 2 -and $parts[1] -eq $zip -and $parts[0] -match '^[0-9a-fA-F]{64}$') {
+              $checksumToUse = $parts[0]
               $checksumFetched = $true
               break
             }
           }
         } else {
-          $checksumToUse = ($raw.Trim() -split '\s+')[0]
-          $checksumFetched = $true
+          $candidate = ($raw.Trim() -split '\s+')[0]
+          if ($candidate -match '^[0-9a-fA-F]{64}$') {
+            $checksumToUse = $candidate
+            $checksumFetched = $true
+          }
+        }
+        if (-not $checksumFetched) {
+          Write-Host "Checksum data from $tryUrl did not contain a valid entry for $zip, trying next source..."
         }
       } catch {
         Write-Host "Could not fetch checksum from $tryUrl, trying next source..."
