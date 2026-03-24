@@ -109,7 +109,10 @@ impl std::fmt::Debug for WizardState {
             .field("time_range", &self.time_range)
             .field("workspaces", &self.workspaces)
             .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
-            .field("recovery_secret", &self.recovery_secret.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "recovery_secret",
+                &self.recovery_secret.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("generate_recovery", &self.generate_recovery)
             .field("generate_qr", &self.generate_qr)
             .field("title", &self.title)
@@ -130,7 +133,10 @@ impl std::fmt::Debug for WizardState {
             .field("include_attachments", &self.include_attachments)
             .field("cloudflare_branch", &self.cloudflare_branch)
             .field("cloudflare_account_id", &self.cloudflare_account_id)
-            .field("cloudflare_api_token", &self.cloudflare_api_token.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "cloudflare_api_token",
+                &self.cloudflare_api_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("final_site_dir", &self.final_site_dir)
             .finish()
     }
@@ -1697,7 +1703,9 @@ impl PagesWizard {
 
             // Guard: refuse to produce an archive with zero key slots
             if enc_engine.key_slot_count() == 0 {
-                bail!("No encryption key slots configured — archive would be permanently undecryptable");
+                bail!(
+                    "No encryption key slots configured — archive would be permanently undecryptable"
+                );
             }
 
             // Encrypt the database

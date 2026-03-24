@@ -1743,7 +1743,7 @@ fn watch_sources<F: Fn(Vec<PathBuf>, &[(ConnectorKind, ScanRoot)], bool)>(
 
 fn reset_storage(storage: &FrankenStorage) -> Result<()> {
     // Wrap in transaction to ensure atomic reset - if any DELETE fails,
-    // all changes are rolled back to prevent inconsistent state
+    // all changes are rolled back to prevent inconsistent state.
     storage.raw().execute_batch(
         "BEGIN TRANSACTION;
          DELETE FROM usage_models_daily;
@@ -1752,9 +1752,33 @@ fn reset_storage(storage: &FrankenStorage) -> Result<()> {
          DELETE FROM token_daily_stats;
          DELETE FROM daily_stats;
          DELETE FROM message_metrics;
-         DELETE FROM token_usage;
-         INSERT INTO fts_messages(fts_messages) VALUES('delete-all');
-         DELETE FROM snippets;
+         DELETE FROM token_usage;",
+    )?;
+
+    if let Err(err) = storage
+        .raw()
+        .execute(crate::storage::sqlite::FTS5_DELETE_ALL_SQL)
+    {
+        use frankensqlite::compat::{ConnectionExt as _, RowExt as _};
+
+        let message_count: i64 = storage
+            .raw()
+            .query_row_map("SELECT COUNT(*) FROM messages", &[], |r| r.get_typed(0))
+            .unwrap_or(0);
+
+        if message_count > 0 {
+            let _ = storage.raw().execute_batch("ROLLBACK;");
+            return Err(err.into());
+        }
+
+        tracing::warn!(
+            error = %err,
+            "skipping empty-database FTS reset because the table is not yet resettable on this connection"
+        );
+    }
+
+    storage.raw().execute_batch(
+        "DELETE FROM snippets;
          DELETE FROM messages;
          DELETE FROM conversations;
          DELETE FROM agents;

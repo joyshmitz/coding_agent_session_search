@@ -78,6 +78,19 @@ fn sample_message(idx: i64, role: MessageRole, ts: i64, content: &str) -> Messag
     }
 }
 
+fn make_codex_session(root: &Path, content: &str, ts: u64) {
+    let sessions = root.join("sessions/2024/12/01");
+    fs::create_dir_all(&sessions).unwrap();
+    let file = sessions.join("rollout-test.jsonl");
+    let sample = format!(
+        r#"{{"type": "event_msg", "timestamp": {ts}, "payload": {{"type": "user_message", "message": "{content}"}}}}
+{{"type": "response_item", "timestamp": {}, "payload": {{"role": "assistant", "content": "{content}_response"}}}}
+"#,
+        ts + 1000
+    );
+    fs::write(file, sample).unwrap();
+}
+
 fn sample_conversation(
     agent_slug: &str,
     workspace: &Path,
@@ -335,6 +348,99 @@ fn doctor_help_shows_options() {
         .stdout(contains("Diagnose"))
         .stdout(contains("--fix"))
         .stdout(contains("--verbose"));
+}
+
+#[test]
+fn doctor_fix_quarantines_corrupted_database_bundle_sidecars() {
+    let tmp = TempDir::new().unwrap();
+    let temp_home = tmp.path();
+    let data_dir = temp_home.join("data");
+    let codex_home = temp_home.join(".codex");
+    fs::create_dir_all(&data_dir).unwrap();
+    make_codex_session(&codex_home, "doctor sidecar recovery", 1_733_011_200_000);
+
+    let db_path = data_dir.join("agent_search.db");
+    let corrupt_bytes = b"not a sqlite database".to_vec();
+    let wal_bytes = b"stale wal bytes".to_vec();
+    let shm_bytes = b"stale shm bytes".to_vec();
+    fs::write(&db_path, &corrupt_bytes).unwrap();
+    fs::write(data_dir.join("agent_search.db-wal"), &wal_bytes).unwrap();
+    fs::write(data_dir.join("agent_search.db-shm"), &shm_bytes).unwrap();
+
+    let doctor = base_cmd(temp_home)
+        .current_dir(temp_home)
+        .args([
+            "doctor",
+            "--fix",
+            "--json",
+            "--data-dir",
+            data_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("doctor command");
+    let doctor_json: Value = serde_json::from_slice(&doctor.stdout).expect("valid doctor json");
+    assert_eq!(
+        doctor_json.get("auto_fix_applied").and_then(Value::as_bool),
+        Some(true),
+        "doctor should at least quarantine the corrupted bundle\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&doctor.stdout),
+        String::from_utf8_lossy(&doctor.stderr)
+    );
+
+    let entries: Vec<String> = fs::read_dir(&data_dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+
+    let backup_root = entries
+        .iter()
+        .find(|name| {
+            name.starts_with("agent_search.corrupt.")
+                && !name.ends_with("-wal")
+                && !name.ends_with("-shm")
+        })
+        .cloned()
+        .expect("doctor should quarantine the corrupt database root");
+    let backup_root_path = data_dir.join(&backup_root);
+    assert_eq!(fs::read(&backup_root_path).unwrap(), corrupt_bytes);
+    assert_eq!(
+        fs::read(format!("{}-wal", backup_root_path.display())).unwrap(),
+        wal_bytes
+    );
+    assert_eq!(
+        fs::read(format!("{}-shm", backup_root_path.display())).unwrap(),
+        shm_bytes
+    );
+
+    let live_wal = data_dir.join("agent_search.db-wal");
+    if live_wal.exists() {
+        assert_ne!(fs::read(&live_wal).unwrap(), wal_bytes);
+    }
+    let live_shm = data_dir.join("agent_search.db-shm");
+    if live_shm.exists() {
+        assert_ne!(fs::read(&live_shm).unwrap(), shm_bytes);
+    }
+
+    let health = base_cmd(temp_home)
+        .current_dir(temp_home)
+        .args(["health", "--json", "--data-dir", data_dir.to_str().unwrap()])
+        .output()
+        .expect("health command");
+    assert!(
+        health.status.success(),
+        "health should succeed once stale sidecars are quarantined\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&health.stdout),
+        String::from_utf8_lossy(&health.stderr)
+    );
+    let health_json: Value = serde_json::from_slice(&health.stdout).expect("valid health json");
+    assert_eq!(
+        health_json
+            .get("db")
+            .and_then(|db| db.get("opened"))
+            .and_then(Value::as_bool),
+        Some(true)
+    );
 }
 
 // =============================================================================

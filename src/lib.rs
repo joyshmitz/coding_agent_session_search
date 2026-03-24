@@ -7834,26 +7834,25 @@ fn run_diag(
     // Check database existence and get stats
     let (db_exists, db_size, conversation_count, message_count) = if db_path.exists() {
         let size = fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
-        let (convs, msgs) =
-            match Connection::open(db_path.to_string_lossy().into_owned()) {
-                Ok(conn) => {
-                    let convs: i64 = conn
-                        .query_row_map("SELECT COUNT(*) FROM conversations", params![], |r| {
-                            r.get_typed(0)
-                        })
-                        .unwrap_or(0);
-                    let msgs: i64 = conn
-                        .query_row_map("SELECT COUNT(*) FROM messages", params![], |r| {
-                            r.get_typed(0)
-                        })
-                        .unwrap_or(0);
-                    (convs, msgs)
-                }
-                Err(e) => {
-                    tracing::warn!("failed to open database for diagnostics: {e}");
-                    (-1, -1)
-                }
-            };
+        let (convs, msgs) = match Connection::open(db_path.to_string_lossy().into_owned()) {
+            Ok(conn) => {
+                let convs: i64 = conn
+                    .query_row_map("SELECT COUNT(*) FROM conversations", params![], |r| {
+                        r.get_typed(0)
+                    })
+                    .unwrap_or(0);
+                let msgs: i64 = conn
+                    .query_row_map("SELECT COUNT(*) FROM messages", params![], |r| {
+                        r.get_typed(0)
+                    })
+                    .unwrap_or(0);
+                (convs, msgs)
+            }
+            Err(e) => {
+                tracing::warn!("failed to open database for diagnostics: {e}");
+                (-1, -1)
+            }
+        };
         (true, size, convs, msgs)
     } else {
         (false, 0, 0, 0)
@@ -9639,33 +9638,51 @@ fn run_doctor(
             // Preserve existing DB when possible; rebuild only derived data.
             let mut can_rebuild = true;
             let mut db_backup_done = false;
-            if db_path.exists() && !db_ok {
+            if !db_ok {
                 let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
                 let backup_path = db_path.with_extension(format!("corrupt.{ts}"));
-                match std::fs::rename(&db_path, &backup_path) {
-                    Ok(_) => {
+                match crate::storage::sqlite::move_database_bundle(&db_path, &backup_path) {
+                    Ok(moved) if moved.moved_any() => {
+                        let mut components = Vec::new();
+                        if moved.database {
+                            components.push("db");
+                        }
+                        if moved.wal {
+                            components.push("wal");
+                        }
+                        if moved.shm {
+                            components.push("shm");
+                        }
+                        let component_note = if components.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" ({})", components.join(", "))
+                        };
                         db_backup_done = true;
                         checks.push(Check {
                             name: "database_backup".to_string(),
                             status: "pass".to_string(),
                             message: format!(
-                                "Backed up corrupted database to {}",
-                                backup_path.display()
+                                "Backed up corrupted database bundle to {}{}",
+                                backup_path.display(),
+                                component_note
                             ),
                             fix_available: true,
                             fix_applied: true,
                         });
                         auto_fix_actions.push(format!(
-                            "Backed up corrupted database to {}",
-                            backup_path.display()
+                            "Backed up corrupted database bundle to {}{}",
+                            backup_path.display(),
+                            component_note
                         ));
                         auto_fix_applied = true;
                     }
+                    Ok(_) => {}
                     Err(e) => {
                         checks.push(Check {
                             name: "database_backup".to_string(),
                             status: "fail".to_string(),
-                            message: format!("Failed to backup corrupted database: {}", e),
+                            message: format!("Failed to backup corrupted database bundle: {}", e),
                             fix_available: true,
                             fix_applied: false,
                         });
@@ -9685,7 +9702,10 @@ fn run_doctor(
                 needs_rebuild = true;
             } else {
                 let index_opts = indexer::IndexOptions {
-                    full: false,
+                    // When the database is missing or corrupted, doctor must
+                    // rebuild from source sessions using the full path rather
+                    // than the incremental UPSERT-based path.
+                    full: force_rebuild || !db_ok,
                     force_rebuild,
                     watch: false,
                     watch_once_paths: None,

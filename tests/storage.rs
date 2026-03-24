@@ -568,6 +568,19 @@ fn fts_messages_is_fts5_virtual_table() {
 }
 
 #[test]
+fn fresh_database_fts_messages_is_queryable_via_rusqlite() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("fresh-fts.db");
+    let _storage = SqliteStorage::open(&db_path).expect("open");
+
+    let conn = rusqlite::Connection::open(&db_path).expect("open rusqlite");
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM fts_messages", [], |row| row.get(0))
+        .expect("fresh FTS table should be queryable via rusqlite");
+    assert_eq!(count, 0, "fresh FTS table should start empty");
+}
+
+#[test]
 fn migration_from_v1_applies_v2_and_v3() {
     use rusqlite::Connection;
 

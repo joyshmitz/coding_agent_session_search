@@ -628,6 +628,72 @@ pub(crate) fn rebuild_fts_on_connection(conn: &FrankenConnection) -> Result<()> 
     result
 }
 
+fn materialize_fresh_fts_schema_via_rusqlite(db_path: &Path) -> Result<()> {
+    {
+        let conn = rusqlite::Connection::open(db_path).with_context(|| {
+            format!(
+                "opening rusqlite db at {} for FTS placeholder cleanup",
+                db_path.display()
+            )
+        })?;
+        conn.execute_batch("PRAGMA busy_timeout = 30000;")
+            .with_context(|| {
+                format!(
+                    "configuring rusqlite busy timeout for {}",
+                    db_path.display()
+                )
+            })?;
+
+        let existing_entries: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'fts_messages%'",
+                [],
+                |row| row.get(0),
+            )
+            .with_context(|| format!("probing fresh FTS schema in {}", db_path.display()))?;
+
+        if existing_entries > 0 {
+            conn.execute_batch(
+                "PRAGMA writable_schema = ON;
+                 DELETE FROM sqlite_master WHERE name LIKE 'fts_messages%';
+                 PRAGMA writable_schema = OFF;",
+            )
+            .with_context(|| {
+                format!(
+                    "removing placeholder FTS schema entries in {}",
+                    db_path.display()
+                )
+            })?;
+        }
+    }
+
+    let mut conn = rusqlite::Connection::open(db_path).with_context(|| {
+        format!(
+            "reopening rusqlite db at {} for FTS materialization",
+            db_path.display()
+        )
+    })?;
+    conn.execute_batch("PRAGMA busy_timeout = 30000;")
+        .with_context(|| {
+            format!(
+                "configuring rusqlite busy timeout for {}",
+                db_path.display()
+            )
+        })?;
+
+    let tx = conn.transaction().with_context(|| {
+        format!(
+            "starting rusqlite FTS materialization transaction for {}",
+            db_path.display()
+        )
+    })?;
+    tx.execute_batch(FTS5_REGISTER_SQL)
+        .with_context(|| format!("creating fresh FTS schema in {}", db_path.display()))?;
+    tx.commit()
+        .with_context(|| format!("committing fresh FTS schema in {}", db_path.display()))?;
+    Ok(())
+}
+
 /// Create a uniquely named backup of the database file.
 ///
 /// Returns the path to the backup file, or None if the source doesn't exist.
@@ -661,20 +727,66 @@ pub fn create_backup(db_path: &Path) -> Result<Option<std::path::PathBuf>, Migra
 
     // Best-effort copy of WAL/SHM sidecar files if they exist
     // SQLite sidecars are named: <path>-wal and <path>-shm
-    let path_str = db_path.to_string_lossy();
-    let backup_str = backup_path.to_string_lossy();
-
-    let wal_src = std::path::PathBuf::from(format!("{}-wal", path_str));
-    let shm_src = std::path::PathBuf::from(format!("{}-shm", path_str));
+    let wal_src = database_sidecar_path(db_path, "-wal");
+    let shm_src = database_sidecar_path(db_path, "-shm");
 
     if wal_src.exists() {
-        let _ = fs::copy(&wal_src, format!("{}-wal", backup_str));
+        let _ = fs::copy(&wal_src, database_sidecar_path(&backup_path, "-wal"));
     }
     if shm_src.exists() {
-        let _ = fs::copy(&shm_src, format!("{}-shm", backup_str));
+        let _ = fs::copy(&shm_src, database_sidecar_path(&backup_path, "-shm"));
     }
 
     Ok(Some(backup_path))
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DatabaseBundleMoveResult {
+    pub database: bool,
+    pub wal: bool,
+    pub shm: bool,
+}
+
+impl DatabaseBundleMoveResult {
+    pub fn moved_any(&self) -> bool {
+        self.database || self.wal || self.shm
+    }
+}
+
+fn database_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    PathBuf::from(format!("{}{}", path.to_string_lossy(), suffix))
+}
+
+/// Move a database file and its WAL/SHM sidecars to a new basename.
+///
+/// This is used for non-destructive quarantine of a corrupted bundle before a
+/// rebuild. If the main database file is already missing but orphaned sidecars
+/// remain, those sidecars are still moved so a fresh database can be created
+/// without inheriting stale WAL state.
+pub(crate) fn move_database_bundle(
+    source_root: &Path,
+    destination_root: &Path,
+) -> std::io::Result<DatabaseBundleMoveResult> {
+    let mut moved = DatabaseBundleMoveResult::default();
+
+    if source_root.exists() {
+        fs::rename(source_root, destination_root)?;
+        moved.database = true;
+    }
+
+    let wal_source = database_sidecar_path(source_root, "-wal");
+    if wal_source.exists() {
+        fs::rename(&wal_source, database_sidecar_path(destination_root, "-wal"))?;
+        moved.wal = true;
+    }
+
+    let shm_source = database_sidecar_path(source_root, "-shm");
+    if shm_source.exists() {
+        fs::rename(&shm_source, database_sidecar_path(destination_root, "-shm"))?;
+        moved.shm = true;
+    }
+
+    Ok(moved)
 }
 
 /// Helper to safely remove a database file and its potential WAL/SHM sidecars.
@@ -683,9 +795,8 @@ fn remove_database_files(path: &Path) -> std::io::Result<()> {
     fs::remove_file(path)?;
 
     // Best-effort removal of sidecar files (ignore errors if they don't exist)
-    let path_str = path.to_string_lossy();
-    let _ = fs::remove_file(format!("{}-wal", path_str));
-    let _ = fs::remove_file(format!("{}-shm", path_str));
+    let _ = fs::remove_file(database_sidecar_path(path, "-wal"));
+    let _ = fs::remove_file(database_sidecar_path(path, "-shm"));
 
     Ok(())
 }
@@ -726,9 +837,8 @@ pub fn cleanup_old_backups(db_path: &Path, keep_count: usize) -> Result<(), std:
         let _ = fs::remove_file(&path);
 
         // Also try to cleanup potential sidecars from fs::copy fallback
-        let path_str = path.to_string_lossy();
-        let _ = fs::remove_file(format!("{}-wal", path_str));
-        let _ = fs::remove_file(format!("{}-shm", path_str));
+        let _ = fs::remove_file(database_sidecar_path(&path, "-wal"));
+        let _ = fs::remove_file(database_sidecar_path(&path, "-shm"));
     }
 
     Ok(())
@@ -1284,6 +1394,7 @@ impl FrankenStorage {
     /// Migrations run before PRAGMAs to avoid page lock contention in
     /// frankensqlite's WAL mode on file-based databases.
     pub fn open(path: &Path) -> Result<Self> {
+        let db_existed = path.exists();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("creating db directory {}", parent.display()))?;
@@ -1294,6 +1405,16 @@ impl FrankenStorage {
             .with_context(|| format!("opening frankensqlite db at {}", path.display()))?;
         let storage = Self { conn };
         storage.run_migrations()?;
+        if !db_existed {
+            drop(storage);
+            materialize_fresh_fts_schema_via_rusqlite(path)?;
+            let conn = FrankenConnection::open(&path_str)
+                .with_context(|| format!("reopening frankensqlite db at {}", path.display()))?;
+            let _ = conn.execute(FTS5_REGISTER_SQL);
+            let storage = Self { conn };
+            storage.apply_config()?;
+            return Ok(storage);
+        }
         storage.apply_config()?;
         Ok(storage)
     }
@@ -5525,6 +5646,74 @@ mod tests {
             shms.len(),
             2,
             "should keep SHM sidecars only for retained backups"
+        );
+    }
+
+    #[test]
+    fn move_database_bundle_moves_database_and_sidecars() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let backup_path = dir.path().join("test.db.corrupt");
+
+        std::fs::write(&db_path, b"db").unwrap();
+        std::fs::write(database_sidecar_path(&db_path, "-wal"), b"wal").unwrap();
+        std::fs::write(database_sidecar_path(&db_path, "-shm"), b"shm").unwrap();
+
+        let moved = move_database_bundle(&db_path, &backup_path).unwrap();
+        assert_eq!(
+            moved,
+            DatabaseBundleMoveResult {
+                database: true,
+                wal: true,
+                shm: true
+            }
+        );
+        assert!(moved.moved_any());
+
+        assert!(!db_path.exists());
+        assert!(!database_sidecar_path(&db_path, "-wal").exists());
+        assert!(!database_sidecar_path(&db_path, "-shm").exists());
+
+        assert_eq!(std::fs::read(&backup_path).unwrap(), b"db");
+        assert_eq!(
+            std::fs::read(database_sidecar_path(&backup_path, "-wal")).unwrap(),
+            b"wal"
+        );
+        assert_eq!(
+            std::fs::read(database_sidecar_path(&backup_path, "-shm")).unwrap(),
+            b"shm"
+        );
+    }
+
+    #[test]
+    fn move_database_bundle_preserves_orphan_sidecars_without_main_db() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let backup_path = dir.path().join("test.db.corrupt");
+
+        std::fs::write(database_sidecar_path(&db_path, "-wal"), b"wal").unwrap();
+        std::fs::write(database_sidecar_path(&db_path, "-shm"), b"shm").unwrap();
+
+        let moved = move_database_bundle(&db_path, &backup_path).unwrap();
+        assert_eq!(
+            moved,
+            DatabaseBundleMoveResult {
+                database: false,
+                wal: true,
+                shm: true
+            }
+        );
+        assert!(moved.moved_any());
+        assert!(!db_path.exists());
+        assert!(!database_sidecar_path(&db_path, "-wal").exists());
+        assert!(!database_sidecar_path(&db_path, "-shm").exists());
+        assert_eq!(
+            std::fs::read(database_sidecar_path(&backup_path, "-wal")).unwrap(),
+            b"wal"
+        );
+        assert_eq!(
+            std::fs::read(database_sidecar_path(&backup_path, "-shm")).unwrap(),
+            b"shm"
         );
     }
 
