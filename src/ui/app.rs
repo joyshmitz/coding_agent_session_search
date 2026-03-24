@@ -12247,6 +12247,11 @@ impl CassApp {
         config_path: String,
     ) {
         let previous_selected = self.sources_view.selected;
+        let previous_selected_name = self
+            .sources_view
+            .items
+            .get(previous_selected)
+            .map(|item| item.name.clone());
         let previous_scroll = self.sources_view.scroll;
         let previous_row_state: HashMap<String, SourcesRowEphemeralState> = self
             .sources_view
@@ -12302,9 +12307,13 @@ impl CassApp {
         }
 
         let count = items.len();
+        let selected = previous_selected_name
+            .as_deref()
+            .and_then(|name| items.iter().position(|item| item.name == name))
+            .unwrap_or_else(|| previous_selected.min(count.saturating_sub(1)));
         self.sources_view = SourcesViewState {
             items,
-            selected: previous_selected.min(count.saturating_sub(1)),
+            selected,
             scroll: previous_scroll.min(count.saturating_sub(1)),
             busy: false,
             config_path,
@@ -37376,6 +37385,80 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
             .expect("beta row should still exist");
         assert!(beta.busy);
         assert_eq!(beta.doctor_summary, Some((3, 1, 0)));
+    }
+
+    #[test]
+    fn rebuild_sources_view_preserves_selected_source_when_order_changes() {
+        let mut app = CassApp::default();
+        app.last_sources_visible_rows.set(2);
+        app.sources_view.items = vec![
+            SourcesViewItem {
+                name: "local".into(),
+                kind: crate::sources::SourceKind::Local,
+                host: None,
+                schedule: "always".into(),
+                path_count: 0,
+                last_sync: None,
+                last_result: "n/a".into(),
+                files_synced: 0,
+                bytes_transferred: 0,
+                busy: false,
+                doctor_summary: None,
+                error: None,
+            },
+            SourcesViewItem {
+                name: "alpha".into(),
+                kind: crate::sources::SourceKind::Ssh,
+                host: Some("user@alpha".into()),
+                schedule: "manual".into(),
+                path_count: 1,
+                last_sync: None,
+                last_result: "never".into(),
+                files_synced: 0,
+                bytes_transferred: 0,
+                busy: false,
+                doctor_summary: None,
+                error: None,
+            },
+            SourcesViewItem {
+                name: "beta".into(),
+                kind: crate::sources::SourceKind::Ssh,
+                host: Some("user@beta".into()),
+                schedule: "manual".into(),
+                path_count: 1,
+                last_sync: None,
+                last_result: "never".into(),
+                files_synced: 0,
+                bytes_transferred: 0,
+                busy: true,
+                doctor_summary: Some((2, 0, 0)),
+                error: None,
+            },
+        ];
+        app.sources_view.selected = 2;
+        app.sources_view.scroll = 0;
+
+        let config = crate::sources::SourcesConfig {
+            sources: vec![
+                crate::sources::SourceDefinition::ssh("beta", "user@beta"),
+                crate::sources::SourceDefinition::ssh("alpha", "user@alpha"),
+            ],
+        };
+        let sync_status = crate::sources::SyncStatus::default();
+
+        app.rebuild_sources_view(&config, &sync_status, "/tmp/sources.toml".into());
+
+        assert_eq!(app.sources_view.selected, 1);
+        assert_eq!(
+            app.sources_view.items[app.sources_view.selected].name,
+            "beta"
+        );
+        assert_eq!(app.sources_view.scroll, 0);
+        assert!(app.sources_view.items[app.sources_view.selected].busy);
+        assert_eq!(
+            app.sources_view.items[app.sources_view.selected].doctor_summary,
+            Some((2, 0, 0))
+        );
     }
 
     #[test]
