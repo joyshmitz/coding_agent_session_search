@@ -507,6 +507,59 @@ paths = ["~/.claude/projects"]
     tracker.complete();
 }
 
+/// Test: sources add rejects the reserved local source name.
+#[test]
+fn sources_add_reserved_local_name_error() {
+    let tracker = tracker_for("sources_add_reserved_local_name_error");
+    let _trace_guard = tracker.trace_env_guard();
+
+    let start = tracker.start("setup", Some("Create temp config directory"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    tracker.end("setup", Some("Create temp config directory"), start);
+
+    let start = tracker.start(
+        "run_sources_add_reserved_local",
+        Some("Attempt to add source named local"),
+    );
+    let output = cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "add",
+            "user@other.local",
+            "--name",
+            "local",
+            "--preset",
+            "linux-defaults",
+            "--no-test",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources add command");
+    tracker.end(
+        "run_sources_add_reserved_local",
+        Some("Attempt to add source named local"),
+        start,
+    );
+
+    let start = tracker.start("verify_error", Some("Verify reserved local error"));
+    assert!(
+        !output.status.success(),
+        "command should have failed but succeeded with: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("reserved") || stderr.contains("built-in local source"),
+        "Expected reserved-name error, got: {stderr}"
+    );
+    tracker.end("verify_error", Some("Verify reserved local error"), start);
+
+    tracker.complete();
+}
+
 /// Test: sources add with invalid URL format.
 #[test]
 fn sources_add_invalid_url() {
@@ -605,6 +658,69 @@ fn sources_add_auto_name() {
     tracker.end(
         "verify_auto_name",
         Some("Verify auto-generated name"),
+        start,
+    );
+
+    tracker.complete();
+}
+
+/// Test: sources add auto-generated names do not collide with the built-in local source.
+#[test]
+fn sources_add_auto_name_disambiguates_reserved_local() {
+    let tracker = tracker_for("sources_add_auto_name_disambiguates_reserved_local");
+    let _trace_guard = tracker.trace_env_guard();
+
+    let start = tracker.start("setup", Some("Create temp config directory"));
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_dir = tmp.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+    let _guard_config = EnvGuard::set("XDG_CONFIG_HOME", config_dir.to_string_lossy());
+    tracker.end("setup", Some("Create temp config directory"), start);
+
+    let start = tracker.start(
+        "run_sources_add",
+        Some("Add source without explicit name for reserved local hostname"),
+    );
+    let output = cargo_bin_cmd!("cass")
+        .args([
+            "sources",
+            "add",
+            "user@local",
+            "--preset",
+            "linux-defaults",
+            "--no-test",
+        ])
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .output()
+        .expect("sources add command");
+    tracker.end(
+        "run_sources_add",
+        Some("Add source without explicit name for reserved local hostname"),
+        start,
+    );
+
+    let start = tracker.start(
+        "verify_auto_name",
+        Some("Verify reserved local auto-name was disambiguated"),
+    );
+    assert!(
+        output.status.success(),
+        "command failed: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let config_content = read_sources_config(&config_dir);
+    assert!(
+        config_content.contains("name = \"local-ssh\""),
+        "Reserved auto-generated name not rewritten in config: {config_content}"
+    );
+    assert!(
+        config_content.contains("host = \"user@local\""),
+        "Host not preserved in config: {config_content}"
+    );
+    tracker.end(
+        "verify_auto_name",
+        Some("Verify reserved local auto-name was disambiguated"),
         start,
     );
 

@@ -42,6 +42,9 @@ use super::provenance::SourceKind;
 // Re-export types from franken_agent_detection.
 pub use franken_agent_detection::{PathMapping, Platform};
 
+const BUILT_IN_LOCAL_SOURCE_NAME: &str = "local";
+const RESERVED_REMOTE_SOURCE_SUFFIX: &str = "-ssh";
+
 /// Errors that can occur when loading or saving source configuration.
 #[derive(Error, Debug)]
 pub enum ConfigError {
@@ -138,6 +141,13 @@ impl SourceDefinition {
             ));
         }
 
+        if self.name.eq_ignore_ascii_case(BUILT_IN_LOCAL_SOURCE_NAME) {
+            return Err(ConfigError::Validation(format!(
+                "Source name '{}' is reserved for the built-in local source",
+                BUILT_IN_LOCAL_SOURCE_NAME
+            )));
+        }
+
         if self.name.contains('/') || self.name.contains('\\') {
             return Err(ConfigError::Validation(
                 "Source name cannot contain path separators".into(),
@@ -212,6 +222,15 @@ impl SourceDefinition {
         }
 
         path.to_string()
+    }
+}
+
+/// Adjust an auto-generated remote source name to avoid reserved built-in IDs.
+pub(crate) fn normalize_generated_remote_source_name(name: &str) -> String {
+    if name.eq_ignore_ascii_case(BUILT_IN_LOCAL_SOURCE_NAME) {
+        format!("{name}{RESERVED_REMOTE_SOURCE_SUFFIX}")
+    } else {
+        name.to_string()
     }
 }
 
@@ -708,9 +727,10 @@ impl SourceConfigGenerator {
         let paths = self.generate_paths(probe);
         let path_mappings = self.generate_mappings(probe);
         let platform = self.detect_platform(probe);
+        let name = normalize_generated_remote_source_name(host_name);
 
         SourceDefinition {
-            name: host_name.to_string(),
+            name,
             source_type: SourceKind::Ssh,
             host: Some(host_name.to_string()), // Use SSH alias
             paths,
@@ -1135,6 +1155,22 @@ mod tests {
     }
 
     #[test]
+    fn test_source_validation_reserved_local_name() {
+        let source = SourceDefinition::ssh("local", "user@host");
+        assert!(source.validate().is_err());
+
+        let source = SourceDefinition::ssh("LOCAL", "user@host");
+        assert!(source.validate().is_err());
+    }
+
+    #[test]
+    fn test_normalize_generated_remote_source_name_disambiguates_local() {
+        assert_eq!(normalize_generated_remote_source_name("local"), "local-ssh");
+        assert_eq!(normalize_generated_remote_source_name("LOCAL"), "LOCAL-ssh");
+        assert_eq!(normalize_generated_remote_source_name("laptop"), "laptop");
+    }
+
+    #[test]
     fn test_source_validation_ssh_without_host() {
         let mut source = SourceDefinition::ssh("test", "host");
         source.host = None;
@@ -1492,6 +1528,21 @@ mod tests {
         assert_eq!(source.sync_schedule, SyncSchedule::Manual);
         assert!(!source.paths.is_empty());
         assert!(source.paths.contains(&"~/.claude/projects".to_string()));
+    }
+
+    #[test]
+    fn test_generate_source_disambiguates_reserved_local_name() {
+        let generator = SourceConfigGenerator::new();
+        let probe = make_test_probe(
+            true,
+            vec![make_test_agent("claude", "~/.claude/projects")],
+            Some(make_test_sys_info("linux", "/home/ubuntu")),
+        );
+
+        let source = generator.generate_source("local", &probe);
+
+        assert_eq!(source.name, "local-ssh");
+        assert_eq!(source.host, Some("local".into()));
     }
 
     #[test]
