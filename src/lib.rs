@@ -15878,18 +15878,17 @@ fn parse_source_url(url: &str, name: Option<&str>) -> Result<(String, String), C
         });
     }
 
-    // Generate source_id from hostname if not provided
+    // Generate source_id from hostname if not provided.
+    // Auto-generated remote names must not collide with the built-in local source ID.
     let source_id = if let Some(n) = name {
         n.to_string()
     } else {
         // Extract hostname part (after @)
         let hostname_part = host.split('@').nth(1).unwrap_or(host);
         // Take first segment before any dots
-        hostname_part
-            .split('.')
-            .next()
-            .unwrap_or(hostname_part)
-            .to_string()
+        crate::sources::config::normalize_generated_remote_source_name(
+            hostname_part.split('.').next().unwrap_or(hostname_part),
+        )
     };
 
     Ok((host.to_string(), source_id))
@@ -16580,8 +16579,20 @@ fn run_sources_sync(
     }
 
     // Save sync status
-    if !dry_run && let Err(e) = status.save(&data_dir) {
-        tracing::warn!("Failed to save sync status: {}", e);
+    if !dry_run {
+        let current_config = SourcesConfig::load().unwrap_or_else(|error| {
+            tracing::warn!("Failed to reload sources config before saving sync status: {error}");
+            config.clone()
+        });
+        status.retain_sources(
+            current_config
+                .sources
+                .iter()
+                .map(|source| source.name.as_str()),
+        );
+        if let Err(e) = status.save(&data_dir) {
+            tracing::warn!("Failed to save sync status: {}", e);
+        }
     }
 
     // Output summary

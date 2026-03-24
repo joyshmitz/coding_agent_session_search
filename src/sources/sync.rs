@@ -1720,6 +1720,17 @@ impl SyncStatus {
         self.sources.insert(source_name.to_string(), info);
     }
 
+    /// Drop sync status entries for sources that no longer exist.
+    ///
+    /// Returns `true` when at least one stale entry was removed.
+    pub fn retain_sources<'a>(&mut self, source_names: impl IntoIterator<Item = &'a str>) -> bool {
+        let allowed: std::collections::HashSet<&str> = source_names.into_iter().collect();
+        let previous_len = self.sources.len();
+        self.sources
+            .retain(|source_name, _| allowed.contains(source_name.as_str()));
+        self.sources.len() != previous_len
+    }
+
     /// Get sync info for a source.
     pub fn get(&self, source_name: &str) -> Option<&SourceSyncInfo> {
         self.sources.get(source_name)
@@ -2159,6 +2170,31 @@ Total transferred file size: 1,234 bytes
         assert_eq!(info.files_synced, 3);
         assert_eq!(info.bytes_transferred, 42);
         assert!(matches!(info.last_result, SyncResult::Success));
+    }
+
+    #[test]
+    fn test_sync_status_retain_sources_prunes_removed_entries() {
+        let mut status = SyncStatus::default();
+        status.sources.insert(
+            "laptop".into(),
+            SourceSyncInfo {
+                files_synced: 3,
+                ..Default::default()
+            },
+        );
+        status.sources.insert(
+            "desktop".into(),
+            SourceSyncInfo {
+                files_synced: 5,
+                ..Default::default()
+            },
+        );
+
+        let removed_any = status.retain_sources(["laptop"]);
+
+        assert!(removed_any);
+        assert!(status.get("laptop").is_some());
+        assert!(status.get("desktop").is_none());
     }
 
     #[test]

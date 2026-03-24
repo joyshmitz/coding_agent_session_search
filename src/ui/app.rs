@@ -12360,13 +12360,27 @@ impl CassApp {
     fn load_sources_view(&mut self) {
         use crate::sources::{SourcesConfig, SyncStatus};
 
-        let config = SourcesConfig::load().unwrap_or_default();
         let config_path = SourcesConfig::config_path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "unknown".into());
 
         let data_dir = self.data_dir.clone();
-        let sync_status = SyncStatus::load(&data_dir).unwrap_or_default();
+        let mut sync_status = SyncStatus::load(&data_dir).unwrap_or_default();
+        let config = match SourcesConfig::load() {
+            Ok(config) => {
+                if sync_status
+                    .retain_sources(config.sources.iter().map(|source| source.name.as_str()))
+                    && let Err(error) = sync_status.save(&data_dir)
+                {
+                    tracing::warn!(%error, "failed to save pruned source sync status");
+                }
+                config
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to load sources config");
+                SourcesConfig::default()
+            }
+        };
 
         self.rebuild_sources_view(&config, &sync_status, config_path);
     }
@@ -19104,19 +19118,47 @@ impl super::ftui_adapter::Model for CassApp {
                 let has_other_busy_source = self.sources_view.items.iter().any(|item| item.busy);
                 #[cfg(not(test))]
                 {
-                    use crate::sources::SyncStatus;
+                    use crate::sources::{SourcesConfig, SyncStatus};
 
                     let status_message = match SyncStatus::load(&self.data_dir) {
-                        Ok(mut persisted_status) => {
-                            persisted_status.set_info(&source_name, sync_info);
-                            if let Err(error) = persisted_status.save(&self.data_dir) {
-                                format!(
-                                    "{base_status_message} (warning: failed to save sync status: {error})"
-                                )
-                            } else {
-                                base_status_message
+                        Ok(mut persisted_status) => match SourcesConfig::load() {
+                            Ok(config) => {
+                                let source_still_configured =
+                                    config.find_source(&source_name).is_some();
+                                persisted_status.retain_sources(
+                                    config.sources.iter().map(|source| source.name.as_str()),
+                                );
+                                if source_still_configured {
+                                    persisted_status.set_info(&source_name, sync_info);
+                                }
+                                let status_message = if source_still_configured {
+                                    base_status_message.clone()
+                                } else {
+                                    format!(
+                                        "{base_status_message} (source removed from config before sync completed)"
+                                    )
+                                };
+                                if let Err(error) = persisted_status.save(&self.data_dir) {
+                                    format!(
+                                        "{status_message} (warning: failed to save sync status: {error})"
+                                    )
+                                } else {
+                                    status_message
+                                }
                             }
-                        }
+                            Err(error) => {
+                                persisted_status.set_info(&source_name, sync_info);
+                                if let Err(save_error) = persisted_status.save(&self.data_dir) {
+                                    format!(
+                                        "{base_status_message} (warning: failed to load sources config for sync-status pruning: {error}; failed to save sync status: {save_error})"
+                                    )
+                                } else {
+                                    format!(
+                                        "{base_status_message} (warning: failed to load sources config for sync-status pruning: {error})"
+                                    )
+                                }
+                            }
+                        },
                         Err(error) => format!(
                             "{base_status_message} (warning: failed to load sync status: {error})"
                         ),
