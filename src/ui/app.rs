@@ -4697,6 +4697,8 @@ pub struct CassApp {
     pub last_split_handle_area: RefCell<Option<Rect>>,
     /// Last rendered saved-view list row hit areas.
     pub last_saved_view_row_areas: RefCell<Vec<(Rect, usize)>>,
+    /// Last rendered visible row count for the Sources list.
+    last_sources_visible_rows: Cell<usize>,
     /// Active pane split drag state for mouse-based resize.
     pub pane_split_drag: Option<PaneSplitDragState>,
 
@@ -4929,6 +4931,7 @@ impl Default for CassApp {
             last_content_area: RefCell::new(None),
             last_split_handle_area: RefCell::new(None),
             last_saved_view_row_areas: RefCell::new(Vec::new()),
+            last_sources_visible_rows: Cell::new(0),
             pane_split_drag: None,
             last_mouse_pos: None,
             drag_hover_settled_at: None,
@@ -12298,6 +12301,28 @@ impl CassApp {
         };
     }
 
+    fn ensure_sources_selection_visible(&mut self) {
+        let item_count = self.sources_view.items.len();
+        if item_count == 0 {
+            self.sources_view.scroll = 0;
+            return;
+        }
+
+        let visible_rows = self.last_sources_visible_rows.get();
+        if visible_rows == 0 {
+            self.sources_view.scroll = self.sources_view.scroll.min(item_count.saturating_sub(1));
+            return;
+        }
+
+        let max_scroll = item_count.saturating_sub(visible_rows);
+        if self.sources_view.selected < self.sources_view.scroll {
+            self.sources_view.scroll = self.sources_view.selected;
+        } else if self.sources_view.selected >= self.sources_view.scroll + visible_rows {
+            self.sources_view.scroll = self.sources_view.selected + 1 - visible_rows;
+        }
+        self.sources_view.scroll = self.sources_view.scroll.min(max_scroll);
+    }
+
     /// Number of selectable items in the current analytics subview.
     fn analytics_selectable_count(&self) -> usize {
         let data = match &self.analytics_cache {
@@ -18954,6 +18979,7 @@ impl super::ftui_adapter::Model for CassApp {
                     let cur = self.sources_view.selected as i32;
                     let next = (cur + delta).rem_euclid(count as i32) as usize;
                     self.sources_view.selected = next;
+                    self.ensure_sources_selection_visible();
                 }
                 ftui::Cmd::none()
             }
@@ -19109,6 +19135,16 @@ impl super::ftui_adapter::Model for CassApp {
                             }
                         })
                     } else {
+                        if let Some(item) = self
+                            .sources_view
+                            .items
+                            .iter_mut()
+                            .find(|item| item.name == source_name)
+                        {
+                            item.busy = false;
+                            item.error =
+                                Some("Source no longer exists in sources config".to_string());
+                        }
                         self.sources_view.status =
                             format!("Source '{source_name}' not found in config");
                         ftui::Cmd::none()
@@ -20430,6 +20466,9 @@ impl super::ftui_adapter::Model for CassApp {
                     .style(pane_style);
                 let content_inner = content_block.inner(vertical[1]);
                 content_block.render(vertical[1], frame);
+                self.last_sources_visible_rows
+                    .set(content_inner.height as usize);
+                self.ensure_sources_selection_visible();
 
                 if render_content && !content_inner.is_empty() {
                     let sv = &self.sources_view;
@@ -37080,6 +37119,88 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
 
         let _ = app.update(CassMsg::SourcesSelectionMoved { delta: -1 });
         assert_eq!(app.sources_view.selected, 1); // wraps backward
+    }
+
+    #[test]
+    fn sources_selection_keeps_selected_row_visible() {
+        let mut app = CassApp::default();
+        app.last_sources_visible_rows.set(2);
+        app.sources_view.items = (0..5)
+            .map(|idx| SourcesViewItem {
+                name: format!("host-{idx}"),
+                kind: crate::sources::SourceKind::Ssh,
+                host: Some(format!("user@host-{idx}")),
+                schedule: "manual".into(),
+                path_count: 1,
+                last_sync: None,
+                last_result: "never".into(),
+                files_synced: 0,
+                bytes_transferred: 0,
+                busy: false,
+                doctor_summary: None,
+                error: None,
+            })
+            .collect();
+        app.sources_view.selected = 0;
+        app.sources_view.scroll = 0;
+
+        let _ = app.update(CassMsg::SourcesSelectionMoved { delta: 1 });
+        assert_eq!(app.sources_view.selected, 1);
+        assert_eq!(app.sources_view.scroll, 0);
+
+        let _ = app.update(CassMsg::SourcesSelectionMoved { delta: 1 });
+        assert_eq!(app.sources_view.selected, 2);
+        assert_eq!(app.sources_view.scroll, 1);
+
+        let _ = app.update(CassMsg::SourcesSelectionMoved { delta: 1 });
+        assert_eq!(app.sources_view.selected, 3);
+        assert_eq!(app.sources_view.scroll, 2);
+
+        let _ = app.update(CassMsg::SourcesSelectionMoved { delta: -1 });
+        assert_eq!(app.sources_view.selected, 2);
+        assert_eq!(app.sources_view.scroll, 2);
+
+        let _ = app.update(CassMsg::SourcesSelectionMoved { delta: -1 });
+        assert_eq!(app.sources_view.selected, 1);
+        assert_eq!(app.sources_view.scroll, 1);
+
+        app.sources_view.selected = 4;
+        app.sources_view.scroll = 3;
+        let _ = app.update(CassMsg::SourcesSelectionMoved { delta: 1 });
+        assert_eq!(app.sources_view.selected, 0);
+        assert_eq!(app.sources_view.scroll, 0);
+    }
+
+    #[test]
+    fn sources_selection_visibility_recomputed_without_navigation() {
+        let mut app = CassApp::default();
+        app.last_sources_visible_rows.set(2);
+        app.sources_view.items = (0..5)
+            .map(|idx| SourcesViewItem {
+                name: format!("host-{idx}"),
+                kind: crate::sources::SourceKind::Ssh,
+                host: Some(format!("user@host-{idx}")),
+                schedule: "manual".into(),
+                path_count: 1,
+                last_sync: None,
+                last_result: "never".into(),
+                files_synced: 0,
+                bytes_transferred: 0,
+                busy: false,
+                doctor_summary: None,
+                error: None,
+            })
+            .collect();
+        app.sources_view.selected = 4;
+        app.sources_view.scroll = 0;
+
+        app.ensure_sources_selection_visible();
+        assert_eq!(app.sources_view.scroll, 3);
+
+        app.last_sources_visible_rows.set(0);
+        app.sources_view.scroll = 99;
+        app.ensure_sources_selection_visible();
+        assert_eq!(app.sources_view.scroll, 4);
     }
 
     #[test]
