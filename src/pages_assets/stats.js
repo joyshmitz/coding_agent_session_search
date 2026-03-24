@@ -382,6 +382,9 @@ function renderDashboard(data) {
     if (!container) return;
 
     const { statistics, timeline, agentSummary, workspaceSummary, topTerms } = data;
+    const availableTimelineViews = getAvailableTimelineViews(timeline);
+    const selectedTimelineView = getSelectedTimelineView(timeline);
+    currentTimelineView = selectedTimelineView;
 
     container.innerHTML = `
         <div class="panel stats-panel">
@@ -421,19 +424,19 @@ function renderDashboard(data) {
                 ` : ''}
 
                 <!-- Timeline Sparkline -->
-                ${timeline?.monthly?.length > 0 ? `
+                ${availableTimelineViews.length > 0 ? `
                     <section class="stats-section stats-timeline" aria-labelledby="timeline-heading">
                         <h3 id="timeline-heading">Activity Timeline</h3>
-                        <div class="timeline-controls" role="tablist" aria-label="Timeline view">
-                            <button type="button" role="tab" class="timeline-tab ${currentTimelineView === 'daily' ? 'active' : ''}"
-                                    data-view="daily" aria-selected="${currentTimelineView === 'daily'}">Daily</button>
-                            <button type="button" role="tab" class="timeline-tab ${currentTimelineView === 'weekly' ? 'active' : ''}"
-                                    data-view="weekly" aria-selected="${currentTimelineView === 'weekly'}">Weekly</button>
-                            <button type="button" role="tab" class="timeline-tab ${currentTimelineView === 'monthly' ? 'active' : ''}"
-                                    data-view="monthly" aria-selected="${currentTimelineView === 'monthly'}">Monthly</button>
-                        </div>
+                        ${availableTimelineViews.length > 1 ? `
+                            <div class="timeline-controls" role="tablist" aria-label="Timeline view">
+                                ${availableTimelineViews.map((view) => `
+                                    <button type="button" role="tab" class="timeline-tab ${selectedTimelineView === view ? 'active' : ''}"
+                                            data-view="${view}" aria-selected="${selectedTimelineView === view}">${formatTimelineViewLabel(view)}</button>
+                                `).join('')}
+                            </div>
+                        ` : ''}
                         <div id="timeline-chart" class="timeline-chart" role="img" aria-label="Activity timeline chart">
-                            ${renderTimelineChart(timeline)}
+                            ${renderTimelineChart(timeline, selectedTimelineView)}
                         </div>
                     </section>
                 ` : ''}
@@ -570,12 +573,45 @@ function renderTimeSpan(timeRange) {
 }
 
 /**
+ * Get timeline entries for a specific view
+ * @param {Object} timeline - Timeline data
+ * @param {string} view - Timeline view key
+ * @returns {Array} Timeline entries
+ */
+function getTimelineEntries(timeline, view) {
+    if (!timeline || !Array.isArray(timeline[view])) {
+        return [];
+    }
+    return timeline[view];
+}
+
+function getAvailableTimelineViews(timeline) {
+    return ['daily', 'weekly', 'monthly'].filter((view) => getTimelineEntries(timeline, view).length > 0);
+}
+
+function getSelectedTimelineView(timeline) {
+    const availableViews = getAvailableTimelineViews(timeline);
+    if (availableViews.includes(currentTimelineView)) {
+        return currentTimelineView;
+    }
+    return availableViews[0] || 'monthly';
+}
+
+function formatTimelineViewLabel(view) {
+    if (typeof view !== 'string' || view.length === 0) {
+        return 'Timeline';
+    }
+    return view.charAt(0).toUpperCase() + view.slice(1);
+}
+
+/**
  * Render timeline chart (SVG sparkline)
  * @param {Object} timeline - Timeline data
+ * @param {string} view - Timeline view
  * @returns {string} SVG HTML string
  */
-function renderTimelineChart(timeline) {
-    const data = timeline[currentTimelineView] || timeline.monthly || [];
+function renderTimelineChart(timeline, view = currentTimelineView) {
+    const data = getTimelineEntries(timeline, view);
     if (data.length === 0) {
         return '<p class="no-data">No timeline data available</p>';
     }
@@ -728,10 +764,11 @@ function applyDynamicStatsStyles() {
  */
 function setupTimelineControls(timeline) {
     const tabs = container.querySelectorAll('.timeline-tab');
+    const availableViews = new Set(getAvailableTimelineViews(timeline));
     tabs.forEach(tab => {
         tab.addEventListener('click', () => {
             const view = tab.dataset.view;
-            if (view && timeline[view]) {
+            if (view && availableViews.has(view)) {
                 currentTimelineView = view;
 
                 // Update tab states
@@ -741,9 +778,9 @@ function setupTimelineControls(timeline) {
                 });
 
                 // Re-render chart
-                const chartContainer = document.getElementById('timeline-chart');
+                const chartContainer = container?.querySelector('#timeline-chart');
                 if (chartContainer) {
-                    chartContainer.innerHTML = renderTimelineChart(timeline);
+                    chartContainer.innerHTML = renderTimelineChart(timeline, view);
                 }
             }
         });

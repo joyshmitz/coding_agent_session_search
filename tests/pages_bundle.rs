@@ -838,6 +838,27 @@ mod tests {
     }
 
     #[test]
+    fn test_stats_timeline_tabs_only_expose_available_data_views() {
+        let stats_js = include_str!("../src/pages_assets/stats.js");
+        assert!(
+            stats_js
+                .contains("const availableTimelineViews = getAvailableTimelineViews(timeline);")
+                && stats_js
+                    .contains("const selectedTimelineView = getSelectedTimelineView(timeline);")
+                && stats_js.contains("availableTimelineViews.length > 1")
+                && stats_js.contains("const data = getTimelineEntries(timeline, view);")
+                && stats_js.contains(
+                    "const availableViews = new Set(getAvailableTimelineViews(timeline));"
+                ),
+            "stats timeline rendering should derive the selected view from the views that actually have data instead of assuming daily and weekly are always available"
+        );
+        assert!(
+            !stats_js.contains("timeline[currentTimelineView] || timeline.monthly || []"),
+            "stats timeline rendering should not silently fall back to monthly data after the user selects an empty daily or weekly view"
+        );
+    }
+
+    #[test]
     fn test_worker_message_paths_guard_malformed_payloads_and_report_generic_failures() {
         let auth_js = include_str!("../src/pages_assets/auth.js");
         assert!(
