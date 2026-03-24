@@ -346,23 +346,24 @@ export function buildConversationPath(conversationId, messageId = null) {
  */
 export function buildSearchPath(query = '', filters = {}) {
     const params = new URLSearchParams();
+    const hasExplicitFilterValue = (value) => value !== undefined && value !== null && value !== '';
 
     if (query) {
         params.set('q', query);
     }
 
-    if (filters.agent) {
+    if (hasExplicitFilterValue(filters.agent)) {
         params.set('agent', filters.agent);
     }
 
-    if (filters.timePreset && filters.timePreset !== 'custom') {
+    if (hasExplicitFilterValue(filters.timePreset) && filters.timePreset !== 'custom') {
         params.set('time', filters.timePreset);
     } else {
-        if (filters.since) {
+        if (hasExplicitFilterValue(filters.since)) {
             params.set('since', filters.since);
         }
 
-        if (filters.until) {
+        if (hasExplicitFilterValue(filters.until)) {
             params.set('until', filters.until);
         }
     }

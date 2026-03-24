@@ -690,6 +690,31 @@ mod tests {
     }
 
     #[test]
+    fn test_search_paths_preserve_explicit_zero_timestamp_filters() -> Result<()> {
+        run_node_module_assertions(
+            r#"
+                import { buildSearchPath } from './src/pages_assets/router.js';
+
+                const path = buildSearchPath('', {
+                    since: 0,
+                    until: 123456789,
+                });
+                const url = new URL(`https://example.com#${path}`);
+                const params = new URLSearchParams(url.hash.split('?')[1] || '');
+
+                if (params.get('since') !== '0') {
+                    throw new Error(`expected since=0 to survive route building, got ${params.toString()}`);
+                }
+                if (params.get('until') !== '123456789') {
+                    throw new Error(`expected until to survive route building, got ${params.toString()}`);
+                }
+            "#,
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
     fn test_search_cleanup_paths_reset_virtual_results_presentation() {
         let search_js = include_str!("../src/pages_assets/search.js");
         assert!(
