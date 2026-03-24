@@ -14,6 +14,8 @@ use crate::connectors::NormalizedMessage;
 use crate::sources::provenance::LOCAL_SOURCE_ID;
 
 pub const SCHEMA_HASH: &str = CASS_SCHEMA_HASH;
+const TANTIVY_ADD_BATCH_MAX_MESSAGES: usize = 512;
+const TANTIVY_ADD_BATCH_MAX_CHARS: usize = 1 * 1024 * 1024;
 
 fn map_fs_err(err: frankensearch::SearchError) -> Error {
     Error::new(err)
@@ -109,7 +111,8 @@ impl TantivyIndex {
         let title = conv.title.clone();
         let started_at_fallback = conv.started_at;
 
-        let mut docs: Vec<FsCassDocument> = Vec::with_capacity(messages.len());
+        let mut docs: Vec<FsCassDocument> = Vec::new();
+        let mut pending_chars = 0usize;
         for msg in messages {
             docs.push(FsCassDocument {
                 agent: conv.agent_slug.clone(),
@@ -124,9 +127,22 @@ impl TantivyIndex {
                 origin_kind: origin_kind.to_string(),
                 origin_host: origin_host.clone(),
             });
+            pending_chars = pending_chars.saturating_add(msg.content.len());
+
+            if docs.len() >= TANTIVY_ADD_BATCH_MAX_MESSAGES
+                || pending_chars >= TANTIVY_ADD_BATCH_MAX_CHARS
+            {
+                self.inner.add_cass_documents(&docs).map_err(map_fs_err)?;
+                docs.clear();
+                pending_chars = 0;
+            }
         }
 
-        self.inner.add_cass_documents(&docs).map_err(map_fs_err)
+        if docs.is_empty() {
+            Ok(())
+        } else {
+            self.inner.add_cass_documents(&docs).map_err(map_fs_err)
+        }
     }
 }
 
@@ -149,6 +165,9 @@ pub fn ensure_tokenizer(index: &mut Index) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connectors::{NormalizedConversation, NormalizedMessage};
+    use serde_json::Value;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     #[test]
@@ -212,5 +231,43 @@ mod tests {
         let mut idx = Index::create_in_ram(build_schema());
         ensure_tokenizer(&mut idx);
         let _ = TantivyIndex::open_or_create(dir.path()).expect("open or create");
+    }
+
+    #[test]
+    fn add_messages_batches_large_payloads_without_dropping_docs() {
+        let dir = TempDir::new().expect("temp dir");
+        let mut idx = TantivyIndex::open_or_create(dir.path()).expect("create index");
+        let content = "x".repeat(4096);
+        let messages: Vec<_> = (0..1_200)
+            .map(|i| NormalizedMessage {
+                idx: i,
+                role: "assistant".to_string(),
+                author: None,
+                created_at: Some(1_700_000_000_000 + i),
+                content: format!("{i}-{content}"),
+                extra: Value::Null,
+                snippets: Vec::new(),
+            })
+            .collect();
+        let conv = NormalizedConversation {
+            agent_slug: "codex".to_string(),
+            external_id: Some("large-batch".to_string()),
+            title: Some("Large Batch".to_string()),
+            workspace: Some(PathBuf::from("/tmp/workspace")),
+            source_path: PathBuf::from("/tmp/rollout.jsonl"),
+            started_at: Some(1_700_000_000_000),
+            ended_at: Some(1_700_000_000_999),
+            metadata: Value::Null,
+            messages,
+        };
+
+        idx.add_messages(&conv, &conv.messages)
+            .expect("add messages");
+        idx.commit().expect("commit");
+
+        let reader = idx.reader().expect("reader");
+        reader.reload().expect("reload");
+        let searcher = reader.searcher();
+        assert_eq!(searcher.num_docs(), conv.messages.len() as u64);
     }
 }

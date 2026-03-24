@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -395,6 +395,8 @@ pub enum IndexMessage {
         is_discovered: bool,
         /// Message count in this batch (for stats)
         message_count: usize,
+        /// Reserved text-byte budget for this batch that must be released after ingestion.
+        byte_reservation: usize,
     },
     /// A scan error occurred (non-fatal, logged but continues)
     ScanError {
@@ -428,6 +430,79 @@ const DEFAULT_STREAMING_BATCH_LIMITS: StreamingBatchLimits = StreamingBatchLimit
     max_messages: 2_000,
     max_chars: 4 * 1024 * 1024,
 };
+
+/// Maximum total text bytes allowed across queued/in-flight streaming batches.
+///
+/// This preserves the intended memory envelope for normal batches while also
+/// preventing oversized single conversations from multiplying across the queue.
+const STREAMING_MAX_BYTES_IN_FLIGHT: usize =
+    STREAMING_CHANNEL_SIZE * DEFAULT_STREAMING_BATCH_LIMITS.max_chars;
+
+#[derive(Debug)]
+struct StreamingByteLimiterState {
+    bytes_in_flight: usize,
+    closed: bool,
+}
+
+#[derive(Debug)]
+struct StreamingByteLimiter {
+    max_bytes_in_flight: usize,
+    state: Mutex<StreamingByteLimiterState>,
+    cv: Condvar,
+}
+
+impl StreamingByteLimiter {
+    fn new(max_bytes_in_flight: usize) -> Self {
+        debug_assert!(max_bytes_in_flight > 0);
+        Self {
+            max_bytes_in_flight,
+            state: Mutex::new(StreamingByteLimiterState {
+                bytes_in_flight: 0,
+                closed: false,
+            }),
+            cv: Condvar::new(),
+        }
+    }
+
+    fn acquire(&self, requested_bytes: usize) -> Result<usize> {
+        if requested_bytes == 0 {
+            return Ok(0);
+        }
+
+        let reservation = requested_bytes.min(self.max_bytes_in_flight);
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if state.closed {
+                return Err(anyhow::anyhow!(
+                    "streaming byte limiter closed while waiting for capacity"
+                ));
+            }
+
+            if state.bytes_in_flight.saturating_add(reservation) <= self.max_bytes_in_flight {
+                state.bytes_in_flight += reservation;
+                return Ok(reservation);
+            }
+
+            state = self.cv.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    fn release(&self, reserved_bytes: usize) {
+        if reserved_bytes == 0 {
+            return;
+        }
+
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.bytes_in_flight = state.bytes_in_flight.saturating_sub(reserved_bytes);
+        self.cv.notify_all();
+    }
+
+    fn close(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.closed = true;
+        self.cv.notify_all();
+    }
+}
 
 fn conversation_batch_footprint(conv: &NormalizedConversation) -> (usize, usize) {
     let message_count = conv.messages.len();
@@ -468,6 +543,7 @@ fn next_streaming_batch(
 
 struct StreamingBatchSender<'a> {
     tx: &'a Sender<IndexMessage>,
+    flow_limiter: Arc<StreamingByteLimiter>,
     connector_name: &'static str,
     next_batch_is_discovered: bool,
     conversations: Vec<NormalizedConversation>,
@@ -484,11 +560,13 @@ fn remember_discovered_connector(discovered_names: &mut Vec<String>, connector_n
 impl<'a> StreamingBatchSender<'a> {
     fn new(
         tx: &'a Sender<IndexMessage>,
+        flow_limiter: Arc<StreamingByteLimiter>,
         connector_name: &'static str,
         is_discovered: bool,
     ) -> Self {
         Self {
             tx,
+            flow_limiter,
             connector_name,
             next_batch_is_discovered: is_discovered,
             conversations: Vec::new(),
@@ -532,20 +610,25 @@ impl<'a> StreamingBatchSender<'a> {
             return Ok(());
         }
 
+        let byte_reservation = self.flow_limiter.acquire(self.char_count).map_err(|_| {
+            anyhow::Error::new(StreamingConsumerDisconnected {
+                connector_name: self.connector_name,
+            })
+        })?;
         let message_count = self.message_count;
         let conversations = std::mem::take(&mut self.conversations);
-        self.tx
-            .send(IndexMessage::Batch {
+        if let Err(_send_error) = self.tx.send(IndexMessage::Batch {
+            connector_name: self.connector_name,
+            conversations,
+            is_discovered: self.next_batch_is_discovered,
+            message_count,
+            byte_reservation,
+        }) {
+            self.flow_limiter.release(byte_reservation);
+            return Err(anyhow::Error::new(StreamingConsumerDisconnected {
                 connector_name: self.connector_name,
-                conversations,
-                is_discovered: self.next_batch_is_discovered,
-                message_count,
-            })
-            .map_err(|_| {
-                anyhow::Error::new(StreamingConsumerDisconnected {
-                    connector_name: self.connector_name,
-                })
-            })?;
+            }));
+        }
         self.message_count = 0;
         self.char_count = 0;
         self.next_batch_is_discovered = false;
@@ -560,7 +643,12 @@ fn send_conversation_batches(
     conversations: Vec<NormalizedConversation>,
     is_discovered: bool,
 ) {
-    let mut sender = StreamingBatchSender::new(tx, connector_name, is_discovered);
+    let mut sender = StreamingBatchSender::new(
+        tx,
+        Arc::new(StreamingByteLimiter::new(STREAMING_MAX_BYTES_IN_FLIGHT)),
+        connector_name,
+        is_discovered,
+    );
     for conversation in conversations {
         sender
             .push(conversation)
@@ -614,6 +702,15 @@ fn is_streaming_consumer_disconnected(error: &anyhow::Error) -> bool {
         .is_some()
 }
 
+#[derive(Clone)]
+struct StreamingProducerConfig {
+    flow_limiter: Arc<StreamingByteLimiter>,
+    data_dir: PathBuf,
+    remote_roots: Vec<ScanRoot>,
+    since_ts: Option<i64>,
+    progress: Option<Arc<IndexingProgress>>,
+}
+
 /// Spawn a producer thread that scans a connector and sends batches through the channel.
 ///
 /// Each connector runs in its own thread, scanning local and remote roots.
@@ -623,10 +720,7 @@ fn spawn_connector_producer(
     name: &'static str,
     factory: fn() -> Box<dyn Connector + Send>,
     tx: Sender<IndexMessage>,
-    data_dir: PathBuf,
-    remote_roots: Vec<ScanRoot>,
-    since_ts: Option<i64>,
-    progress: Option<Arc<IndexingProgress>>,
+    config: StreamingProducerConfig,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
         let scan_start = std::time::Instant::now();
@@ -637,15 +731,19 @@ fn spawn_connector_producer(
 
         if detect.detected {
             // Update discovered agents count immediately when detected
-            if let Some(p) = &progress {
+            if let Some(p) = &config.progress {
                 p.discovered_agents.fetch_add(1, Ordering::Relaxed);
             }
             is_discovered = true;
 
             // Scan local sources
-            let ctx = crate::connectors::ScanContext::local_default(data_dir.clone(), since_ts);
+            let ctx = crate::connectors::ScanContext::local_default(
+                config.data_dir.clone(),
+                config.since_ts,
+            );
             let local_origin = Origin::local();
-            let mut batch_sender = StreamingBatchSender::new(&tx, name, is_discovered);
+            let mut batch_sender =
+                StreamingBatchSender::new(&tx, config.flow_limiter.clone(), name, is_discovered);
             match conn.scan_with_callback(&ctx, &mut |mut conversation| {
                 inject_provenance(&mut conversation, &local_origin);
                 batch_sender.push(conversation)
@@ -689,19 +787,20 @@ fn spawn_connector_producer(
         }
 
         // Scan remote sources
-        for root in &remote_roots {
+        for root in &config.remote_roots {
             let ctx = crate::connectors::ScanContext::with_roots(
                 root.path.clone(),
                 vec![root.clone()],
-                since_ts,
+                config.since_ts,
             );
-            let mut batch_sender = StreamingBatchSender::new(&tx, name, is_discovered);
+            let mut batch_sender =
+                StreamingBatchSender::new(&tx, config.flow_limiter.clone(), name, is_discovered);
             match conn.scan_with_callback(&ctx, &mut |mut conversation| {
                 inject_provenance(&mut conversation, &root.origin);
                 apply_workspace_rewrite(&mut conversation, root);
 
                 if !was_detected && !is_discovered {
-                    if let Some(p) = &progress {
+                    if let Some(p) = &config.progress {
                         p.discovered_agents.fetch_add(1, Ordering::Relaxed);
                     }
                     is_discovered = true;
@@ -793,6 +892,7 @@ fn run_streaming_consumer(
     num_producers: usize,
     storage: &FrankenStorage,
     t_index: &mut TantivyIndex,
+    flow_limiter: Arc<StreamingByteLimiter>,
     progress: &Option<Arc<IndexingProgress>>,
     needs_rebuild: bool,
 ) -> Result<Vec<String>> {
@@ -816,6 +916,7 @@ fn run_streaming_consumer(
                 conversations,
                 is_discovered,
                 message_count,
+                byte_reservation,
             }) => {
                 let batch_size = conversations.len();
                 total_conversations += batch_size;
@@ -852,7 +953,10 @@ fn run_streaming_consumer(
                 }
 
                 // Ingest the batch
-                ingest_batch(storage, t_index, &conversations, progress, needs_rebuild)?;
+                let ingest_result =
+                    ingest_batch(storage, t_index, &conversations, progress, needs_rebuild);
+                flow_limiter.release(byte_reservation);
+                ingest_result?;
 
                 // Periodic commit to make results visible incrementally (every 5s)
                 if last_commit.elapsed() >= Duration::from_secs(5) {
@@ -1038,6 +1142,13 @@ fn run_streaming_index_with_connector_factories(
 
     // Create bounded channel for backpressure
     let (tx, rx) = bounded::<IndexMessage>(STREAMING_CHANNEL_SIZE);
+    let producer_config = StreamingProducerConfig {
+        flow_limiter: Arc::new(StreamingByteLimiter::new(STREAMING_MAX_BYTES_IN_FLIGHT)),
+        data_dir: opts.data_dir.clone(),
+        remote_roots: remote_roots.clone(),
+        since_ts,
+        progress: opts.progress.clone(),
+    };
 
     // Spawn producer threads for each connector
     let handles: Vec<(&'static str, JoinHandle<()>)> = connector_factories
@@ -1045,15 +1156,7 @@ fn run_streaming_index_with_connector_factories(
         .map(|(name, factory)| {
             (
                 name,
-                spawn_connector_producer(
-                    name,
-                    factory,
-                    tx.clone(),
-                    opts.data_dir.clone(),
-                    remote_roots.clone(),
-                    since_ts,
-                    opts.progress.clone(),
-                ),
+                spawn_connector_producer(name, factory, tx.clone(), producer_config.clone()),
             )
         })
         .collect();
@@ -1067,9 +1170,14 @@ fn run_streaming_index_with_connector_factories(
         num_connectors,
         storage,
         t_index,
+        producer_config.flow_limiter.clone(),
         &opts.progress,
         needs_rebuild,
     );
+
+    if consumer_result.is_err() {
+        producer_config.flow_limiter.close();
+    }
 
     let mut join_errors = Vec::new();
     for (name, handle) in handles {
@@ -2842,7 +2950,7 @@ pub fn apply_workspace_rewrite(conv: &mut NormalizedConversation, root: &ScanRoo
 }
 
 pub mod persist {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::time::Duration;
 
     use anyhow::{Context, Result, anyhow};
@@ -2938,6 +3046,20 @@ pub mod persist {
             }
         }
         Err(anyhow!("exhausted begin-concurrent retries"))
+    }
+
+    fn duplicate_conversation_keys_present(convs: &[NormalizedConversation]) -> bool {
+        let mut seen = HashSet::with_capacity(convs.len());
+        for conv in convs {
+            let Some(external_id) = conv.external_id.as_deref() else {
+                continue;
+            };
+            let (source_id, _) = extract_provenance(&conv.metadata);
+            if !seen.insert((conv.agent_slug.clone(), source_id, external_id.to_owned())) {
+                return true;
+            }
+        }
+        false
     }
 
     fn persist_conversations_batched_begin_concurrent(
@@ -3176,7 +3298,11 @@ pub mod persist {
             return Ok(());
         }
 
-        if begin_concurrent_writes_enabled() {
+        let begin_concurrent_enabled = begin_concurrent_writes_enabled();
+        let duplicate_keys_present =
+            begin_concurrent_enabled && duplicate_conversation_keys_present(convs);
+
+        if begin_concurrent_enabled && !duplicate_keys_present {
             let db_path = storage
                 .database_path()
                 .with_context(|| "resolving database path for begin-concurrent write mode")?;
@@ -3189,6 +3315,13 @@ pub mod persist {
                 t_index,
                 convs,
                 force_tantivy_reindex,
+            );
+        }
+
+        if duplicate_keys_present {
+            tracing::info!(
+                conversations = convs.len(),
+                "duplicate conversation keys detected; falling back to serial batched indexing path"
             );
         }
 
@@ -3279,6 +3412,7 @@ pub mod persist {
     #[cfg(test)]
     mod persist_internal_tests {
         use super::*;
+        use serial_test::serial;
 
         struct EnvGuard {
             key: &'static str,
@@ -3486,6 +3620,119 @@ pub mod persist {
                 .query_row_map("SELECT COUNT(*) FROM messages", &[], |row| row.get_typed(0))
                 .unwrap();
             assert_eq!(msg_count, 1);
+        }
+
+        #[test]
+        #[serial]
+        fn persist_conversations_batched_falls_back_for_duplicate_keys() {
+            use crate::connectors::{NormalizedConversation, NormalizedMessage};
+            use crate::search::tantivy::TantivyIndex;
+            use crate::sources::provenance::{Source, SourceKind};
+            use frankensqlite::compat::{ConnectionExt, RowExt};
+
+            let _begin_guard = set_env("CASS_INDEXER_BEGIN_CONCURRENT", "1");
+            let _chunk_guard = set_env("CASS_INDEXER_BEGIN_CONCURRENT_CHUNK_SIZE", "1");
+
+            let dir = tempfile::TempDir::new().unwrap();
+            let db_path = dir.path().join("test.db");
+            let index_path = dir.path().join("tantivy");
+
+            let storage = create_franken_db(&db_path);
+            let mut t_index = TantivyIndex::open_or_create(&index_path).unwrap();
+            storage
+                .upsert_source(&Source {
+                    id: "remote-source".into(),
+                    kind: SourceKind::Ssh,
+                    host_label: Some("example-host".into()),
+                    machine_id: None,
+                    platform: None,
+                    config_json: None,
+                    created_at: None,
+                    updated_at: None,
+                })
+                .unwrap();
+            let metadata = serde_json::json!({
+                "cass": {
+                    "origin": {
+                        "source_id": "remote-source",
+                        "host": "example-host"
+                    }
+                }
+            });
+
+            let convs = vec![
+                NormalizedConversation {
+                    agent_slug: "shared-agent".into(),
+                    external_id: Some("dup-session".into()),
+                    title: Some("Shared Session".into()),
+                    workspace: Some(std::path::PathBuf::from("/ws/shared")),
+                    source_path: std::path::PathBuf::from("/log/first.jsonl"),
+                    started_at: Some(1_000),
+                    ended_at: Some(1_010),
+                    metadata: metadata.clone(),
+                    messages: vec![NormalizedMessage {
+                        idx: 2,
+                        role: "user".into(),
+                        author: Some("tester".into()),
+                        created_at: Some(1_002),
+                        content: "third".into(),
+                        extra: serde_json::json!({}),
+                        snippets: vec![],
+                    }],
+                },
+                NormalizedConversation {
+                    agent_slug: "shared-agent".into(),
+                    external_id: Some("dup-session".into()),
+                    title: Some("Shared Session".into()),
+                    workspace: Some(std::path::PathBuf::from("/ws/shared")),
+                    source_path: std::path::PathBuf::from("/log/second.jsonl"),
+                    started_at: Some(1_000),
+                    ended_at: Some(1_020),
+                    metadata,
+                    messages: vec![
+                        NormalizedMessage {
+                            idx: 0,
+                            role: "user".into(),
+                            author: Some("tester".into()),
+                            created_at: Some(1_000),
+                            content: "first".into(),
+                            extra: serde_json::json!({}),
+                            snippets: vec![],
+                        },
+                        NormalizedMessage {
+                            idx: 1,
+                            role: "assistant".into(),
+                            author: Some("tester".into()),
+                            created_at: Some(1_001),
+                            content: "second".into(),
+                            extra: serde_json::json!({}),
+                            snippets: vec![],
+                        },
+                    ],
+                },
+            ];
+
+            persist_conversations_batched(&storage, &mut t_index, &convs, false)
+                .expect("duplicate-key batch should fall back to serial path");
+
+            let reader = FrankenStorage::open(&db_path).unwrap();
+            let conversation_count: i64 = reader
+                .raw()
+                .query_row_map("SELECT COUNT(*) FROM conversations", &[], |row| {
+                    row.get_typed(0)
+                })
+                .unwrap();
+            assert_eq!(conversation_count, 1);
+
+            let stored_indices: Vec<i64> = reader
+                .raw()
+                .query_map_collect("SELECT idx FROM messages ORDER BY idx", &[], |row| {
+                    row.get_typed(0)
+                })
+                .unwrap();
+            assert_eq!(stored_indices, vec![0, 1, 2]);
+
+            t_index.commit().unwrap();
         }
 
         #[test]
@@ -3781,7 +4028,12 @@ mod tests {
     #[test]
     fn streaming_batch_sender_flushes_single_oversized_conversation_immediately() {
         let (tx, rx) = bounded(2);
-        let mut sender = StreamingBatchSender::new(&tx, "gemini", false);
+        let mut sender = StreamingBatchSender::new(
+            &tx,
+            Arc::new(StreamingByteLimiter::new(STREAMING_MAX_BYTES_IN_FLIGHT)),
+            "gemini",
+            false,
+        );
         let oversized = NormalizedMessage {
             content: "x".repeat(DEFAULT_STREAMING_BATCH_LIMITS.max_chars + 1),
             ..norm_msg(0, 1_000)
@@ -3800,12 +4052,17 @@ mod tests {
                 connector_name,
                 conversations,
                 message_count,
+                byte_reservation,
                 ..
             } => {
                 assert_eq!(connector_name, "gemini");
                 assert_eq!(conversations.len(), 1);
                 assert_eq!(conversations[0].external_id.as_deref(), Some("huge"));
                 assert_eq!(message_count, 1);
+                assert_eq!(
+                    byte_reservation,
+                    DEFAULT_STREAMING_BATCH_LIMITS.max_chars + 1
+                );
             }
             other => panic!(
                 "expected batch for oversized conversation flush, got {:?}",
@@ -3819,6 +4076,64 @@ mod tests {
         );
         sender.flush().unwrap();
         assert!(rx.try_recv().is_err(), "explicit flush should be a no-op");
+    }
+
+    #[test]
+    fn streaming_byte_limiter_blocks_until_capacity_is_released() {
+        let limiter = Arc::new(StreamingByteLimiter::new(64));
+        let first = limiter.acquire(128).unwrap();
+        let (ready_tx, ready_rx) = bounded(1);
+        let (result_tx, result_rx) = bounded(1);
+        let waiter = {
+            let limiter = limiter.clone();
+            thread::spawn(move || {
+                ready_tx.send(()).unwrap();
+                let second = limiter.acquire(32).unwrap();
+                result_tx.send(second).unwrap();
+                limiter.release(second);
+            })
+        };
+
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(
+            result_rx.try_recv().is_err(),
+            "waiter should remain blocked while the limiter is full"
+        );
+
+        limiter.release(first);
+        assert_eq!(result_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 32);
+        waiter.join().unwrap();
+    }
+
+    #[test]
+    fn streaming_byte_limiter_close_wakes_waiters() {
+        let limiter = Arc::new(StreamingByteLimiter::new(64));
+        let first = limiter.acquire(64).unwrap();
+        let (ready_tx, ready_rx) = bounded(1);
+        let (result_tx, result_rx) = bounded(1);
+        let waiter = {
+            let limiter = limiter.clone();
+            thread::spawn(move || {
+                ready_tx.send(()).unwrap();
+                let result = limiter.acquire(1).map_err(|error| error.to_string());
+                result_tx.send(result).unwrap();
+            })
+        };
+
+        ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(
+            result_rx.try_recv().is_err(),
+            "waiter should remain blocked until the limiter is closed"
+        );
+
+        limiter.close();
+        let error = result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .expect_err("closing the limiter should wake blocked waiters with an error");
+        assert!(error.contains("closed"));
+        limiter.release(first);
+        waiter.join().unwrap();
     }
 
     #[test]
@@ -3847,6 +4162,7 @@ mod tests {
                 is_discovered,
                 message_count,
                 conversations,
+                ..
             } => {
                 assert_eq!(*connector_name, "claude");
                 assert!(*is_discovered);
@@ -3862,6 +4178,7 @@ mod tests {
                 is_discovered,
                 message_count,
                 conversations,
+                ..
             } => {
                 assert_eq!(*connector_name, "claude");
                 assert!(!*is_discovered);
@@ -3893,9 +4210,16 @@ mod tests {
         .unwrap();
         drop(tx);
 
-        let discovered =
-            run_streaming_consumer(rx, 1, &storage, &mut index, &Some(progress.clone()), false)
-                .unwrap();
+        let discovered = run_streaming_consumer(
+            rx,
+            1,
+            &storage,
+            &mut index,
+            Arc::new(StreamingByteLimiter::new(STREAMING_MAX_BYTES_IN_FLIGHT)),
+            &Some(progress.clone()),
+            false,
+        )
+        .unwrap();
 
         assert_eq!(discovered, vec!["claude".to_string()]);
         let stats = progress.stats.lock().unwrap_or_else(|e| e.into_inner());
@@ -3916,24 +4240,35 @@ mod tests {
         let mut index = TantivyIndex::open_or_create(&index_dir(&data_dir).unwrap()).unwrap();
         let progress = Arc::new(IndexingProgress::default());
         let (tx, rx) = bounded(STREAMING_CHANNEL_SIZE);
+        let flow_limiter = Arc::new(StreamingByteLimiter::new(STREAMING_MAX_BYTES_IN_FLIGHT));
         let remote_root_path = PathBuf::from("/remote/fixture/claude");
         let handle = spawn_connector_producer(
             "claude",
             detected_remote_failure_connector_factory,
             tx,
-            data_dir,
-            vec![ScanRoot::remote(
-                remote_root_path.clone(),
-                Origin::remote("fixture-host"),
-                Some(crate::sources::config::Platform::Linux),
-            )],
-            None,
-            Some(progress.clone()),
+            StreamingProducerConfig {
+                flow_limiter: flow_limiter.clone(),
+                data_dir,
+                remote_roots: vec![ScanRoot::remote(
+                    remote_root_path.clone(),
+                    Origin::remote("fixture-host"),
+                    Some(crate::sources::config::Platform::Linux),
+                )],
+                since_ts: None,
+                progress: Some(progress.clone()),
+            },
         );
 
-        let discovered =
-            run_streaming_consumer(rx, 1, &storage, &mut index, &Some(progress.clone()), false)
-                .unwrap();
+        let discovered = run_streaming_consumer(
+            rx,
+            1,
+            &storage,
+            &mut index,
+            flow_limiter,
+            &Some(progress.clone()),
+            false,
+        )
+        .unwrap();
         handle.join().unwrap();
 
         assert_eq!(discovered, vec!["claude".to_string()]);
@@ -4023,14 +4358,17 @@ mod tests {
             "claude",
             disconnect_aware_connector_factory,
             tx,
-            data_dir,
-            vec![ScanRoot::remote(
-                PathBuf::from("/remote/fixture/claude"),
-                Origin::remote("fixture-host"),
-                Some(crate::sources::config::Platform::Linux),
-            )],
-            None,
-            None,
+            StreamingProducerConfig {
+                flow_limiter: Arc::new(StreamingByteLimiter::new(STREAMING_MAX_BYTES_IN_FLIGHT)),
+                data_dir,
+                remote_roots: vec![ScanRoot::remote(
+                    PathBuf::from("/remote/fixture/claude"),
+                    Origin::remote("fixture-host"),
+                    Some(crate::sources::config::Platform::Linux),
+                )],
+                since_ts: None,
+                progress: None,
+            },
         );
 
         handle

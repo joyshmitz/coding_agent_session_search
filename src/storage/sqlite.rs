@@ -13,6 +13,7 @@ use frankensqlite::{
     },
     migrate::MigrationRunner,
 };
+use std::collections::{HashMap, HashSet};
 use std::fs;
 
 /// Frankensqlite parameter list builder.
@@ -2503,16 +2504,103 @@ impl FrankenStorage {
 
         let mut tx = self.conn.transaction()?;
 
-        let conv_id = franken_insert_conversation(&tx, agent_id, workspace_id, conv)?;
-        let mut fts_entries = Vec::with_capacity(conv.messages.len());
+        let conv_id = match franken_insert_conversation_or_get_existing(
+            &tx,
+            agent_id,
+            workspace_id,
+            conv,
+        )? {
+            ConversationInsertStatus::Inserted(conv_id) => conv_id,
+            ConversationInsertStatus::Existing(existing_id) => {
+                let mut existing_indices = franken_existing_message_indices(&tx, existing_id)?;
+                let mut inserted_indices = Vec::new();
+                let mut fts_entries = Vec::new();
+                let mut fts_pending_chars = 0usize;
+                let mut _fts_inserted_total = 0usize;
+                let mut new_chars: i64 = 0;
+
+                for msg in &conv.messages {
+                    if !existing_indices.insert(msg.idx) {
+                        continue;
+                    }
+                    let msg_id = franken_insert_message(&tx, existing_id, msg)?;
+                    franken_insert_snippets(&tx, msg_id, &msg.snippets)?;
+                    fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
+                    fts_pending_chars = fts_pending_chars.saturating_add(msg.content.len());
+                    if fts_entries.len() >= FTS_ENTRY_BATCH_MAX_DOCS
+                        || fts_pending_chars >= FTS_ENTRY_BATCH_MAX_CHARS
+                    {
+                        flush_pending_fts_entries(
+                            &tx,
+                            &mut fts_entries,
+                            &mut fts_pending_chars,
+                            &mut _fts_inserted_total,
+                        )?;
+                    }
+                    inserted_indices.push(msg.idx);
+                    new_chars += msg.content.len() as i64;
+                }
+
+                flush_pending_fts_entries(
+                    &tx,
+                    &mut fts_entries,
+                    &mut fts_pending_chars,
+                    &mut _fts_inserted_total,
+                )?;
+
+                if let Some(last_ts) = conv.messages.iter().filter_map(|m| m.created_at).max() {
+                    tx.execute_compat(
+                        "UPDATE conversations SET ended_at = MAX(IFNULL(ended_at, 0), ?1) WHERE id = ?2",
+                        fparams![last_ts, existing_id],
+                    )?;
+                }
+
+                if !inserted_indices.is_empty() {
+                    franken_update_daily_stats_in_tx(
+                        &tx,
+                        &conv.agent_slug,
+                        &conv.source_id,
+                        conv.started_at,
+                        0,
+                        inserted_indices.len() as i64,
+                        new_chars,
+                    )?;
+                }
+
+                tx.commit()?;
+                return Ok(InsertOutcome {
+                    conversation_id: existing_id,
+                    inserted_indices,
+                });
+            }
+        };
+        let mut fts_entries = Vec::new();
+        let mut fts_pending_chars = 0usize;
+        let mut _fts_inserted_total = 0usize;
         let mut total_chars: i64 = 0;
         for msg in &conv.messages {
             let msg_id = franken_insert_message(&tx, conv_id, msg)?;
             franken_insert_snippets(&tx, msg_id, &msg.snippets)?;
             fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
+            fts_pending_chars = fts_pending_chars.saturating_add(msg.content.len());
+            if fts_entries.len() >= FTS_ENTRY_BATCH_MAX_DOCS
+                || fts_pending_chars >= FTS_ENTRY_BATCH_MAX_CHARS
+            {
+                flush_pending_fts_entries(
+                    &tx,
+                    &mut fts_entries,
+                    &mut fts_pending_chars,
+                    &mut _fts_inserted_total,
+                )?;
+            }
             total_chars += msg.content.len() as i64;
         }
-        franken_batch_insert_fts(&tx, &fts_entries)?;
+        flush_pending_fts_entries(
+            &tx,
+            &mut fts_entries,
+            &mut fts_pending_chars,
+            &mut _fts_inserted_total,
+        )?;
 
         franken_update_daily_stats_in_tx(
             &tx,
@@ -2538,32 +2626,41 @@ impl FrankenStorage {
         conv: &Conversation,
     ) -> Result<InsertOutcome> {
         let mut tx = self.conn.transaction()?;
-
-        let rows = tx.query_params(
-            "SELECT MAX(idx) FROM messages WHERE conversation_id = ?1",
-            fparams![conversation_id],
-        )?;
-        let cutoff: i64 = rows
-            .first()
-            .and_then(|r| r.get_typed::<Option<i64>>(0).ok())
-            .flatten()
-            .unwrap_or(-1);
+        let mut existing_indices = franken_existing_message_indices(&tx, conversation_id)?;
 
         let mut inserted_indices = Vec::new();
         let mut fts_entries = Vec::new();
+        let mut fts_pending_chars = 0usize;
+        let mut _fts_inserted_total = 0usize;
         let mut new_chars: i64 = 0;
         for msg in &conv.messages {
-            if msg.idx <= cutoff {
+            if !existing_indices.insert(msg.idx) {
                 continue;
             }
             let msg_id = franken_insert_message(&tx, conversation_id, msg)?;
             franken_insert_snippets(&tx, msg_id, &msg.snippets)?;
             fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
+            fts_pending_chars = fts_pending_chars.saturating_add(msg.content.len());
+            if fts_entries.len() >= FTS_ENTRY_BATCH_MAX_DOCS
+                || fts_pending_chars >= FTS_ENTRY_BATCH_MAX_CHARS
+            {
+                flush_pending_fts_entries(
+                    &tx,
+                    &mut fts_entries,
+                    &mut fts_pending_chars,
+                    &mut _fts_inserted_total,
+                )?;
+            }
             inserted_indices.push(msg.idx);
             new_chars += msg.content.len() as i64;
         }
 
-        franken_batch_insert_fts(&tx, &fts_entries)?;
+        flush_pending_fts_entries(
+            &tx,
+            &mut fts_entries,
+            &mut fts_pending_chars,
+            &mut _fts_inserted_total,
+        )?;
 
         if let Some(last_ts) = conv.messages.iter().filter_map(|m| m.created_at).max() {
             tx.execute_compat(
@@ -2981,29 +3078,189 @@ impl FrankenStorage {
         let mut tx = self.conn.transaction()?;
         let mut outcomes = Vec::with_capacity(conversations.len());
         let mut fts_entries = Vec::new();
+        let mut fts_pending_chars = 0usize;
+        let mut fts_inserted_total = 0usize;
+        let mut fts_count_total = 0usize;
         let mut stats = StatsAggregator::new();
         let mut token_stats = TokenStatsAggregator::new();
         let mut token_entries: Vec<TokenUsageEntry> = Vec::new();
         let mut metrics_entries: Vec<MessageMetricsEntry> = Vec::new();
         let mut rollup_agg = AnalyticsRollupAggregator::new();
         let mut conv_ids_to_summarize: Vec<i64> = Vec::new();
+        let mut pending_conversation_ids: HashMap<(String, i64, String), i64> = HashMap::new();
+        let mut pending_message_indices: HashMap<i64, HashSet<i64>> = HashMap::new();
 
         for &(agent_id, workspace_id, conv) in conversations {
-            let conv_id = franken_insert_conversation(&tx, agent_id, workspace_id, conv)?;
             let mut total_chars: i64 = 0;
             let mut inserted_indices = Vec::with_capacity(conv.messages.len());
+            let mut inserted_messages: Vec<(i64, &Message)> =
+                Vec::with_capacity(conv.messages.len());
+            let mut session_count_delta = 1_i64;
+            let conversation_key = conv
+                .external_id
+                .as_ref()
+                .map(|ext| (conv.source_id.clone(), agent_id, ext.clone()));
 
-            for msg in &conv.messages {
-                let msg_id = franken_insert_message(&tx, conv_id, msg)?;
-                franken_insert_snippets(&tx, msg_id, &msg.snippets)?;
-                fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
-                total_chars += msg.content.len() as i64;
-                inserted_indices.push(msg.idx);
-            }
+            let existing_conv_id = if let Some(key) = &conversation_key {
+                if let Some(existing_id) = pending_conversation_ids.get(key) {
+                    Some(*existing_id)
+                } else {
+                    let existing_id = tx
+                        .query_row_map(
+                            "SELECT id FROM conversations WHERE source_id = ?1 AND agent_id = ?2 AND external_id = ?3",
+                            fparams![key.0.as_str(), key.1, key.2.as_str()],
+                            |row| row.get_typed(0),
+                        )
+                        .optional()?;
+                    if let Some(existing_id) = existing_id {
+                        pending_conversation_ids.insert(key.clone(), existing_id);
+                    }
+                    existing_id
+                }
+            } else {
+                None
+            };
+
+            let conv_id = if let Some(existing_id) = existing_conv_id {
+                session_count_delta = 0;
+                let mut existing_indices =
+                    if let Some(indices) = pending_message_indices.get(&existing_id) {
+                        indices.clone()
+                    } else {
+                        let indices = franken_existing_message_indices(&tx, existing_id)?;
+                        pending_message_indices.insert(existing_id, indices.clone());
+                        indices
+                    };
+
+                for msg in &conv.messages {
+                    if !existing_indices.insert(msg.idx) {
+                        continue;
+                    }
+                    let msg_id = franken_insert_message(&tx, existing_id, msg)?;
+                    franken_insert_snippets(&tx, msg_id, &msg.snippets)?;
+                    fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
+                    fts_count_total += 1;
+                    fts_pending_chars = fts_pending_chars.saturating_add(msg.content.len());
+                    if fts_entries.len() >= FTS_ENTRY_BATCH_MAX_DOCS
+                        || fts_pending_chars >= FTS_ENTRY_BATCH_MAX_CHARS
+                    {
+                        flush_pending_fts_entries(
+                            &tx,
+                            &mut fts_entries,
+                            &mut fts_pending_chars,
+                            &mut fts_inserted_total,
+                        )?;
+                    }
+                    total_chars += msg.content.len() as i64;
+                    inserted_indices.push(msg.idx);
+                    inserted_messages.push((msg_id, msg));
+                }
+
+                if let Some(last_ts) = conv.messages.iter().filter_map(|m| m.created_at).max() {
+                    tx.execute_compat(
+                        "UPDATE conversations SET ended_at = MAX(IFNULL(ended_at, 0), ?1) WHERE id = ?2",
+                        fparams![last_ts, existing_id],
+                    )?;
+                }
+
+                pending_message_indices.insert(existing_id, existing_indices);
+
+                existing_id
+            } else {
+                match franken_insert_conversation_or_get_existing(
+                    &tx,
+                    agent_id,
+                    workspace_id,
+                    conv,
+                )? {
+                    ConversationInsertStatus::Inserted(new_conv_id) => {
+                        if let Some(key) = conversation_key {
+                            pending_conversation_ids.insert(key, new_conv_id);
+                        }
+                        let pending_indices =
+                            pending_message_indices.entry(new_conv_id).or_default();
+                        for msg in &conv.messages {
+                            if !pending_indices.insert(msg.idx) {
+                                continue;
+                            }
+                            let msg_id = franken_insert_message(&tx, new_conv_id, msg)?;
+                            franken_insert_snippets(&tx, msg_id, &msg.snippets)?;
+                            fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
+                            fts_count_total += 1;
+                            fts_pending_chars = fts_pending_chars.saturating_add(msg.content.len());
+                            if fts_entries.len() >= FTS_ENTRY_BATCH_MAX_DOCS
+                                || fts_pending_chars >= FTS_ENTRY_BATCH_MAX_CHARS
+                            {
+                                flush_pending_fts_entries(
+                                    &tx,
+                                    &mut fts_entries,
+                                    &mut fts_pending_chars,
+                                    &mut fts_inserted_total,
+                                )?;
+                            }
+                            total_chars += msg.content.len() as i64;
+                            inserted_indices.push(msg.idx);
+                            inserted_messages.push((msg_id, msg));
+                        }
+                        new_conv_id
+                    }
+                    ConversationInsertStatus::Existing(existing_id) => {
+                        session_count_delta = 0;
+                        if let Some(key) = conversation_key {
+                            pending_conversation_ids.insert(key, existing_id);
+                        }
+                        let mut existing_indices =
+                            if let Some(indices) = pending_message_indices.get(&existing_id) {
+                                indices.clone()
+                            } else {
+                                let indices = franken_existing_message_indices(&tx, existing_id)?;
+                                pending_message_indices.insert(existing_id, indices.clone());
+                                indices
+                            };
+
+                        for msg in &conv.messages {
+                            if !existing_indices.insert(msg.idx) {
+                                continue;
+                            }
+                            let msg_id = franken_insert_message(&tx, existing_id, msg)?;
+                            franken_insert_snippets(&tx, msg_id, &msg.snippets)?;
+                            fts_entries.push(FtsEntry::from_message(msg_id, msg, conv));
+                            fts_count_total += 1;
+                            fts_pending_chars = fts_pending_chars.saturating_add(msg.content.len());
+                            if fts_entries.len() >= FTS_ENTRY_BATCH_MAX_DOCS
+                                || fts_pending_chars >= FTS_ENTRY_BATCH_MAX_CHARS
+                            {
+                                flush_pending_fts_entries(
+                                    &tx,
+                                    &mut fts_entries,
+                                    &mut fts_pending_chars,
+                                    &mut fts_inserted_total,
+                                )?;
+                            }
+                            total_chars += msg.content.len() as i64;
+                            inserted_indices.push(msg.idx);
+                            inserted_messages.push((msg_id, msg));
+                        }
+
+                        if let Some(last_ts) =
+                            conv.messages.iter().filter_map(|m| m.created_at).max()
+                        {
+                            tx.execute_compat(
+                                "UPDATE conversations SET ended_at = MAX(IFNULL(ended_at, 0), ?1) WHERE id = ?2",
+                                fparams![last_ts, existing_id],
+                            )?;
+                        }
+
+                        pending_message_indices.insert(existing_id, existing_indices);
+
+                        existing_id
+                    }
+                }
+            };
 
             let delta = StatsDelta {
-                session_count_delta: 1,
-                message_count_delta: conv.messages.len() as i64,
+                session_count_delta,
+                message_count_delta: inserted_messages.len() as i64,
                 total_chars_delta: total_chars,
             };
 
@@ -3025,7 +3282,7 @@ impl FrankenStorage {
             let mut session_model_family = String::from("unknown");
             let mut has_any_tokens = false;
 
-            for msg in &conv.messages {
+            for &(message_id, msg) in &inserted_messages {
                 let role_s = role_str(&msg.role);
                 let usage = crate::connectors::extract_tokens_for_agent(
                     &conv.agent_slug,
@@ -3033,17 +3290,6 @@ impl FrankenStorage {
                     &msg.content,
                     &role_s,
                 );
-
-                // Look up message_id from DB
-                let msg_rows = tx.query_with_params(
-                    "SELECT id FROM messages WHERE conversation_id = ?1 AND idx = ?2",
-                    &param_slice_to_values(fparams![conv_id, msg.idx]),
-                )?;
-                let msg_id: Option<i64> = msg_rows.first().and_then(|r| r.get_typed::<i64>(0).ok());
-
-                let Some(message_id) = msg_id else {
-                    continue;
-                };
 
                 let msg_ts = msg.created_at.or(conv.started_at).unwrap_or(0);
                 let msg_day_id = if msg_ts > 0 {
@@ -3166,7 +3412,7 @@ impl FrankenStorage {
                 metrics_entries.push(mm);
             }
 
-            if delta.session_count_delta > 0 {
+            if session_count_delta > 0 {
                 token_stats.record_session(
                     &conv.agent_slug,
                     &conv.source_id,
@@ -3186,13 +3432,17 @@ impl FrankenStorage {
         }
 
         // Batch insert all FTS entries at once
-        let fts_count = fts_entries.len();
-        if fts_count > 0 {
-            let inserted = franken_batch_insert_fts(&tx, &fts_entries)?;
+        flush_pending_fts_entries(
+            &tx,
+            &mut fts_entries,
+            &mut fts_pending_chars,
+            &mut fts_inserted_total,
+        )?;
+        if fts_count_total > 0 {
             tracing::debug!(
                 target: "cass::perf::fts5",
-                total = fts_count,
-                inserted = inserted,
+                total = fts_count_total,
+                inserted = fts_inserted_total,
                 conversations = conversations.len(),
                 "franken_batch_fts_insert_complete"
             );
@@ -3290,6 +3540,64 @@ fn franken_last_rowid(tx: &FrankenTransaction<'_>) -> Result<i64> {
         .with_context(|| "last_insert_rowid() returned NULL or 0 after INSERT")
 }
 
+enum ConversationInsertStatus {
+    Inserted(i64),
+    Existing(i64),
+}
+
+fn is_conversation_identity_conflict(error: &anyhow::Error) -> bool {
+    let rendered = error.to_string();
+    rendered.contains("UNIQUE constraint failed")
+        && rendered.contains("conversations.source_id")
+        && rendered.contains("agent_id")
+        && rendered.contains("external_id")
+}
+
+fn franken_insert_conversation_or_get_existing(
+    tx: &FrankenTransaction<'_>,
+    agent_id: i64,
+    workspace_id: Option<i64>,
+    conv: &Conversation,
+) -> Result<ConversationInsertStatus> {
+    match franken_insert_conversation(tx, agent_id, workspace_id, conv) {
+        Ok(conv_id) => Ok(ConversationInsertStatus::Inserted(conv_id)),
+        Err(error) if conv.external_id.is_some() && is_conversation_identity_conflict(&error) => {
+            let external_id = conv.external_id.as_deref().unwrap_or_default();
+            let existing_id = tx
+                .query_row_map(
+                    "SELECT id FROM conversations WHERE source_id = ?1 AND agent_id = ?2 AND external_id = ?3",
+                    fparams![conv.source_id.as_str(), agent_id, external_id],
+                    |row| row.get_typed(0),
+                )
+                .optional()?
+                .with_context(|| {
+                    format!(
+                        "conversation insert conflicted but existing row was not found for source_id={} agent_id={} external_id={}",
+                        conv.source_id, agent_id, external_id
+                    )
+                })?;
+            tracing::warn!(
+                source_id = %conv.source_id,
+                agent_id,
+                external_id,
+                existing_id,
+                "conversation insert hit unique constraint; reusing existing row"
+            );
+            Ok(ConversationInsertStatus::Existing(existing_id))
+        }
+        Err(error) => {
+            tracing::error!(
+                source_id = %conv.source_id,
+                agent_id,
+                external_id = ?conv.external_id,
+                error = %error,
+                "franken_insert_conversation failed"
+            );
+            Err(error)
+        }
+    }
+}
+
 /// Insert a conversation into the DB within a frankensqlite transaction.
 fn franken_insert_conversation(
     tx: &FrankenTransaction<'_>,
@@ -3375,6 +3683,21 @@ fn franken_insert_snippets(
         )?;
     }
     Ok(())
+}
+
+fn franken_existing_message_indices(
+    tx: &FrankenTransaction<'_>,
+    conversation_id: i64,
+) -> Result<HashSet<i64>> {
+    let rows = tx.query_params(
+        "SELECT idx FROM messages WHERE conversation_id = ?1",
+        fparams![conversation_id],
+    )?;
+    let mut indices = HashSet::with_capacity(rows.len());
+    for row in rows {
+        indices.insert(row.get_typed(0)?);
+    }
+    Ok(indices)
 }
 
 /// Batch insert FTS5 entries within a frankensqlite transaction.
@@ -4327,8 +4650,6 @@ impl FrankenStorage {
 // -------------------------------------------------------------------------
 // IndexingCache (Opt 7.2) - N+1 Prevention for Agent/Workspace IDs
 // -------------------------------------------------------------------------
-
-use std::collections::HashMap;
 
 /// Cache for agent and workspace IDs during batch indexing.
 ///
@@ -5408,6 +5729,25 @@ impl FtsEntry {
             message_id,
         }
     }
+}
+
+const FTS_ENTRY_BATCH_MAX_DOCS: usize = 512;
+const FTS_ENTRY_BATCH_MAX_CHARS: usize = 1 * 1024 * 1024;
+
+fn flush_pending_fts_entries(
+    tx: &FrankenTransaction<'_>,
+    entries: &mut Vec<FtsEntry>,
+    pending_chars: &mut usize,
+    inserted_total: &mut usize,
+) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    *inserted_total += franken_batch_insert_fts(tx, entries)?;
+    entries.clear();
+    *pending_chars = 0;
+    Ok(())
 }
 
 fn path_to_string<P: AsRef<Path>>(p: P) -> String {
@@ -6809,6 +7149,474 @@ mod tests {
             )
             .unwrap();
         assert_eq!(ud_msg, 3);
+    }
+
+    #[test]
+    fn insert_conversations_batched_flushes_large_fts_batches() {
+        use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
+        use std::path::PathBuf;
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let agent = Agent {
+            id: None,
+            slug: "codex".into(),
+            name: "Codex".into(),
+            version: Some("0.2.3".into()),
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).unwrap();
+
+        let content = "y".repeat(4096);
+        let messages: Vec<_> = (0..1_200)
+            .map(|i| Message {
+                id: None,
+                idx: i,
+                role: MessageRole::Agent,
+                author: None,
+                created_at: Some(1_700_000_000_000 + i),
+                content: format!("{i}-{content}"),
+                extra_json: serde_json::Value::Null,
+                snippets: Vec::new(),
+            })
+            .collect();
+        let conv = Conversation {
+            id: None,
+            agent_slug: "codex".into(),
+            workspace: Some(PathBuf::from("/tmp/workspace")),
+            external_id: Some("fts-large-batch".into()),
+            title: Some("FTS Large Batch".into()),
+            source_path: PathBuf::from("/tmp/rollout.jsonl"),
+            started_at: Some(1_700_000_000_000),
+            ended_at: Some(1_700_000_000_999),
+            approx_tokens: None,
+            metadata_json: serde_json::Value::Null,
+            messages,
+            source_id: "local".into(),
+            origin_host: None,
+        };
+
+        let outcomes = storage
+            .insert_conversations_batched(&[(agent_id, None, &conv)])
+            .unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].inserted_indices.len(), conv.messages.len());
+
+        let message_count: i64 = storage
+            .conn
+            .query_row_map("SELECT COUNT(*) FROM messages", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        let fts_count: i64 = storage
+            .conn
+            .query_row_map("SELECT COUNT(*) FROM fts_messages", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+
+        assert_eq!(message_count, conv.messages.len() as i64);
+        assert_eq!(fts_count, conv.messages.len() as i64);
+    }
+
+    #[test]
+    fn insert_conversations_batched_appends_duplicate_external_id() {
+        use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
+        use std::path::PathBuf;
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let agent = Agent {
+            id: None,
+            slug: "codex".into(),
+            name: "Codex".into(),
+            version: Some("0.2.3".into()),
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).unwrap();
+
+        let base_conv = |messages: Vec<Message>| Conversation {
+            id: None,
+            agent_slug: "codex".into(),
+            workspace: Some(PathBuf::from("/tmp/workspace")),
+            external_id: Some("shared-session".into()),
+            title: Some("Shared Session".into()),
+            source_path: PathBuf::from("/tmp/rollout.jsonl"),
+            started_at: Some(1_700_000_000_000),
+            ended_at: Some(1_700_000_000_999),
+            approx_tokens: None,
+            metadata_json: serde_json::Value::Null,
+            messages,
+            source_id: "local".into(),
+            origin_host: None,
+        };
+
+        let conv_a = base_conv(vec![
+            Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: None,
+                created_at: Some(1_700_000_000_000),
+                content: "first".into(),
+                extra_json: serde_json::Value::Null,
+                snippets: Vec::new(),
+            },
+            Message {
+                id: None,
+                idx: 1,
+                role: MessageRole::Agent,
+                author: None,
+                created_at: Some(1_700_000_000_100),
+                content: "second".into(),
+                extra_json: serde_json::Value::Null,
+                snippets: Vec::new(),
+            },
+        ]);
+        let conv_b = base_conv(vec![
+            Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: None,
+                created_at: Some(1_700_000_000_000),
+                content: "first".into(),
+                extra_json: serde_json::Value::Null,
+                snippets: Vec::new(),
+            },
+            Message {
+                id: None,
+                idx: 1,
+                role: MessageRole::Agent,
+                author: None,
+                created_at: Some(1_700_000_000_100),
+                content: "second".into(),
+                extra_json: serde_json::Value::Null,
+                snippets: Vec::new(),
+            },
+            Message {
+                id: None,
+                idx: 2,
+                role: MessageRole::User,
+                author: None,
+                created_at: Some(1_700_000_000_200),
+                content: "third".into(),
+                extra_json: serde_json::Value::Null,
+                snippets: Vec::new(),
+            },
+            Message {
+                id: None,
+                idx: 3,
+                role: MessageRole::Agent,
+                author: None,
+                created_at: Some(1_700_000_000_300),
+                content: "fourth".into(),
+                extra_json: serde_json::Value::Null,
+                snippets: Vec::new(),
+            },
+        ]);
+
+        let outcomes = storage
+            .insert_conversations_batched(&[(agent_id, None, &conv_a), (agent_id, None, &conv_b)])
+            .unwrap();
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0].inserted_indices, vec![0, 1]);
+        assert_eq!(outcomes[1].inserted_indices, vec![2, 3]);
+        assert_eq!(outcomes[0].conversation_id, outcomes[1].conversation_id);
+
+        let conversation_count: i64 = storage
+            .conn
+            .query_row_map("SELECT COUNT(*) FROM conversations", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        let message_count: i64 = storage
+            .conn
+            .query_row_map("SELECT COUNT(*) FROM messages", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+
+        assert_eq!(conversation_count, 1);
+        assert_eq!(message_count, 4);
+    }
+
+    #[test]
+    fn franken_insert_conversation_or_get_existing_recovers_unique_conflict() {
+        use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
+        use std::path::PathBuf;
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let agent = Agent {
+            id: None,
+            slug: "codex".into(),
+            name: "Codex".into(),
+            version: Some("0.2.3".into()),
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).unwrap();
+
+        let conv = Conversation {
+            id: None,
+            agent_slug: "codex".into(),
+            workspace: Some(PathBuf::from("/tmp/workspace")),
+            external_id: Some("recover-duplicate".into()),
+            title: Some("Recover Duplicate".into()),
+            source_path: PathBuf::from("/tmp/rollout.jsonl"),
+            started_at: Some(1_700_000_000_000),
+            ended_at: Some(1_700_000_000_100),
+            approx_tokens: None,
+            metadata_json: serde_json::Value::Null,
+            messages: vec![Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: None,
+                created_at: Some(1_700_000_000_000),
+                content: "hello".into(),
+                extra_json: serde_json::Value::Null,
+                snippets: Vec::new(),
+            }],
+            source_id: "local".into(),
+            origin_host: None,
+        };
+
+        let tx = storage.conn.transaction().unwrap();
+        let inserted_id = franken_insert_conversation(&tx, agent_id, None, &conv).unwrap();
+
+        let resolved =
+            franken_insert_conversation_or_get_existing(&tx, agent_id, None, &conv).unwrap();
+
+        match resolved {
+            ConversationInsertStatus::Existing(existing_id) => {
+                assert_eq!(existing_id, inserted_id);
+            }
+            ConversationInsertStatus::Inserted(new_id) => {
+                panic!("expected existing conversation id, got freshly inserted {new_id}");
+            }
+        }
+
+        let conversation_count: i64 = tx
+            .query_row_map("SELECT COUNT(*) FROM conversations", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        assert_eq!(conversation_count, 1);
+    }
+
+    #[test]
+    fn insert_conversations_batched_merges_duplicate_external_id_with_gaps() {
+        use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
+        use std::path::PathBuf;
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let agent = Agent {
+            id: None,
+            slug: "codex".into(),
+            name: "Codex".into(),
+            version: Some("0.2.3".into()),
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).unwrap();
+
+        let base_conv = |messages: Vec<Message>| Conversation {
+            id: None,
+            agent_slug: "codex".into(),
+            workspace: Some(PathBuf::from("/tmp/workspace")),
+            external_id: Some("shared-session-gap".into()),
+            title: Some("Shared Session Gap".into()),
+            source_path: PathBuf::from("/tmp/rollout.jsonl"),
+            started_at: Some(1_700_000_000_000),
+            ended_at: Some(1_700_000_000_999),
+            approx_tokens: None,
+            metadata_json: serde_json::Value::Null,
+            messages,
+            source_id: "local".into(),
+            origin_host: None,
+        };
+
+        let conv_a = base_conv(vec![
+            Message {
+                id: None,
+                idx: 2,
+                role: MessageRole::User,
+                author: None,
+                created_at: Some(1_700_000_000_200),
+                content: "third".into(),
+                extra_json: serde_json::Value::Null,
+                snippets: Vec::new(),
+            },
+            Message {
+                id: None,
+                idx: 3,
+                role: MessageRole::Agent,
+                author: None,
+                created_at: Some(1_700_000_000_300),
+                content: "fourth".into(),
+                extra_json: serde_json::Value::Null,
+                snippets: Vec::new(),
+            },
+        ]);
+        let conv_b = base_conv(vec![
+            Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: None,
+                created_at: Some(1_700_000_000_000),
+                content: "first".into(),
+                extra_json: serde_json::Value::Null,
+                snippets: Vec::new(),
+            },
+            Message {
+                id: None,
+                idx: 1,
+                role: MessageRole::Agent,
+                author: None,
+                created_at: Some(1_700_000_000_100),
+                content: "second".into(),
+                extra_json: serde_json::Value::Null,
+                snippets: Vec::new(),
+            },
+            Message {
+                id: None,
+                idx: 3,
+                role: MessageRole::Agent,
+                author: None,
+                created_at: Some(1_700_000_000_300),
+                content: "fourth".into(),
+                extra_json: serde_json::Value::Null,
+                snippets: Vec::new(),
+            },
+        ]);
+
+        let outcomes = storage
+            .insert_conversations_batched(&[(agent_id, None, &conv_a), (agent_id, None, &conv_b)])
+            .unwrap();
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0].inserted_indices, vec![2, 3]);
+        assert_eq!(outcomes[1].inserted_indices, vec![0, 1]);
+        assert_eq!(outcomes[0].conversation_id, outcomes[1].conversation_id);
+
+        let stored_indices: Vec<i64> = storage
+            .conn
+            .query_map_collect("SELECT idx FROM messages ORDER BY idx", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        assert_eq!(stored_indices, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn insert_conversation_tree_merges_duplicate_external_id_with_gaps() {
+        use crate::connectors::{NormalizedConversation, NormalizedMessage};
+        use crate::indexer::persist::map_to_internal;
+        use crate::model::types::{Agent, AgentKind};
+        use std::path::PathBuf;
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let agent = Agent {
+            id: None,
+            slug: "codex".into(),
+            name: "Codex".into(),
+            version: Some("0.2.3".into()),
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).unwrap();
+
+        let base_conv = |messages: Vec<NormalizedMessage>| NormalizedConversation {
+            agent_slug: "codex".into(),
+            workspace: Some(PathBuf::from("/tmp/workspace")),
+            external_id: Some("tree-gap-session".into()),
+            title: Some("Tree Gap Session".into()),
+            source_path: PathBuf::from("/tmp/tree.jsonl"),
+            started_at: Some(1_700_000_000_000),
+            ended_at: Some(1_700_000_000_999),
+            metadata: serde_json::Value::Null,
+            messages,
+        };
+
+        let conv_a = map_to_internal(&base_conv(vec![
+            NormalizedMessage {
+                idx: 2,
+                role: "user".into(),
+                author: None,
+                created_at: Some(1_700_000_000_200),
+                content: "third".into(),
+                extra: serde_json::Value::Null,
+                snippets: Vec::new(),
+            },
+            NormalizedMessage {
+                idx: 3,
+                role: "assistant".into(),
+                author: None,
+                created_at: Some(1_700_000_000_300),
+                content: "fourth".into(),
+                extra: serde_json::Value::Null,
+                snippets: Vec::new(),
+            },
+        ]));
+        let conv_b = map_to_internal(&base_conv(vec![
+            NormalizedMessage {
+                idx: 0,
+                role: "user".into(),
+                author: None,
+                created_at: Some(1_700_000_000_000),
+                content: "first".into(),
+                extra: serde_json::Value::Null,
+                snippets: Vec::new(),
+            },
+            NormalizedMessage {
+                idx: 1,
+                role: "assistant".into(),
+                author: None,
+                created_at: Some(1_700_000_000_100),
+                content: "second".into(),
+                extra: serde_json::Value::Null,
+                snippets: Vec::new(),
+            },
+            NormalizedMessage {
+                idx: 3,
+                role: "assistant".into(),
+                author: None,
+                created_at: Some(1_700_000_000_300),
+                content: "fourth".into(),
+                extra: serde_json::Value::Null,
+                snippets: Vec::new(),
+            },
+        ]));
+
+        let first = storage
+            .insert_conversation_tree(agent_id, None, &conv_a)
+            .unwrap();
+        let second = storage
+            .insert_conversation_tree(agent_id, None, &conv_b)
+            .unwrap();
+
+        assert_eq!(first.inserted_indices, vec![2, 3]);
+        assert_eq!(second.inserted_indices, vec![0, 1]);
+        assert_eq!(first.conversation_id, second.conversation_id);
+
+        let stored_indices: Vec<i64> = storage
+            .conn
+            .query_map_collect("SELECT idx FROM messages ORDER BY idx", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        assert_eq!(stored_indices, vec![0, 1, 2, 3]);
     }
 
     // =========================================================================
