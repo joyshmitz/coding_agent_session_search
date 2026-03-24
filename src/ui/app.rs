@@ -12366,23 +12366,31 @@ impl CassApp {
 
         let data_dir = self.data_dir.clone();
         let mut sync_status = SyncStatus::load(&data_dir).unwrap_or_default();
-        let config = match SourcesConfig::load() {
+        match SourcesConfig::load() {
             Ok(config) => {
-                if sync_status
+                let prune_warning = if sync_status
                     .retain_sources(config.sources.iter().map(|source| source.name.as_str()))
-                    && let Err(error) = sync_status.save(&data_dir)
                 {
-                    tracing::warn!(%error, "failed to save pruned source sync status");
+                    sync_status.save(&data_dir).err().map(|error| {
+                        tracing::warn!(%error, "failed to save pruned source sync status");
+                        format!("Failed to save pruned source sync status: {error}")
+                    })
+                } else {
+                    None
+                };
+                self.rebuild_sources_view(&config, &sync_status, config_path);
+                if let Some(warning) = prune_warning
+                    && !self.sources_view.items.iter().any(|item| item.busy)
+                {
+                    self.sources_view.status = warning;
                 }
-                config
             }
             Err(error) => {
                 tracing::warn!(%error, "failed to load sources config");
-                SourcesConfig::default()
+                self.rebuild_sources_view(&SourcesConfig::default(), &sync_status, config_path);
+                self.sources_view.status = format!("Failed to load sources config: {error}");
             }
-        };
-
-        self.rebuild_sources_view(&config, &sync_status, config_path);
+        }
     }
 
     fn ensure_sources_selection_visible(&mut self) {
@@ -12392,6 +12400,11 @@ impl CassApp {
             self.sources_view.items.len(),
             self.last_sources_visible_rows.get(),
         );
+    }
+
+    fn sources_status_is_sticky_warning(status: &str) -> bool {
+        status.starts_with("Failed to load sources config:")
+            || status.starts_with("Failed to save pruned source sync status:")
     }
 
     /// Number of selectable items in the current analytics subview.
@@ -19041,7 +19054,9 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::SourcesRefreshed => {
                 #[cfg(not(test))]
                 self.load_sources_view();
-                if !self.sources_view.items.iter().any(|item| item.busy) {
+                if !self.sources_view.items.iter().any(|item| item.busy)
+                    && !Self::sources_status_is_sticky_warning(&self.sources_view.status)
+                {
                     self.sources_view.status = "Sources refreshed".into();
                 }
                 ftui::Cmd::none()
@@ -37937,6 +37952,61 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         let _ = app.update(CassMsg::SourcesRefreshed);
 
         assert_eq!(app.sources_view.status, "Running doctor on 'laptop'...");
+    }
+
+    #[test]
+    fn sources_refreshed_keeps_config_load_error_status() {
+        let mut app = CassApp::default();
+        app.sources_view.status = "Failed to load sources config: duplicate source".into();
+        app.sources_view.items = vec![SourcesViewItem {
+            name: "local".into(),
+            kind: crate::sources::SourceKind::Local,
+            host: None,
+            schedule: "always".into(),
+            path_count: 0,
+            last_sync: None,
+            last_result: "n/a".into(),
+            files_synced: 0,
+            bytes_transferred: 0,
+            busy: false,
+            doctor_summary: None,
+            error: None,
+        }];
+
+        let _ = app.update(CassMsg::SourcesRefreshed);
+
+        assert_eq!(
+            app.sources_view.status,
+            "Failed to load sources config: duplicate source"
+        );
+    }
+
+    #[test]
+    fn sources_refreshed_keeps_prune_warning_status() {
+        let mut app = CassApp::default();
+        app.sources_view.status =
+            "Failed to save pruned source sync status: permission denied".into();
+        app.sources_view.items = vec![SourcesViewItem {
+            name: "local".into(),
+            kind: crate::sources::SourceKind::Local,
+            host: None,
+            schedule: "always".into(),
+            path_count: 0,
+            last_sync: None,
+            last_result: "n/a".into(),
+            files_synced: 0,
+            bytes_transferred: 0,
+            busy: false,
+            doctor_summary: None,
+            error: None,
+        }];
+
+        let _ = app.update(CassMsg::SourcesRefreshed);
+
+        assert_eq!(
+            app.sources_view.status,
+            "Failed to save pruned source sync status: permission denied"
+        );
     }
 
     #[test]
