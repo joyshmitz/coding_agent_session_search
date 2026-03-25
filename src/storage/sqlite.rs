@@ -14,6 +14,7 @@ use frankensqlite::{
     migrate::MigrationRunner,
 };
 use rusqlite::OptionalExtension as RusqliteOptionalExtension;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -794,7 +795,7 @@ pub(crate) fn move_database_bundle(
 }
 
 /// Helper to safely remove a database file and its potential WAL/SHM sidecars.
-fn remove_database_files(path: &Path) -> std::io::Result<()> {
+pub(crate) fn remove_database_files(path: &Path) -> std::io::Result<()> {
     // Remove the main database file
     fs::remove_file(path)?;
 
@@ -862,6 +863,15 @@ pub struct HistoricalSalvageOutcome {
     pub bundles_imported: usize,
     pub conversations_imported: usize,
     pub messages_imported: usize,
+}
+
+impl HistoricalSalvageOutcome {
+    pub(crate) fn accumulate(&mut self, other: Self) {
+        self.bundles_considered += other.bundles_considered;
+        self.bundles_imported += other.bundles_imported;
+        self.conversations_imported += other.conversations_imported;
+        self.messages_imported += other.messages_imported;
+    }
 }
 
 #[derive(Debug)]
@@ -1263,13 +1273,263 @@ fn open_historical_bundle_for_salvage(
     recover_historical_bundle_via_sqlite3(bundle)
 }
 
+fn historical_bundle_counts(conn: &rusqlite::Connection) -> Result<(usize, usize)> {
+    let conversations: i64 =
+        conn.query_row("SELECT COUNT(*) FROM conversations", [], |row| row.get(0))?;
+    let messages: i64 = conn.query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))?;
+    Ok((
+        usize::try_from(conversations.max(0)).unwrap_or(usize::MAX),
+        usize::try_from(messages.max(0)).unwrap_or(usize::MAX),
+    ))
+}
+
+fn clear_seeded_runtime_meta(storage: &FrankenStorage) -> Result<()> {
+    storage.conn.execute_compat(
+        "DELETE FROM meta
+         WHERE key LIKE 'historical_bundle_salvaged:%'
+            OR key IN ('last_scan_ts', 'last_indexed_at', 'last_embedded_message_id')",
+        fparams![],
+    )?;
+    Ok(())
+}
+
+fn read_meta_schema_version(conn: &rusqlite::Connection) -> Result<Option<i64>> {
+    let version = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .and_then(|raw| raw.parse::<i64>().ok());
+    Ok(version)
+}
+
+fn seed_canonical_from_historical_bundle_via_bulk_copy(
+    canonical_db_path: &Path,
+    bundle: &HistoricalDatabaseBundle,
+) -> Result<()> {
+    if canonical_db_path.exists() {
+        remove_database_files(canonical_db_path).with_context(|| {
+            format!(
+                "removing canonical database before bulk historical seed import: {}",
+                canonical_db_path.display()
+            )
+        })?;
+    }
+    if let Some(parent) = canonical_db_path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "creating canonical database directory before bulk historical seed import: {}",
+                parent.display()
+            )
+        })?;
+    }
+    let tempdir = tempfile::TempDir::new().context("creating temporary baseline seed directory")?;
+    let working_db = tempdir.path().join("baseline-seed-working.db");
+
+    fs::copy(&bundle.root_path, &working_db).with_context(|| {
+        format!(
+            "copying historical bundle {} to working seed clone {}",
+            bundle.root_path.display(),
+            working_db.display()
+        )
+    })?;
+    for suffix in ["-wal", "-shm"] {
+        let src = database_sidecar_path(&bundle.root_path, suffix);
+        if !src.exists() {
+            continue;
+        }
+        let dest = database_sidecar_path(&working_db, suffix);
+        fs::copy(&src, &dest).with_context(|| {
+            format!(
+                "copying historical bundle sidecar {} to working seed clone {}",
+                src.display(),
+                dest.display()
+            )
+        })?;
+    }
+
+    let conn = rusqlite::Connection::open(&working_db).with_context(|| {
+        format!(
+            "opening working seed clone with rusqlite: {}",
+            working_db.display()
+        )
+    })?;
+    conn.execute_batch(
+        "PRAGMA busy_timeout = 30000;
+         PRAGMA writable_schema = ON;",
+    )
+        .with_context(|| format!("configuring busy timeout for {}", working_db.display()))?;
+
+    if let Some(schema_version) = read_meta_schema_version(&conn)? {
+        if schema_version < CURRENT_SCHEMA_VERSION {
+            if schema_version != 13 {
+                anyhow::bail!(
+                    "historical seed bundle schema_version {schema_version} is too old for baseline import"
+                );
+            }
+            conn.execute_batch(
+                "DELETE FROM sqlite_master WHERE name LIKE 'fts_messages%';",
+            )
+            .with_context(|| {
+                format!(
+                    "clearing legacy FTS schema entries from working seed clone {}",
+                    working_db.display()
+                )
+            })?;
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                .with_context(|| {
+                    format!(
+                        "checkpointing working seed clone after legacy FTS cleanup: {}",
+                        working_db.display()
+                    )
+                })?;
+        }
+    }
+    conn.execute_batch("PRAGMA writable_schema = OFF;")
+        .with_context(|| format!("disabling writable_schema for {}", working_db.display()))?;
+
+    conn.execute("VACUUM INTO ?1", [canonical_db_path.to_string_lossy().as_ref()])
+        .with_context(|| {
+            format!(
+                "vacuuming cleaned working seed clone into canonical database {}",
+                canonical_db_path.display()
+            )
+        })?;
+
+    let seeded = rusqlite::Connection::open_with_flags(
+        canonical_db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| {
+        format!(
+            "opening canonical database after vacuum baseline seed import: {}",
+            canonical_db_path.display()
+        )
+    })?;
+    let duplicate_fts_entries: i64 = seeded
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'fts_messages'",
+            [],
+            |row| row.get(0),
+        )
+        .with_context(|| {
+            format!(
+                "counting fts_messages sqlite_master rows after vacuum baseline seed import: {}",
+                canonical_db_path.display()
+            )
+        })?;
+    if duplicate_fts_entries > 1 {
+        anyhow::bail!(
+            "vacuum baseline seed preserved {duplicate_fts_entries} sqlite_master entries for fts_messages in {}",
+            canonical_db_path.display()
+        );
+    }
+
+    Ok(())
+}
+
+pub(crate) fn seed_canonical_from_best_historical_bundle(
+    canonical_db_path: &Path,
+) -> Result<Option<HistoricalSalvageOutcome>> {
+    let ordered_bundles = discover_historical_database_bundles(canonical_db_path);
+    let mut last_seed_error: Option<anyhow::Error> = None;
+    for bundle in ordered_bundles
+        .into_iter()
+        .filter(|bundle| bundle.supports_direct_readonly)
+    {
+        let source = open_historical_bundle_for_salvage(&bundle).with_context(|| {
+            format!(
+                "opening historical seed bundle {} for baseline import",
+                bundle.root_path.display()
+            )
+        })?;
+        let (conversations_imported, messages_imported) = historical_bundle_counts(&source.conn)?;
+
+        if let Err(err) = seed_canonical_from_historical_bundle_via_bulk_copy(canonical_db_path, &bundle)
+        {
+            tracing::warn!(
+                path = %bundle.root_path.display(),
+                error = %err,
+                "bulk baseline seed import from historical bundle failed; trying next candidate"
+            );
+            last_seed_error = Some(err);
+            let _ = remove_database_files(canonical_db_path);
+            continue;
+        }
+
+        let seeded = FrankenStorage::open(canonical_db_path).with_context(|| {
+            format!(
+                "opening seeded canonical database after bulk baseline import: {}",
+                canonical_db_path.display()
+            )
+        })?;
+        clear_seeded_runtime_meta(&seeded)?;
+        seeded.record_historical_bundle_import(
+            &bundle,
+            "baseline-bulk-sql-copy",
+            conversations_imported,
+            messages_imported,
+        )?;
+
+        tracing::info!(
+            path = %bundle.root_path.display(),
+            conversations_imported,
+            messages_imported,
+            "seeded empty canonical database from largest healthy historical bundle"
+        );
+
+        return Ok(Some(HistoricalSalvageOutcome {
+            bundles_considered: 0,
+            bundles_imported: 1,
+            conversations_imported,
+            messages_imported,
+        }));
+    }
+    if let Some(err) = last_seed_error {
+        return Err(err);
+    }
+    Ok(None)
+}
+
 fn parse_json_column(value: Option<String>) -> serde_json::Value {
     value
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or(serde_json::Value::Null)
 }
 
+const HISTORICAL_RAW_JSON_SENTINEL_KEY: &str = "__cass_historical_raw_json__";
+
+fn wrap_historical_raw_json(raw: String) -> serde_json::Value {
+    serde_json::json!({ HISTORICAL_RAW_JSON_SENTINEL_KEY: raw })
+}
+
+fn historical_raw_json(value: &serde_json::Value) -> Option<&str> {
+    match value {
+        serde_json::Value::Object(map) if map.len() == 1 => map
+            .get(HISTORICAL_RAW_JSON_SENTINEL_KEY)
+            .and_then(serde_json::Value::as_str),
+        _ => None,
+    }
+}
+
+fn parse_historical_json_column(value: Option<String>) -> serde_json::Value {
+    match value {
+        Some(raw) if raw.trim().is_empty() => serde_json::Value::Null,
+        Some(raw) => wrap_historical_raw_json(raw),
+        None => serde_json::Value::Null,
+    }
+}
+
+fn historical_salvage_debug_enabled() -> bool {
+    std::env::var_os("CASS_DEBUG_HISTORICAL_SALVAGE").is_some()
+}
+
 fn json_value_size_hint(value: &serde_json::Value) -> usize {
+    if let Some(raw) = historical_raw_json(value) {
+        return raw.len();
+    }
     match value {
         serde_json::Value::Null => 0,
         other => serde_json::to_string(other).map(|raw| raw.len()).unwrap_or(0),
@@ -2989,6 +3249,43 @@ impl FrankenStorage {
             .with_context(|| format!("fetching messages for conversation {conversation_id}"))
     }
 
+    /// Fetch messages for lexical index rebuilds without deserializing extra metadata.
+    ///
+    /// Tantivy only needs message text and core envelope fields, so avoiding
+    /// `extra_json` here prevents rebuilds from rehydrating enormous historical
+    /// payloads that are irrelevant to lexical search.
+    pub fn fetch_messages_for_lexical_rebuild(&self, conversation_id: i64) -> Result<Vec<Message>> {
+        self.conn
+            .query_map_collect(
+                "SELECT id, idx, role, author, created_at, content FROM messages WHERE conversation_id = ?1 ORDER BY idx",
+                fparams![conversation_id],
+                |row| {
+                    let role: String = row.get_typed(2)?;
+                    Ok(Message {
+                        id: Some(row.get_typed(0)?),
+                        idx: row.get_typed(1)?,
+                        role: match role.as_str() {
+                            "user" => MessageRole::User,
+                            "agent" | "assistant" => MessageRole::Agent,
+                            "tool" => MessageRole::Tool,
+                            "system" => MessageRole::System,
+                            other => MessageRole::Other(other.to_string()),
+                        },
+                        author: row.get_typed(3)?,
+                        created_at: row.get_typed(4)?,
+                        content: row.get_typed(5)?,
+                        extra_json: serde_json::Value::Null,
+                        snippets: Vec::new(),
+                    })
+                },
+            )
+            .with_context(|| {
+                format!(
+                    "fetching messages for lexical rebuild of conversation {conversation_id}"
+                )
+            })
+    }
+
     /// Get a source by ID.
     pub fn get_source(&self, id: &str) -> Result<Option<Source>> {
         let result = self.conn.query_row_map(
@@ -3211,11 +3508,15 @@ impl FrankenStorage {
         let mut pending_batch: Vec<(i64, Option<i64>, Conversation)> = Vec::new();
         let mut pending_batch_messages = 0usize;
         let mut pending_batch_chars = 0usize;
+        let mut pending_batch_first_row_id: Option<i64> = None;
+        let mut pending_batch_last_row_id: Option<i64> = None;
 
         let flush_batch = |storage: &FrankenStorage,
                            batch: &mut Vec<(i64, Option<i64>, Conversation)>,
                            pending_messages: &mut usize,
                            pending_chars: &mut usize,
+                           first_row_id: &mut Option<i64>,
+                           last_row_id: &mut Option<i64>,
                            imported_conversations: &mut usize,
                            imported_messages: &mut usize|
          -> Result<()> {
@@ -3223,20 +3524,70 @@ impl FrankenStorage {
                 return Ok(());
             }
 
+            let batch_first_row_id = *first_row_id;
+            let batch_last_row_id = *last_row_id;
+            if historical_salvage_debug_enabled() {
+                eprintln!(
+                    "[historical-salvage] flushing batch rows {:?}..{:?} conversations={} messages={} payload_chars={}",
+                    batch_first_row_id,
+                    batch_last_row_id,
+                    batch.len(),
+                    *pending_messages,
+                    *pending_chars
+                );
+            }
+            tracing::info!(
+                target: "cass::historical_salvage",
+                batch_conversations = batch.len(),
+                batch_messages = *pending_messages,
+                batch_payload_chars = *pending_chars,
+                first_source_row_id = batch_first_row_id,
+                last_source_row_id = batch_last_row_id,
+                "flushing historical salvage batch"
+            );
+
             let borrowed_batch: Vec<(i64, Option<i64>, &Conversation)> = batch
                 .iter()
                 .map(|(agent_id, workspace_id, conversation)| (*agent_id, *workspace_id, conversation))
                 .collect();
-            let outcomes = storage.insert_conversations_batched(&borrowed_batch)?;
+            let outcomes = storage
+                .insert_conversations_batched(&borrowed_batch)
+                .with_context(|| {
+                    format!(
+                        "inserting historical salvage batch source rows {:?}..{:?}",
+                        batch_first_row_id, batch_last_row_id
+                    )
+                })?;
             for outcome in outcomes {
                 if !outcome.inserted_indices.is_empty() {
                     *imported_conversations += 1;
                     *imported_messages += outcome.inserted_indices.len();
                 }
             }
+            tracing::info!(
+                target: "cass::historical_salvage",
+                batch_conversations = batch.len(),
+                batch_messages = *pending_messages,
+                imported_conversations = *imported_conversations,
+                imported_messages = *imported_messages,
+                first_source_row_id = batch_first_row_id,
+                last_source_row_id = batch_last_row_id,
+                "historical salvage batch committed"
+            );
+            if historical_salvage_debug_enabled() {
+                eprintln!(
+                    "[historical-salvage] committed batch rows {:?}..{:?} imported_conversations={} imported_messages={}",
+                    batch_first_row_id,
+                    batch_last_row_id,
+                    *imported_conversations,
+                    *imported_messages
+                );
+            }
             batch.clear();
             *pending_messages = 0;
             *pending_chars = 0;
+            *first_row_id = None;
+            *last_row_id = None;
             Ok(())
         };
 
@@ -3263,7 +3614,7 @@ impl FrankenStorage {
                         author: msg_row.get(2)?,
                         created_at: msg_row.get(3)?,
                         content: msg_row.get(4)?,
-                        extra_json: parse_json_column(msg_row.get(5)?),
+                        extra_json: parse_historical_json_column(msg_row.get(5)?),
                         snippets: Vec::new(),
                     })
                 })?
@@ -3341,11 +3692,17 @@ impl FrankenStorage {
                     &mut pending_batch,
                     &mut pending_batch_messages,
                     &mut pending_batch_chars,
+                    &mut pending_batch_first_row_id,
+                    &mut pending_batch_last_row_id,
                     &mut imported_conversations,
                     &mut imported_messages,
                 )?;
             }
 
+            if pending_batch_first_row_id.is_none() {
+                pending_batch_first_row_id = Some(conversation_row_id);
+            }
+            pending_batch_last_row_id = Some(conversation_row_id);
             pending_batch_messages =
                 pending_batch_messages.saturating_add(conversation_message_count);
             pending_batch_chars = pending_batch_chars.saturating_add(conversation_chars);
@@ -3360,6 +3717,8 @@ impl FrankenStorage {
                     &mut pending_batch,
                     &mut pending_batch_messages,
                     &mut pending_batch_chars,
+                    &mut pending_batch_first_row_id,
+                    &mut pending_batch_last_row_id,
                     &mut imported_conversations,
                     &mut imported_messages,
                 )?;
@@ -3371,6 +3730,8 @@ impl FrankenStorage {
             &mut pending_batch,
             &mut pending_batch_messages,
             &mut pending_batch_chars,
+            &mut pending_batch_first_row_id,
+            &mut pending_batch_last_row_id,
             &mut imported_conversations,
             &mut imported_messages,
         )?;
@@ -4351,12 +4712,21 @@ impl FrankenStorage {
 
             for &(message_id, msg) in &inserted_messages {
                 let role_s = role_str(&msg.role);
-                let usage = crate::connectors::extract_tokens_for_agent(
-                    &conv.agent_slug,
-                    &msg.extra_json,
-                    &msg.content,
-                    &role_s,
-                );
+                let usage = if historical_raw_json(&msg.extra_json).is_some() {
+                    crate::connectors::extract_tokens_for_agent(
+                        &conv.agent_slug,
+                        &serde_json::Value::Null,
+                        &msg.content,
+                        &role_s,
+                    )
+                } else {
+                    crate::connectors::extract_tokens_for_agent(
+                        &conv.agent_slug,
+                        &msg.extra_json,
+                        &msg.content,
+                        &role_s,
+                    )
+                };
 
                 let msg_ts = msg.created_at.or(effective_started_at).unwrap_or(0);
                 let msg_day_id = if msg_ts > 0 {
@@ -4839,9 +5209,15 @@ fn franken_insert_message(
     conversation_id: i64,
     msg: &Message,
 ) -> Result<i64> {
-    let extra_bin = serialize_json_to_msgpack(&msg.extra_json);
-
-    let extra_json_str = serde_json::to_string(&msg.extra_json)?;
+    let (extra_json_str, extra_bin): (Cow<'_, str>, Option<Vec<u8>>) =
+        if let Some(raw) = historical_raw_json(&msg.extra_json) {
+            (Cow::Borrowed(raw), None)
+        } else {
+            (
+                Cow::Owned(serde_json::to_string(&msg.extra_json)?),
+                serialize_json_to_msgpack(&msg.extra_json),
+            )
+        };
     let extra_bin_bytes = extra_bin.as_deref();
 
     tx.execute_compat(
@@ -4854,7 +5230,7 @@ fn franken_insert_message(
             msg.author.as_deref(),
             msg.created_at,
             msg.content.as_str(),
-            extra_json_str.as_str(),
+            extra_json_str.as_ref(),
             extra_bin_bytes
         ],
     )?;
@@ -9462,6 +9838,279 @@ mod tests {
     }
 
     #[test]
+    fn seed_canonical_from_best_historical_bundle_copies_data_and_resets_runtime_meta() {
+        use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
+        use std::path::PathBuf;
+
+        let dir = TempDir::new().unwrap();
+        let canonical_db = dir.path().join("agent_search.db");
+        let source_db = dir
+            .path()
+            .join("backups/agent_search.db.20260322T020200.bak");
+
+        fs::create_dir_all(source_db.parent().unwrap()).unwrap();
+
+        let source = SqliteStorage::open(&source_db).unwrap();
+        let agent = Agent {
+            id: None,
+            slug: "codex".into(),
+            name: "Codex".into(),
+            version: Some("0.2.3".into()),
+            kind: AgentKind::Cli,
+        };
+        let agent_id = source.ensure_agent(&agent).unwrap();
+        let conversation = Conversation {
+            id: None,
+            agent_slug: "codex".into(),
+            workspace: Some(PathBuf::from("/tmp/workspace")),
+            external_id: Some("seed-conv".into()),
+            title: Some("Historical seed".into()),
+            source_path: PathBuf::from("/tmp/historical-seed.jsonl"),
+            started_at: Some(1_700_000_000_000),
+            ended_at: Some(1_700_000_000_100),
+            approx_tokens: Some(42),
+            metadata_json: serde_json::json!({"seed": true}),
+            messages: vec![Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::Agent,
+                author: Some("assistant".into()),
+                created_at: Some(1_700_000_000_050),
+                content: "seeded message".into(),
+                extra_json: serde_json::json!({"usage": {"total_tokens": 12}}),
+                snippets: Vec::new(),
+            }],
+            source_id: LOCAL_SOURCE_ID.into(),
+            origin_host: None,
+        };
+        source
+            .insert_conversation_tree(agent_id, None, &conversation)
+            .unwrap();
+        source.set_last_scan_ts(123).unwrap();
+        source.set_last_indexed_at(456).unwrap();
+        source.set_last_embedded_message_id(789).unwrap();
+        source
+            .conn
+            .execute_compat(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES(?1, ?2)",
+                fparams!["historical_bundle_salvaged:stale", "{\"stale\":true}"],
+            )
+            .unwrap();
+        drop(source);
+
+        let duplicate_legacy_fts_sql = "CREATE VIRTUAL TABLE fts_messages USING fts5(content, title, agent, workspace, source_path, created_at UNINDEXED, message_id UNINDEXED, tokenize='porter')";
+        let legacy = rusqlite::Connection::open(&source_db).unwrap();
+        legacy.execute_batch(
+            "DROP TABLE IF EXISTS fts_messages;
+             UPDATE meta SET value = '13' WHERE key = 'schema_version';
+             DELETE FROM _schema_migrations WHERE version = 14;
+             PRAGMA writable_schema = ON;",
+        )
+        .unwrap();
+        legacy
+            .execute(
+                "INSERT INTO sqlite_master(type, name, tbl_name, rootpage, sql)
+                 VALUES('table', 'fts_messages', 'fts_messages', 0, ?1)",
+                [duplicate_legacy_fts_sql],
+            )
+            .unwrap();
+        legacy
+            .execute_batch("PRAGMA writable_schema = OFF;")
+            .unwrap();
+        legacy
+            .execute_batch(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS fts_messages USING fts5(
+                     content,
+                     title,
+                     agent,
+                     workspace,
+                     source_path,
+                     created_at UNINDEXED,
+                     message_id UNINDEXED,
+                     tokenize='porter'
+                 );
+                 INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
+                 SELECT
+                     m.content,
+                     c.title,
+                     a.slug,
+                     w.path,
+                     c.source_path,
+                     m.created_at,
+                     m.id
+                 FROM messages m
+                 JOIN conversations c ON m.conversation_id = c.id
+                 JOIN agents a ON c.agent_id = a.id
+                 LEFT JOIN workspaces w ON c.workspace_id = w.id;",
+            )
+            .unwrap();
+        drop(legacy);
+
+        let duplicated_source = open_historical_bundle_readonly(&source_db).unwrap();
+        let duplicated_source_fts_entries: i64 = duplicated_source
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'fts_messages'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            duplicated_source_fts_entries, 2,
+            "test fixture should reproduce the duplicate legacy fts_messages rows"
+        );
+        let duplicated_source_message_count: i64 = duplicated_source
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(duplicated_source_message_count, 1);
+        drop(duplicated_source);
+
+        let fresh = SqliteStorage::open(&canonical_db).unwrap();
+        drop(fresh);
+
+        let outcome = seed_canonical_from_best_historical_bundle(&canonical_db)
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcome.bundles_imported, 1);
+        assert_eq!(outcome.conversations_imported, 1);
+        assert_eq!(outcome.messages_imported, 1);
+
+        let readonly = rusqlite::Connection::open_with_flags(
+            format!("file:{}?mode=ro&immutable=1", canonical_db.display()),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        )
+        .unwrap();
+        let readonly_message_count: i64 = readonly
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(readonly_message_count, 1);
+
+        let seeded = SqliteStorage::open(&canonical_db).unwrap();
+        assert_eq!(seeded.count_sessions_in_range(None, None, None, None).unwrap().0, 1);
+        let message_count: i64 = seeded
+            .conn
+            .query_row_map("SELECT COUNT(*) FROM messages", fparams![], |row| row.get_typed(0))
+            .unwrap();
+        assert_eq!(message_count, 1);
+        assert_eq!(seeded.get_last_scan_ts().unwrap(), None);
+        assert_eq!(seeded.get_last_embedded_message_id().unwrap(), None);
+
+        let last_indexed: Option<String> = seeded
+            .conn
+            .query_row_map(
+                "SELECT value FROM meta WHERE key = 'last_indexed_at'",
+                fparams![],
+                |row| row.get_typed(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(last_indexed.is_none());
+
+        let salvage_keys: Vec<String> = seeded
+            .conn
+            .query_map_collect(
+                "SELECT key FROM meta WHERE key LIKE 'historical_bundle_salvaged:%' ORDER BY key",
+                fparams![],
+                |row| row.get_typed(0),
+            )
+            .unwrap();
+        assert_eq!(salvage_keys.len(), 1);
+
+        let reopened_readonly = rusqlite::Connection::open_with_flags(
+            format!("file:{}?mode=ro&immutable=1", canonical_db.display()),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        )
+        .unwrap();
+        let reopened_fts_entries: i64 = reopened_readonly
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'fts_messages'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            reopened_fts_entries, 1,
+            "seeded canonical db should keep a single stock-SQLite fts_messages schema row"
+        );
+        let reopened_message_count: i64 = reopened_readonly
+            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(reopened_message_count, 1);
+
+        let franken_seeded = FrankenStorage::open(&canonical_db).unwrap();
+        let franken_fts_count: i64 = franken_seeded
+            .raw()
+            .query_row_map("SELECT COUNT(*) FROM fts_messages", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        assert_eq!(
+            franken_fts_count, 1,
+            "seeded canonical db should keep fts_messages queryable via frankensqlite"
+        );
+    }
+
+    #[test]
+    fn fetch_messages_for_lexical_rebuild_skips_extra_json() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let agent = Agent {
+            id: None,
+            slug: "codex".into(),
+            name: "Codex".into(),
+            version: Some("0.2.3".into()),
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).unwrap();
+
+        let conversation = Conversation {
+            id: None,
+            agent_slug: "codex".into(),
+            workspace: Some(PathBuf::from("/tmp/workspace")),
+            external_id: Some("lexical-rebuild-test".into()),
+            title: Some("Lexical rebuild".into()),
+            source_path: PathBuf::from("/tmp/lexical-rebuild.jsonl"),
+            started_at: Some(1_700_000_000_000),
+            ended_at: Some(1_700_000_000_100),
+            approx_tokens: Some(42),
+            metadata_json: serde_json::Value::Null,
+            messages: vec![Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::Agent,
+                author: Some("assistant".into()),
+                created_at: Some(1_700_000_000_050),
+                content: "indexed text".into(),
+                extra_json: serde_json::json!({
+                    "usage": { "total_tokens": 1234 },
+                    "irrelevant_blob": "still preserved in canonical storage"
+                }),
+                snippets: Vec::new(),
+            }],
+            source_id: LOCAL_SOURCE_ID.into(),
+            origin_host: None,
+        };
+
+        let inserted = storage
+            .insert_conversation_tree(agent_id, None, &conversation)
+            .unwrap();
+        let conversation_id = inserted.conversation_id;
+
+        let stored = storage.fetch_messages(conversation_id).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert!(!stored[0].extra_json.is_null());
+
+        let lexical = storage
+            .fetch_messages_for_lexical_rebuild(conversation_id)
+            .unwrap();
+        assert_eq!(lexical.len(), 1);
+        assert_eq!(lexical[0].content, "indexed text");
+        assert_eq!(lexical[0].author.as_deref(), Some("assistant"));
+        assert!(lexical[0].extra_json.is_null());
+    }
+
+    #[test]
     fn discover_historical_database_bundles_prefers_larger_archives_first() {
         let dir = TempDir::new().unwrap();
         let canonical_db = dir.path().join("agent_search.db");
@@ -9859,6 +10508,25 @@ mod tests {
     fn msgpack_returns_none_for_empty_object() {
         let value = serde_json::json!({});
         assert!(serialize_json_to_msgpack(&value).is_none());
+    }
+
+    #[test]
+    fn parse_historical_json_column_preserves_large_payloads_as_raw_json() {
+        let raw = format!("{{\"blob\":\"{}\"}}", "x".repeat(1_000_000));
+
+        let value = parse_historical_json_column(Some(raw.clone()));
+
+        assert_eq!(historical_raw_json(&value), Some(raw.as_str()));
+        assert_eq!(json_value_size_hint(&value), raw.len());
+    }
+
+    #[test]
+    fn parse_historical_json_column_preserves_small_payloads_as_raw_json() {
+        let raw = String::from("{\"ok\":true,\"n\":1}");
+
+        let value = parse_historical_json_column(Some(raw.clone()));
+
+        assert_eq!(historical_raw_json(&value), Some(raw.as_str()));
     }
 
     #[test]

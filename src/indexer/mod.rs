@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, bounded};
@@ -31,7 +31,10 @@ use crate::ensure_cass_origin;
 use crate::sources::config::{Platform, SourcesConfig};
 use crate::sources::provenance::{LOCAL_SOURCE_ID, Origin, Source, SourceKind};
 use crate::sources::sync::path_to_safe_dirname;
-use crate::storage::sqlite::{FrankenStorage, HistoricalSalvageOutcome, MigrationError};
+use crate::storage::sqlite::{
+    FrankenStorage, HistoricalSalvageOutcome, MigrationError,
+    seed_canonical_from_best_historical_bundle,
+};
 use semantic::{EmbeddingInput, SemanticIndexer};
 
 #[cfg(test)]
@@ -1419,7 +1422,9 @@ pub fn run_index(
     let _progress_reset = RunIndexProgressReset::new(opts.progress.clone());
     set_progress_last_error(opts.progress.as_ref(), None);
 
-    let (storage, storage_rebuilt) = open_storage_for_index(&opts.db_path)?;
+    let (storage, storage_rebuilt, opened_fresh_for_full) =
+        open_storage_for_index(&opts.db_path, opts.full)?;
+    let mut storage = storage;
     let index_path = index_dir(&opts.data_dir)?;
 
     // Detect if we are rebuilding due to missing meta/schema mismatch/index corruption.
@@ -1469,8 +1474,8 @@ pub fn run_index(
     }
     let mut t_index = TantivyIndex::open_or_create(&index_path)?;
 
-    if opts.full {
-        reset_storage(&storage, &opts.db_path)?;
+    if opts.full && !opened_fresh_for_full {
+        storage = reopen_fresh_storage_for_full_rebuild(storage, &opts.db_path)?;
         t_index.delete_all()?;
         t_index.commit()?;
     }
@@ -1480,7 +1485,17 @@ pub fn run_index(
     let should_salvage_historical =
         opts.full || storage_rebuilt || canonical_sessions_before_salvage == 0;
     let historical_salvage: HistoricalSalvageOutcome = if should_salvage_historical {
-        storage.salvage_historical_databases(&opts.db_path)?
+        let mut outcome = HistoricalSalvageOutcome::default();
+        if canonical_sessions_before_salvage == 0 {
+            let (reopened_storage, seed_outcome) =
+                maybe_seed_empty_canonical_from_historical_bundle(storage, &opts.db_path)?;
+            storage = reopened_storage;
+            if let Some(seed_outcome) = seed_outcome {
+                outcome.accumulate(seed_outcome);
+            }
+        }
+        outcome.accumulate(storage.salvage_historical_databases(&opts.db_path)?);
+        outcome
     } else {
         HistoricalSalvageOutcome::default()
     };
@@ -1916,9 +1931,9 @@ fn incremental_semantic_embed(
 ///
 /// Returns `(storage, rebuilt)` where `rebuilt=true` means we detected an
 /// incompatible/future schema, backed up + recreated the DB, and reopened it.
-fn open_storage_for_index(db_path: &Path) -> Result<(FrankenStorage, bool)> {
+fn open_storage_for_index(db_path: &Path, allow_full_recovery: bool) -> Result<(FrankenStorage, bool, bool)> {
     match FrankenStorage::open_or_rebuild(db_path) {
-        Ok(storage) => Ok((storage, false)),
+        Ok(storage) => Ok((storage, false, false)),
         Err(MigrationError::RebuildRequired {
             reason,
             backup_path,
@@ -1930,11 +1945,179 @@ fn open_storage_for_index(db_path: &Path) -> Result<(FrankenStorage, bool)> {
                 "storage schema incompatible; rebuilt database before indexing"
             );
             let storage = FrankenStorage::open(db_path)?;
-            Ok((storage, true))
+            Ok((storage, true, true))
         }
-        Err(err) => Err(anyhow::anyhow!(
-            "failed to open frankensqlite storage: {err}"
-        )),
+        Err(err) if allow_full_recovery => {
+            tracing::warn!(
+                db_path = %db_path.display(),
+                error = %err,
+                "full rebuild storage open failed; backing up and reopening with a fresh canonical db"
+            );
+            let backup_path = crate::storage::sqlite::create_backup(db_path)
+                .map_err(|backup_err| anyhow::anyhow!("backing up busy/corrupt canonical db before full rebuild: {backup_err}"))?;
+            if db_path.exists() {
+                crate::storage::sqlite::remove_database_files(db_path).with_context(|| {
+                    format!(
+                        "removing busy/corrupt canonical db bundle before full rebuild: {}",
+                        db_path.display()
+                    )
+                })?;
+            }
+            if let Some(path) = backup_path {
+                tracing::info!(
+                    db_path = %db_path.display(),
+                    backup_path = %path.display(),
+                    "backed up canonical db after full-rebuild open failure"
+                );
+            }
+            let storage = FrankenStorage::open(db_path)?;
+            Ok((storage, true, true))
+        }
+        Err(err) => Err(anyhow::anyhow!("failed to open frankensqlite storage: {err}")),
+    }
+}
+
+fn reopen_fresh_storage_for_full_rebuild(
+    storage: FrankenStorage,
+    db_path: &Path,
+) -> Result<FrankenStorage> {
+    drop(storage);
+
+    let backup_path = crate::storage::sqlite::create_backup(db_path)
+        .map_err(|err| anyhow::anyhow!("backing up canonical db before full rebuild: {err}"))?;
+    if db_path.exists() {
+        crate::storage::sqlite::remove_database_files(db_path).with_context(|| {
+            format!(
+                "removing existing canonical db bundle before full rebuild: {}",
+                db_path.display()
+            )
+        })?;
+    }
+
+    if let Some(path) = backup_path {
+        tracing::info!(
+            db_path = %db_path.display(),
+            backup_path = %path.display(),
+            "replaced canonical db with a fresh empty database for full rebuild"
+        );
+    }
+
+    FrankenStorage::open(db_path).with_context(|| {
+        format!(
+            "opening fresh canonical db for full rebuild: {}",
+            db_path.display()
+        )
+    })
+}
+
+fn quarantine_failed_seed_bundle(db_path: &Path) -> Result<Option<PathBuf>> {
+    if !db_path.exists() {
+        return Ok(None);
+    }
+
+    let Some(parent) = db_path.parent() else {
+        return Ok(None);
+    };
+    let db_name = db_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("agent_search.db");
+    let backups_dir = parent.join("backups");
+    fs::create_dir_all(&backups_dir).with_context(|| {
+        format!(
+            "creating backups directory for failed baseline seed bundle: {}",
+            backups_dir.display()
+        )
+    })?;
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let backup_root = backups_dir.join(format!(
+        "{db_name}.{timestamp}.failed-baseline-seed.bak"
+    ));
+
+    for suffix in ["", "-wal", "-shm"] {
+        let src = if suffix.is_empty() {
+            db_path.to_path_buf()
+        } else {
+            db_path.with_file_name(format!("{db_name}{suffix}"))
+        };
+        if !src.exists() {
+            continue;
+        }
+        let dest = if suffix.is_empty() {
+            backup_root.clone()
+        } else {
+            backup_root.with_file_name(format!(
+                "{}{}",
+                backup_root
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("agent_search.db.failed-baseline-seed.bak"),
+                suffix
+            ))
+        };
+        fs::rename(&src, &dest).with_context(|| {
+            format!(
+                "moving failed baseline seed bundle component {} -> {}",
+                src.display(),
+                dest.display()
+            )
+        })?;
+    }
+
+    Ok(Some(backup_root))
+}
+
+fn maybe_seed_empty_canonical_from_historical_bundle(
+    storage: FrankenStorage,
+    db_path: &Path,
+) -> Result<(FrankenStorage, Option<HistoricalSalvageOutcome>)> {
+    let conversation_count = storage.count_sessions_in_range(None, None, None, None)?.0;
+    if conversation_count > 0 {
+        return Ok((storage, None));
+    }
+
+    drop(storage);
+    match seed_canonical_from_best_historical_bundle(db_path) {
+        Ok(result) => {
+            let reopened = FrankenStorage::open(db_path).with_context(|| {
+                format!(
+                    "reopening canonical database after baseline historical seed attempt: {}",
+                    db_path.display()
+                )
+            })?;
+            Ok((reopened, result))
+        }
+        Err(err) => {
+            tracing::warn!(
+                db_path = %db_path.display(),
+                error = %err,
+                "baseline historical seed import failed; falling back to incremental salvage"
+            );
+            let failed_seed_backup = quarantine_failed_seed_bundle(db_path).with_context(|| {
+                format!(
+                    "quarantining failed baseline seed bundle before incremental salvage: {}",
+                    db_path.display()
+                )
+            })?;
+            if let Some(path) = failed_seed_backup {
+                tracing::info!(
+                    db_path = %db_path.display(),
+                    backup_path = %path.display(),
+                    "moved failed baseline seed bundle aside before incremental salvage fallback"
+                );
+            }
+            let reopened = FrankenStorage::open(db_path).with_context(|| {
+                format!(
+                    "recreating fresh canonical database after failed baseline seed import: {}",
+                    db_path.display()
+                )
+            })?;
+            Ok((reopened, None))
+        }
     }
 }
 
@@ -1992,7 +2175,7 @@ pub(crate) fn rebuild_tantivy_from_db(
             let Some(conv_id) = conv.id else {
                 continue;
             };
-            let messages = storage.fetch_messages(conv_id)?;
+            let messages = storage.fetch_messages_for_lexical_rebuild(conv_id)?;
 
             let mut metadata = conv.metadata_json.clone();
             let (kind, host_label) =
@@ -4629,8 +4812,10 @@ mod tests {
                 .unwrap();
         }
 
-        let (storage, rebuilt) = open_storage_for_index(&db_path).unwrap();
+        let (storage, rebuilt, opened_fresh_for_full) =
+            open_storage_for_index(&db_path, false).unwrap();
         assert!(rebuilt, "newer schema should trigger rebuild recovery");
+        assert!(opened_fresh_for_full);
         assert_eq!(
             storage.schema_version().unwrap(),
             crate::storage::sqlite::CURRENT_SCHEMA_VERSION
@@ -4780,6 +4965,83 @@ mod tests {
         assert_eq!(
             storage.schema_version().unwrap(),
             crate::storage::sqlite::CURRENT_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn reopen_fresh_storage_for_full_rebuild_preserves_backup_and_starts_empty() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("db.sqlite");
+        let storage = FrankenStorage::open(&db_path).unwrap();
+        ensure_fts_schema(&storage);
+
+        let agent = crate::model::types::Agent {
+            id: None,
+            slug: "tester".into(),
+            name: "Tester".into(),
+            version: None,
+            kind: crate::model::types::AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).unwrap();
+        let conv = norm_conv(Some("c1"), vec![norm_msg(0, 10)]);
+        storage
+            .insert_conversation_tree(
+                agent_id,
+                None,
+                &crate::model::types::Conversation {
+                    id: None,
+                    agent_slug: conv.agent_slug.clone(),
+                    workspace: conv.workspace.clone(),
+                    external_id: conv.external_id.clone(),
+                    title: conv.title.clone(),
+                    source_path: conv.source_path.clone(),
+                    started_at: conv.started_at,
+                    ended_at: conv.ended_at,
+                    approx_tokens: None,
+                    metadata_json: conv.metadata.clone(),
+                    messages: conv
+                        .messages
+                        .iter()
+                        .map(|m| crate::model::types::Message {
+                            id: None,
+                            idx: m.idx,
+                            role: crate::model::types::MessageRole::User,
+                            author: m.author.clone(),
+                            created_at: m.created_at,
+                            content: m.content.clone(),
+                            extra_json: m.extra.clone(),
+                            snippets: Vec::new(),
+                        })
+                        .collect(),
+                    source_id: "local".to_string(),
+                    origin_host: None,
+                },
+            )
+            .unwrap();
+
+        let reopened = reopen_fresh_storage_for_full_rebuild(storage, &db_path).unwrap();
+        let msg_count: i64 = reopened
+            .raw()
+            .query_row_map("SELECT COUNT(*) FROM messages", &[] as &[ParamValue], |r| {
+                r.get_typed(0)
+            })
+            .unwrap();
+        assert_eq!(msg_count, 0);
+
+        let backup_count = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .map(|name| name.starts_with("db.sqlite.backup."))
+                    .unwrap_or(false)
+            })
+            .count();
+        assert!(
+            backup_count >= 1,
+            "expected preserved backup before opening a fresh full-rebuild db"
         );
     }
 
