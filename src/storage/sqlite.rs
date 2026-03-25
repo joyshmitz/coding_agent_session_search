@@ -1269,6 +1269,20 @@ fn parse_json_column(value: Option<String>) -> serde_json::Value {
         .unwrap_or(serde_json::Value::Null)
 }
 
+fn json_value_size_hint(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Null => 0,
+        other => serde_json::to_string(other).map(|raw| raw.len()).unwrap_or(0),
+    }
+}
+
+fn message_payload_size_hint(message: &Message) -> usize {
+    message
+        .content
+        .len()
+        .saturating_add(json_value_size_hint(&message.extra_json))
+}
+
 fn is_backup_root_name(name: &str, prefix: &str) -> bool {
     name.starts_with(prefix) && !name.ends_with("-wal") && !name.ends_with("-shm")
 }
@@ -3261,7 +3275,10 @@ impl FrankenStorage {
             }
 
             let conversation_message_count = messages.len();
-            let conversation_chars = messages.iter().map(|msg| msg.content.len()).sum::<usize>();
+            let conversation_chars = messages
+                .iter()
+                .map(message_payload_size_hint)
+                .sum::<usize>();
 
             let conversation = Conversation {
                 id: None,
