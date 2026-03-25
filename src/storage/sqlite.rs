@@ -4976,6 +4976,10 @@ fn franken_update_daily_stats_batched_in_tx(
 }
 
 /// Batch insert token_usage rows within a frankensqlite transaction.
+///
+/// Uses row-wise INSERT OR IGNORE to avoid the frankensqlite limitation where
+/// multi-row VALUES lists fall through to INSERT...SELECT, which rejects
+/// UPSERT/OR IGNORE conflict clauses.
 fn franken_insert_token_usage_batched_in_tx(
     tx: &FrankenTransaction<'_>,
     entries: &[TokenUsageEntry],
@@ -4984,17 +4988,37 @@ fn franken_insert_token_usage_batched_in_tx(
         return Ok(0);
     }
 
-    // 24 columns per row; SQLite limit ~999 params → batch ~41 rows, use 35 for safety
-    const BATCH_SIZE: usize = 35;
     let mut total_inserted = 0;
 
-    for chunk in entries.chunks(BATCH_SIZE) {
-        let placeholders: String = (0..chunk.len())
-            .map(|_| "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-            .collect::<Vec<_>>()
-            .join(", ");
+    for e in entries {
+        let mut params_vec: Vec<ParamValue> = Vec::with_capacity(24);
+        params_vec.push(ParamValue::from(e.message_id));
+        params_vec.push(ParamValue::from(e.conversation_id));
+        params_vec.push(ParamValue::from(e.agent_id));
+        params_vec.push(ParamValue::from(e.workspace_id));
+        params_vec.push(ParamValue::from(e.source_id.clone()));
+        params_vec.push(ParamValue::from(e.timestamp_ms));
+        params_vec.push(ParamValue::from(e.day_id));
+        params_vec.push(ParamValue::from(e.model_name.clone()));
+        params_vec.push(ParamValue::from(e.model_family.clone()));
+        params_vec.push(ParamValue::from(e.model_tier.clone()));
+        params_vec.push(ParamValue::from(e.service_tier.clone()));
+        params_vec.push(ParamValue::from(e.provider.clone()));
+        params_vec.push(ParamValue::from(e.input_tokens));
+        params_vec.push(ParamValue::from(e.output_tokens));
+        params_vec.push(ParamValue::from(e.cache_read_tokens));
+        params_vec.push(ParamValue::from(e.cache_creation_tokens));
+        params_vec.push(ParamValue::from(e.thinking_tokens));
+        params_vec.push(ParamValue::from(e.total_tokens));
+        params_vec.push(ParamValue::from(e.estimated_cost_usd));
+        params_vec.push(ParamValue::from(e.role.clone()));
+        params_vec.push(ParamValue::from(e.content_chars));
+        params_vec.push(ParamValue::from(e.has_tool_calls as i64));
+        params_vec.push(ParamValue::from(e.tool_call_count as i64));
+        params_vec.push(ParamValue::from(e.data_source.clone()));
 
-        let sql = format!(
+        let values = param_slice_to_values(&params_vec);
+        total_inserted += tx.execute_with_params(
             "INSERT OR IGNORE INTO token_usage (
                 message_id, conversation_id, agent_id, workspace_id, source_id,
                 timestamp_ms, day_id,
@@ -5003,40 +5027,9 @@ fn franken_insert_token_usage_batched_in_tx(
                 thinking_tokens, total_tokens, estimated_cost_usd,
                 role, content_chars, has_tool_calls, tool_call_count, data_source
             )
-            VALUES {}",
-            placeholders
-        );
-
-        let mut params_vec: Vec<ParamValue> = Vec::with_capacity(chunk.len() * 24);
-        for e in chunk {
-            params_vec.push(ParamValue::from(e.message_id));
-            params_vec.push(ParamValue::from(e.conversation_id));
-            params_vec.push(ParamValue::from(e.agent_id));
-            params_vec.push(ParamValue::from(e.workspace_id));
-            params_vec.push(ParamValue::from(e.source_id.clone()));
-            params_vec.push(ParamValue::from(e.timestamp_ms));
-            params_vec.push(ParamValue::from(e.day_id));
-            params_vec.push(ParamValue::from(e.model_name.clone()));
-            params_vec.push(ParamValue::from(e.model_family.clone()));
-            params_vec.push(ParamValue::from(e.model_tier.clone()));
-            params_vec.push(ParamValue::from(e.service_tier.clone()));
-            params_vec.push(ParamValue::from(e.provider.clone()));
-            params_vec.push(ParamValue::from(e.input_tokens));
-            params_vec.push(ParamValue::from(e.output_tokens));
-            params_vec.push(ParamValue::from(e.cache_read_tokens));
-            params_vec.push(ParamValue::from(e.cache_creation_tokens));
-            params_vec.push(ParamValue::from(e.thinking_tokens));
-            params_vec.push(ParamValue::from(e.total_tokens));
-            params_vec.push(ParamValue::from(e.estimated_cost_usd));
-            params_vec.push(ParamValue::from(e.role.clone()));
-            params_vec.push(ParamValue::from(e.content_chars));
-            params_vec.push(ParamValue::from(e.has_tool_calls as i64));
-            params_vec.push(ParamValue::from(e.tool_call_count as i64));
-            params_vec.push(ParamValue::from(e.data_source.clone()));
-        }
-
-        let values = param_slice_to_values(&params_vec);
-        total_inserted += tx.execute_with_params(&sql, &values)?;
+            VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
+            &values,
+        )?;
     }
 
     Ok(total_inserted)
@@ -5109,6 +5102,10 @@ fn franken_update_token_daily_stats_batched_in_tx(
 }
 
 /// Batch insert message_metrics rows within a frankensqlite transaction.
+///
+/// Uses row-wise INSERT OR IGNORE to avoid the frankensqlite limitation where
+/// multi-row VALUES lists fall through to INSERT...SELECT, which rejects
+/// UPSERT/OR IGNORE conflict clauses.
 fn franken_insert_message_metrics_batched_in_tx(
     tx: &FrankenTransaction<'_>,
     entries: &[MessageMetricsEntry],
@@ -5117,17 +5114,37 @@ fn franken_insert_message_metrics_batched_in_tx(
         return Ok(0);
     }
 
-    // 24 columns per row → ~41 rows max, use 30 for safety
-    const BATCH_SIZE: usize = 30;
     let mut total_inserted = 0;
 
-    for chunk in entries.chunks(BATCH_SIZE) {
-        let placeholders: String = (0..chunk.len())
-            .map(|_| "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
-            .collect::<Vec<_>>()
-            .join(", ");
+    for e in entries {
+        let mut params_vec: Vec<ParamValue> = Vec::with_capacity(24);
+        params_vec.push(ParamValue::from(e.message_id));
+        params_vec.push(ParamValue::from(e.created_at_ms));
+        params_vec.push(ParamValue::from(e.hour_id));
+        params_vec.push(ParamValue::from(e.day_id));
+        params_vec.push(ParamValue::from(e.agent_slug.clone()));
+        params_vec.push(ParamValue::from(e.workspace_id));
+        params_vec.push(ParamValue::from(e.source_id.clone()));
+        params_vec.push(ParamValue::from(e.role.clone()));
+        params_vec.push(ParamValue::from(e.content_chars));
+        params_vec.push(ParamValue::from(e.content_tokens_est));
+        params_vec.push(ParamValue::from(e.model_name.clone()));
+        params_vec.push(ParamValue::from(e.model_family.clone()));
+        params_vec.push(ParamValue::from(e.model_tier.clone()));
+        params_vec.push(ParamValue::from(e.provider.clone()));
+        params_vec.push(ParamValue::from(e.api_input_tokens));
+        params_vec.push(ParamValue::from(e.api_output_tokens));
+        params_vec.push(ParamValue::from(e.api_cache_read_tokens));
+        params_vec.push(ParamValue::from(e.api_cache_creation_tokens));
+        params_vec.push(ParamValue::from(e.api_thinking_tokens));
+        params_vec.push(ParamValue::from(e.api_service_tier.clone()));
+        params_vec.push(ParamValue::from(e.api_data_source.clone()));
+        params_vec.push(ParamValue::from(e.tool_call_count));
+        params_vec.push(ParamValue::from(e.has_tool_calls as i64));
+        params_vec.push(ParamValue::from(e.has_plan as i64));
 
-        let sql = format!(
+        let values = param_slice_to_values(&params_vec);
+        total_inserted += tx.execute_with_params(
             "INSERT OR IGNORE INTO message_metrics (
                 message_id, created_at_ms, hour_id, day_id,
                 agent_slug, workspace_id, source_id, role,
@@ -5138,40 +5155,9 @@ fn franken_insert_message_metrics_batched_in_tx(
                 api_service_tier, api_data_source,
                 tool_call_count, has_tool_calls, has_plan
             )
-            VALUES {}",
-            placeholders
-        );
-
-        let mut params_vec: Vec<ParamValue> = Vec::with_capacity(chunk.len() * 24);
-        for e in chunk {
-            params_vec.push(ParamValue::from(e.message_id));
-            params_vec.push(ParamValue::from(e.created_at_ms));
-            params_vec.push(ParamValue::from(e.hour_id));
-            params_vec.push(ParamValue::from(e.day_id));
-            params_vec.push(ParamValue::from(e.agent_slug.clone()));
-            params_vec.push(ParamValue::from(e.workspace_id));
-            params_vec.push(ParamValue::from(e.source_id.clone()));
-            params_vec.push(ParamValue::from(e.role.clone()));
-            params_vec.push(ParamValue::from(e.content_chars));
-            params_vec.push(ParamValue::from(e.content_tokens_est));
-            params_vec.push(ParamValue::from(e.model_name.clone()));
-            params_vec.push(ParamValue::from(e.model_family.clone()));
-            params_vec.push(ParamValue::from(e.model_tier.clone()));
-            params_vec.push(ParamValue::from(e.provider.clone()));
-            params_vec.push(ParamValue::from(e.api_input_tokens));
-            params_vec.push(ParamValue::from(e.api_output_tokens));
-            params_vec.push(ParamValue::from(e.api_cache_read_tokens));
-            params_vec.push(ParamValue::from(e.api_cache_creation_tokens));
-            params_vec.push(ParamValue::from(e.api_thinking_tokens));
-            params_vec.push(ParamValue::from(e.api_service_tier.clone()));
-            params_vec.push(ParamValue::from(e.api_data_source.clone()));
-            params_vec.push(ParamValue::from(e.tool_call_count));
-            params_vec.push(ParamValue::from(e.has_tool_calls as i64));
-            params_vec.push(ParamValue::from(e.has_plan as i64));
-        }
-
-        let values = param_slice_to_values(&params_vec);
-        total_inserted += tx.execute_with_params(&sql, &values)?;
+            VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
+            &values,
+        )?;
     }
 
     Ok(total_inserted)
@@ -9325,6 +9311,26 @@ mod tests {
         let second = storage.salvage_historical_databases(&canonical_db).unwrap();
         assert_eq!(second.bundles_imported, 0);
         assert_eq!(second.messages_imported, 0);
+    }
+
+    #[test]
+    fn discover_historical_database_bundles_prefers_larger_archives_first() {
+        let dir = TempDir::new().unwrap();
+        let canonical_db = dir.path().join("agent_search.db");
+        fs::write(&canonical_db, b"canonical").unwrap();
+
+        let smaller = dir.path().join("agent_search.corrupt.small");
+        fs::write(&smaller, vec![0_u8; 32]).unwrap();
+
+        let backups_dir = dir.path().join("backups");
+        fs::create_dir_all(&backups_dir).unwrap();
+        let larger = backups_dir.join("agent_search.db.20260322T020200.bak");
+        fs::write(&larger, vec![0_u8; 128]).unwrap();
+
+        let bundles = discover_historical_database_bundles(&canonical_db);
+        let ordered_paths: Vec<PathBuf> = bundles.into_iter().map(|bundle| bundle.root_path).collect();
+
+        assert_eq!(ordered_paths, vec![larger, smaller]);
     }
 
     // =========================================================================
