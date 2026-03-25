@@ -1470,7 +1470,7 @@ pub fn run_index(
     let mut t_index = TantivyIndex::open_or_create(&index_path)?;
 
     if opts.full {
-        reset_storage(&storage)?;
+        reset_storage(&storage, &opts.db_path)?;
         t_index.delete_all()?;
         t_index.commit()?;
     }
@@ -2341,9 +2341,11 @@ fn watch_sources<F: Fn(Vec<PathBuf>, &[(ConnectorKind, ScanRoot)], bool)>(
     Ok(())
 }
 
-fn reset_storage(storage: &FrankenStorage) -> Result<()> {
-    // Wrap in transaction to ensure atomic reset - if any DELETE fails,
-    // all changes are rolled back to prevent inconsistent state.
+fn reset_storage(storage: &FrankenStorage, db_path: &Path) -> Result<()> {
+    // Wrap the canonical-table reset in a transaction so partial clears roll back.
+    // The derived FTS table is recreated explicitly afterward because the
+    // frankensqlite writer path does not implement the FTS5 control-column
+    // `delete-all` command used by stock SQLite.
     storage.raw().execute_batch(
         "BEGIN TRANSACTION;
          DELETE FROM usage_models_daily;
@@ -2352,33 +2354,8 @@ fn reset_storage(storage: &FrankenStorage) -> Result<()> {
          DELETE FROM token_daily_stats;
          DELETE FROM daily_stats;
          DELETE FROM message_metrics;
-         DELETE FROM token_usage;",
-    )?;
-
-    if let Err(err) = storage
-        .raw()
-        .execute(crate::storage::sqlite::FTS5_DELETE_ALL_SQL)
-    {
-        use frankensqlite::compat::{ConnectionExt as _, RowExt as _};
-
-        let message_count: i64 = storage
-            .raw()
-            .query_row_map("SELECT COUNT(*) FROM messages", &[], |r| r.get_typed(0))
-            .unwrap_or(0);
-
-        if message_count > 0 {
-            let _ = storage.raw().execute_batch("ROLLBACK;");
-            return Err(err.into());
-        }
-
-        tracing::warn!(
-            error = %err,
-            "skipping empty-database FTS reset because the table is not yet resettable on this connection"
-        );
-    }
-
-    storage.raw().execute_batch(
-        "DELETE FROM snippets;
+         DELETE FROM token_usage;
+         DELETE FROM snippets;
          DELETE FROM messages;
          DELETE FROM conversations;
          DELETE FROM agents;
@@ -2388,6 +2365,9 @@ fn reset_storage(storage: &FrankenStorage) -> Result<()> {
          DELETE FROM meta WHERE key = 'last_scan_ts';
          COMMIT;",
     )?;
+    let _ = storage.raw().execute_batch("DROP TABLE IF EXISTS fts_messages;");
+    crate::storage::sqlite::materialize_fresh_fts_schema_via_rusqlite(db_path)?;
+    crate::storage::sqlite::register_fts5_on_connection(storage.raw())?;
     Ok(())
 }
 
@@ -4761,7 +4741,7 @@ mod tests {
             )
             .unwrap();
 
-        reset_storage(&storage).unwrap();
+        reset_storage(&storage, &db_path).unwrap();
 
         let msg_count: i64 = storage
             .raw()
@@ -4788,6 +4768,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(usage_daily_count, 0);
+        let fts_count: i64 = storage
+            .raw()
+            .query_row_map(
+                "SELECT COUNT(*) FROM fts_messages",
+                &[] as &[ParamValue],
+                |r| r.get_typed(0),
+            )
+            .unwrap();
+        assert_eq!(fts_count, 0, "reset should recreate an empty FTS table");
         assert_eq!(
             storage.schema_version().unwrap(),
             crate::storage::sqlite::CURRENT_SCHEMA_VERSION

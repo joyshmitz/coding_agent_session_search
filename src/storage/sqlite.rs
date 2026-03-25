@@ -13,6 +13,7 @@ use frankensqlite::{
     },
     migrate::MigrationRunner,
 };
+use rusqlite::OptionalExtension as RusqliteOptionalExtension;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
@@ -631,7 +632,7 @@ pub(crate) fn rebuild_fts_on_connection(conn: &FrankenConnection) -> Result<()> 
     result
 }
 
-fn materialize_fresh_fts_schema_via_rusqlite(db_path: &Path) -> Result<()> {
+pub(crate) fn materialize_fresh_fts_schema_via_rusqlite(db_path: &Path) -> Result<()> {
     {
         let conn = rusqlite::Connection::open(db_path).with_context(|| {
             format!(
@@ -852,6 +853,7 @@ pub(crate) struct HistoricalDatabaseBundle {
     root_path: PathBuf,
     total_bytes: u64,
     modified_at_ms: i64,
+    supports_direct_readonly: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -1000,7 +1002,29 @@ fn historical_bundle_root_paths(db_path: &Path) -> Vec<PathBuf> {
         }
     }
 
+    push_named_database_children(&mut roots, db_path, &parent.join("repair-lab"), db_name);
+    push_named_database_children(&mut roots, db_path, &parent.join("snapshots"), db_name);
+
     roots
+}
+
+fn push_named_database_children(
+    roots: &mut Vec<PathBuf>,
+    canonical_db_path: &Path,
+    dir: &Path,
+    db_name: &str,
+) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let candidate = entry.path().join(db_name);
+            if candidate == canonical_db_path {
+                continue;
+            }
+            if candidate.exists() && !roots.iter().any(|existing| existing == &candidate) {
+                roots.push(candidate);
+            }
+        }
+    }
 }
 
 fn file_mtime_ms(path: &Path) -> i64 {
@@ -1030,6 +1054,7 @@ pub(crate) fn discover_historical_database_bundles(
         .map(|root_path| HistoricalDatabaseBundle {
             modified_at_ms: file_mtime_ms(&root_path),
             total_bytes: bundle_total_bytes(&root_path),
+            supports_direct_readonly: historical_bundle_supports_direct_readonly(&root_path),
             root_path,
         })
         .filter(|bundle| bundle.total_bytes > 0)
@@ -1037,12 +1062,50 @@ pub(crate) fn discover_historical_database_bundles(
 
     bundles.sort_by(|left, right| {
         right
-            .total_bytes
-            .cmp(&left.total_bytes)
+            .supports_direct_readonly
+            .cmp(&left.supports_direct_readonly)
+            .then_with(|| right.total_bytes.cmp(&left.total_bytes))
             .then_with(|| right.modified_at_ms.cmp(&left.modified_at_ms))
             .then_with(|| right.root_path.cmp(&left.root_path))
     });
     bundles
+}
+
+fn historical_bundle_supports_direct_readonly(root_path: &Path) -> bool {
+    open_historical_bundle_readonly(root_path)
+        .and_then(|conn| historical_bundle_has_queryable_core_tables(&conn))
+        .is_ok()
+}
+
+fn historical_table_exists(conn: &rusqlite::Connection, table: &str) -> Result<bool> {
+    let found: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",
+            [table],
+            |row| row.get(0),
+        )
+        .optional()
+        .with_context(|| format!("checking for historical table {table}"))?;
+    Ok(found.is_some())
+}
+
+fn probe_historical_table_reads(conn: &rusqlite::Connection, table: &str) -> Result<()> {
+    if !historical_table_exists(conn, table)? {
+        return Err(anyhow!("historical database missing required table {table}"));
+    }
+
+    let sql = format!("SELECT rowid FROM {table} LIMIT 1");
+    let _: Option<i64> = conn
+        .query_row(&sql, [], |row| row.get(0))
+        .optional()
+        .with_context(|| format!("probing rows from historical table {table}"))?;
+    Ok(())
+}
+
+fn historical_bundle_has_queryable_core_tables(conn: &rusqlite::Connection) -> Result<()> {
+    probe_historical_table_reads(conn, "conversations")?;
+    probe_historical_table_reads(conn, "messages")?;
+    Ok(())
 }
 
 fn open_historical_bundle_readonly(root_path: &Path) -> Result<rusqlite::Connection> {
@@ -1057,16 +1120,6 @@ fn open_historical_bundle_readonly(root_path: &Path) -> Result<rusqlite::Connect
     conn.busy_timeout(Duration::from_secs(30))
         .with_context(|| format!("configuring busy_timeout for {}", root_path.display()))?;
     Ok(conn)
-}
-
-fn historical_bundle_has_queryable_core_tables(conn: &rusqlite::Connection) -> Result<()> {
-    let _: i64 = conn
-        .query_row("SELECT COUNT(*) FROM conversations", [], |row| row.get(0))
-        .context("counting conversations in historical database")?;
-    let _: i64 = conn
-        .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
-        .context("counting messages in historical database")?;
-    Ok(())
 }
 
 fn is_recoverable_insert_line(line: &str) -> bool {
@@ -3108,6 +3161,10 @@ impl FrankenStorage {
         &self,
         source_conn: &rusqlite::Connection,
     ) -> Result<(usize, usize)> {
+        const HISTORICAL_IMPORT_BATCH_CONVERSATIONS: usize = 32;
+        const HISTORICAL_IMPORT_BATCH_MESSAGES: usize = 4_096;
+        const HISTORICAL_IMPORT_BATCH_CHARS: usize = 3_000_000;
+
         let mut conv_stmt = source_conn.prepare(
             "SELECT
                 c.id,
@@ -3127,10 +3184,47 @@ impl FrankenStorage {
              LEFT JOIN workspaces w ON c.workspace_id = w.id
              ORDER BY c.id",
         )?;
+        let mut message_stmt = source_conn.prepare(
+            "SELECT idx, role, author, created_at, content, extra_json
+             FROM messages
+             WHERE conversation_id = ?1
+             ORDER BY idx",
+        )?;
 
         let mut rows = conv_stmt.query([])?;
         let mut imported_conversations = 0usize;
         let mut imported_messages = 0usize;
+        let mut pending_batch: Vec<(i64, Option<i64>, Conversation)> = Vec::new();
+        let mut pending_batch_messages = 0usize;
+        let mut pending_batch_chars = 0usize;
+
+        let flush_batch = |storage: &FrankenStorage,
+                           batch: &mut Vec<(i64, Option<i64>, Conversation)>,
+                           pending_messages: &mut usize,
+                           pending_chars: &mut usize,
+                           imported_conversations: &mut usize,
+                           imported_messages: &mut usize|
+         -> Result<()> {
+            if batch.is_empty() {
+                return Ok(());
+            }
+
+            let borrowed_batch: Vec<(i64, Option<i64>, &Conversation)> = batch
+                .iter()
+                .map(|(agent_id, workspace_id, conversation)| (*agent_id, *workspace_id, conversation))
+                .collect();
+            let outcomes = storage.insert_conversations_batched(&borrowed_batch)?;
+            for outcome in outcomes {
+                if !outcome.inserted_indices.is_empty() {
+                    *imported_conversations += 1;
+                    *imported_messages += outcome.inserted_indices.len();
+                }
+            }
+            batch.clear();
+            *pending_messages = 0;
+            *pending_chars = 0;
+            Ok(())
+        };
 
         while let Some(row) = rows.next()? {
             let conversation_row_id: i64 = row.get(0)?;
@@ -3139,12 +3233,6 @@ impl FrankenStorage {
             let source_path: String = row.get(5)?;
             let source_id: Option<String> = row.get(10)?;
 
-            let mut message_stmt = source_conn.prepare(
-                "SELECT idx, role, author, created_at, content, extra_json
-                 FROM messages
-                 WHERE conversation_id = ?1
-                 ORDER BY idx",
-            )?;
             let messages = message_stmt
                 .query_map(rusqlite::params![conversation_row_id], |msg_row| {
                     let role: String = msg_row.get(1)?;
@@ -3171,6 +3259,9 @@ impl FrankenStorage {
             if messages.is_empty() {
                 continue;
             }
+
+            let conversation_message_count = messages.len();
+            let conversation_chars = messages.iter().map(|msg| msg.content.len()).sum::<usize>();
 
             let conversation = Conversation {
                 id: None,
@@ -3220,12 +3311,52 @@ impl FrankenStorage {
                 None
             };
 
-            let outcome = self.insert_conversation_tree(agent_id, workspace_id, &conversation)?;
-            if !outcome.inserted_indices.is_empty() {
-                imported_conversations += 1;
-                imported_messages += outcome.inserted_indices.len();
+            let exceeds_pending_limits = !pending_batch.is_empty()
+                && (pending_batch.len() >= HISTORICAL_IMPORT_BATCH_CONVERSATIONS
+                    || pending_batch_messages
+                        .saturating_add(conversation_message_count)
+                        > HISTORICAL_IMPORT_BATCH_MESSAGES
+                    || pending_batch_chars.saturating_add(conversation_chars)
+                        > HISTORICAL_IMPORT_BATCH_CHARS);
+            if exceeds_pending_limits {
+                flush_batch(
+                    self,
+                    &mut pending_batch,
+                    &mut pending_batch_messages,
+                    &mut pending_batch_chars,
+                    &mut imported_conversations,
+                    &mut imported_messages,
+                )?;
+            }
+
+            pending_batch_messages =
+                pending_batch_messages.saturating_add(conversation_message_count);
+            pending_batch_chars = pending_batch_chars.saturating_add(conversation_chars);
+            pending_batch.push((agent_id, workspace_id, conversation));
+
+            if pending_batch.len() >= HISTORICAL_IMPORT_BATCH_CONVERSATIONS
+                || pending_batch_messages >= HISTORICAL_IMPORT_BATCH_MESSAGES
+                || pending_batch_chars >= HISTORICAL_IMPORT_BATCH_CHARS
+            {
+                flush_batch(
+                    self,
+                    &mut pending_batch,
+                    &mut pending_batch_messages,
+                    &mut pending_batch_chars,
+                    &mut imported_conversations,
+                    &mut imported_messages,
+                )?;
             }
         }
+
+        flush_batch(
+            self,
+            &mut pending_batch,
+            &mut pending_batch_messages,
+            &mut pending_batch_chars,
+            &mut imported_conversations,
+            &mut imported_messages,
+        )?;
 
         Ok((imported_conversations, imported_messages))
     }
@@ -9328,9 +9459,82 @@ mod tests {
         fs::write(&larger, vec![0_u8; 128]).unwrap();
 
         let bundles = discover_historical_database_bundles(&canonical_db);
-        let ordered_paths: Vec<PathBuf> = bundles.into_iter().map(|bundle| bundle.root_path).collect();
+        let ordered_paths: Vec<PathBuf> =
+            bundles.into_iter().map(|bundle| bundle.root_path).collect();
 
         assert_eq!(ordered_paths, vec![larger, smaller]);
+    }
+
+    #[test]
+    fn discover_historical_database_bundles_prefers_queryable_direct_bundles_first() {
+        let dir = TempDir::new().unwrap();
+        let canonical_db = dir.path().join("agent_search.db");
+        fs::write(&canonical_db, b"canonical").unwrap();
+
+        let larger_corrupt = dir.path().join("agent_search.corrupt.20260324_212907");
+        fs::write(&larger_corrupt, vec![0_u8; 4096]).unwrap();
+
+        let backups_dir = dir.path().join("backups");
+        fs::create_dir_all(&backups_dir).unwrap();
+        let smaller_healthy = backups_dir.join("agent_search.db.20260322T020200.bak");
+        let conn = rusqlite::Connection::open(&smaller_healthy).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE conversations (id INTEGER PRIMARY KEY, source_path TEXT);
+             CREATE TABLE messages (
+                 id INTEGER PRIMARY KEY,
+                 conversation_id INTEGER NOT NULL,
+                 idx INTEGER NOT NULL,
+                 content TEXT
+             );
+             INSERT INTO conversations(id, source_path) VALUES (1, '/tmp/history.jsonl');
+             INSERT INTO messages(id, conversation_id, idx, content)
+             VALUES (1, 1, 0, 'seed');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let bundles = discover_historical_database_bundles(&canonical_db);
+        let ordered_paths: Vec<PathBuf> =
+            bundles.iter().map(|bundle| bundle.root_path.clone()).collect();
+
+        assert_eq!(ordered_paths, vec![smaller_healthy, larger_corrupt]);
+        assert!(bundles[0].supports_direct_readonly);
+        assert!(!bundles[1].supports_direct_readonly);
+    }
+
+    #[test]
+    fn discover_historical_database_bundles_includes_repair_lab_and_snapshots_named_roots() {
+        let dir = TempDir::new().unwrap();
+        let canonical_db = dir.path().join("agent_search.db");
+        fs::write(&canonical_db, b"canonical").unwrap();
+
+        let repair_lab_dir = dir.path().join("repair-lab").join("live-copy");
+        fs::create_dir_all(&repair_lab_dir).unwrap();
+        let repair_lab_db = repair_lab_dir.join("agent_search.db");
+        fs::write(&repair_lab_db, vec![0_u8; 96]).unwrap();
+        fs::write(
+            repair_lab_dir.join("agent_search.rebuild-test.db"),
+            vec![0_u8; 192],
+        )
+        .unwrap();
+
+        let snapshots_dir = dir.path().join("snapshots").join("20260324T013201Z");
+        fs::create_dir_all(&snapshots_dir).unwrap();
+        let snapshot_db = snapshots_dir.join("agent_search.db");
+        fs::write(&snapshot_db, vec![0_u8; 64]).unwrap();
+
+        let bundles = discover_historical_database_bundles(&canonical_db);
+        let ordered_paths: Vec<PathBuf> =
+            bundles.into_iter().map(|bundle| bundle.root_path).collect();
+
+        assert!(ordered_paths.contains(&repair_lab_db));
+        assert!(ordered_paths.contains(&snapshot_db));
+        assert!(
+            !ordered_paths
+                .iter()
+                .any(|path| path.file_name().and_then(|name| name.to_str())
+                    == Some("agent_search.rebuild-test.db"))
+        );
     }
 
     // =========================================================================
