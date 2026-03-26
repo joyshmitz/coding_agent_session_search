@@ -47,6 +47,7 @@ pub mod cline;
 pub mod codex;
 pub mod copilot;
 pub mod copilot_cli;
+pub mod crush;
 pub mod cursor;
 pub mod factory;
 pub mod gemini;
