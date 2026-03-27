@@ -578,45 +578,12 @@ pub const FTS5_REGISTER_SQL: &str = "\
 pub const FTS5_DELETE_ALL_SQL: &str =
     "INSERT INTO fts_messages(fts_messages) VALUES('delete-all');";
 
+fn drop_fts_schema_via_rusqlite(conn: &rusqlite::Connection, db_path: &Path) -> Result<()> {
+    conn.execute_batch("DROP TABLE IF EXISTS fts_messages;")
+        .with_context(|| format!("dropping existing FTS schema in {}", db_path.display()))
+}
+
 pub(crate) fn materialize_fresh_fts_schema_via_rusqlite(db_path: &Path) -> Result<()> {
-    {
-        let conn = rusqlite::Connection::open(db_path).with_context(|| {
-            format!(
-                "opening rusqlite db at {} for FTS placeholder cleanup",
-                db_path.display()
-            )
-        })?;
-        conn.execute_batch("PRAGMA busy_timeout = 30000;")
-            .with_context(|| {
-                format!(
-                    "configuring rusqlite busy timeout for {}",
-                    db_path.display()
-                )
-            })?;
-
-        let existing_entries: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'fts_messages%'",
-                [],
-                |row| row.get(0),
-            )
-            .with_context(|| format!("probing fresh FTS schema in {}", db_path.display()))?;
-
-        if existing_entries > 0 {
-            conn.execute_batch(
-                "PRAGMA writable_schema = ON;
-                 DELETE FROM sqlite_master WHERE name LIKE 'fts_messages%';
-                 PRAGMA writable_schema = OFF;",
-            )
-            .with_context(|| {
-                format!(
-                    "removing placeholder FTS schema entries in {}",
-                    db_path.display()
-                )
-            })?;
-        }
-    }
-
     let mut conn = rusqlite::Connection::open(db_path).with_context(|| {
         format!(
             "reopening rusqlite db at {} for FTS materialization",
@@ -630,6 +597,7 @@ pub(crate) fn materialize_fresh_fts_schema_via_rusqlite(db_path: &Path) -> Resul
                 db_path.display()
             )
         })?;
+    drop_fts_schema_via_rusqlite(&conn, db_path)?;
 
     let tx = conn.transaction().with_context(|| {
         format!(
@@ -645,28 +613,6 @@ pub(crate) fn materialize_fresh_fts_schema_via_rusqlite(db_path: &Path) -> Resul
 }
 
 pub(crate) fn rebuild_fts_via_rusqlite(db_path: &Path) -> Result<usize> {
-    {
-        let conn = rusqlite::Connection::open(db_path).with_context(|| {
-            format!(
-                "opening rusqlite db at {} for FTS schema cleanup",
-                db_path.display()
-            )
-        })?;
-        conn.execute_batch(
-            "PRAGMA busy_timeout = 30000;
-             PRAGMA writable_schema = ON;
-             DELETE FROM sqlite_master WHERE name LIKE 'fts_messages%';
-             PRAGMA writable_schema = OFF;
-             PRAGMA wal_checkpoint(TRUNCATE);",
-        )
-        .with_context(|| {
-            format!(
-                "clearing existing FTS schema rows before rebuild in {}",
-                db_path.display()
-            )
-        })?;
-    }
-
     let mut conn = rusqlite::Connection::open(db_path).with_context(|| {
         format!(
             "reopening rusqlite db at {} for FTS rebuild",
@@ -680,6 +626,7 @@ pub(crate) fn rebuild_fts_via_rusqlite(db_path: &Path) -> Result<usize> {
                 db_path.display()
             )
         })?;
+    drop_fts_schema_via_rusqlite(&conn, db_path)?;
 
     let tx = conn.transaction().with_context(|| {
         format!(
@@ -12598,6 +12545,91 @@ mod tests {
             )
             .unwrap();
         assert_eq!(auth_hits, 1);
+    }
+
+    #[test]
+    fn rebuild_fts_via_rusqlite_cleans_duplicate_legacy_schema_rows() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("fts-duplicate-rebuild.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE agents (id INTEGER PRIMARY KEY, slug TEXT NOT NULL UNIQUE);
+             CREATE TABLE workspaces (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE);
+             CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY,
+                agent_id INTEGER,
+                workspace_id INTEGER,
+                title TEXT,
+                source_path TEXT
+             );
+             CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER,
+                idx INTEGER,
+                content TEXT,
+                created_at INTEGER
+             );
+             INSERT INTO agents(id, slug) VALUES(1, 'codex');
+             INSERT INTO workspaces(id, path) VALUES(1, '/ws');
+             INSERT INTO conversations(id, agent_id, workspace_id, title, source_path)
+                 VALUES(1, 1, 1, 'retro', '/tmp/retro.jsonl');
+             INSERT INTO messages(id, conversation_id, idx, content, created_at)
+                 VALUES(7, 1, 0, 'retro investigation', 42);
+             CREATE VIRTUAL TABLE fts_messages USING fts5(
+                 content,
+                 title,
+                 agent,
+                 workspace,
+                 source_path,
+                 created_at UNINDEXED,
+                 message_id UNINDEXED,
+                 tokenize='porter'
+             );
+             INSERT INTO fts_messages(content, title, agent, workspace, source_path, created_at, message_id)
+                 VALUES('retro investigation', 'retro', 'codex', '/ws', '/tmp/retro.jsonl', 42, 7);
+             PRAGMA writable_schema = ON;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sqlite_master(type, name, tbl_name, rootpage, sql)
+             VALUES('table', 'fts_messages', 'fts_messages', 0, ?1)",
+            ["CREATE VIRTUAL TABLE fts_messages USING fts5(content, title, agent, workspace, source_path, created_at UNINDEXED, message_id UNINDEXED, tokenize='porter')"],
+        )
+        .unwrap();
+        conn.execute_batch("PRAGMA writable_schema = OFF;").unwrap();
+        let duplicate_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'fts_messages'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(duplicate_rows, 2);
+        drop(conn);
+
+        let inserted = rebuild_fts_via_rusqlite(&db_path).unwrap();
+        assert_eq!(inserted, 1);
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let schema_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'fts_messages%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            schema_rows, 5,
+            "DROP TABLE should leave one clean FTS schema"
+        );
+        let match_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM fts_messages WHERE fts_messages MATCH 'retro'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(match_count, 1);
     }
 
     // =========================================================================
