@@ -2586,6 +2586,26 @@ pub struct EmbeddingJobRow {
     pub completed_at: Option<String>,
 }
 
+/// Lightweight conversation projection used while rebuilding the lexical index.
+///
+/// This intentionally omits `metadata_json` / `metadata_bin` and other bulky
+/// fields because Tantivy only needs the stable envelope plus provenance
+/// identifiers. Reading full metadata here can force frankensqlite to traverse
+/// large overflow chains before the first lexical checkpoint is committed.
+#[derive(Debug, Clone)]
+pub struct LexicalRebuildConversationRow {
+    pub id: Option<i64>,
+    pub agent_slug: String,
+    pub workspace: Option<PathBuf>,
+    pub external_id: Option<String>,
+    pub title: Option<String>,
+    pub source_path: PathBuf,
+    pub started_at: Option<i64>,
+    pub ended_at: Option<i64>,
+    pub source_id: String,
+    pub origin_host: Option<String>,
+}
+
 /// Compatibility alias retained while call sites finish converging on `FrankenStorage`.
 pub type SqliteStorage = FrankenStorage;
 
@@ -2653,6 +2673,19 @@ impl FrankenStorage {
     /// not enforce strict read-only behavior yet; this constructor still provides
     /// the migration-compatible call site.
     pub fn open_readonly(path: &Path) -> Result<Self> {
+        let preflight = Self::open(path).with_context(|| {
+            format!(
+                "preflighting frankensqlite readonly open at {}",
+                path.display()
+            )
+        })?;
+        preflight.close().with_context(|| {
+            format!(
+                "closing frankensqlite preflight connection before readonly reopen at {}",
+                path.display()
+            )
+        })?;
+
         let path_str = path.to_string_lossy().to_string();
         let conn = open_franken_with_flags(&path_str, FrankenOpenFlags::SQLITE_OPEN_READ_ONLY)
             .with_context(|| format!("opening frankensqlite db readonly at {}", path.display()))?;
@@ -2809,6 +2842,7 @@ impl FrankenStorage {
             missing_tables = ?missing_tables,
             "repairing missing current-schema tables on an already-versioned cass database"
         );
+
         self.conn
             .execute_batch(MIGRATION_FRESH_SCHEMA)
             .with_context(|| "repairing missing current-schema tables")?;
@@ -3830,12 +3864,11 @@ impl FrankenStorage {
         &self,
         limit: i64,
         offset: i64,
-    ) -> Result<Vec<Conversation>> {
+    ) -> Result<Vec<LexicalRebuildConversationRow>> {
         self.conn
             .query_map_collect(
                 r"SELECT c.id, a.slug, w.path, c.external_id, c.title, c.source_path,
-                       c.started_at, c.ended_at, c.approx_tokens, c.metadata_json,
-                       c.source_id, c.origin_host, c.metadata_bin
+                       c.started_at, c.ended_at, c.source_id, c.origin_host
                 FROM conversations c
                 JOIN agents a ON c.agent_id = a.id
                 LEFT JOIN workspaces w ON c.workspace_id = w.id
@@ -3845,8 +3878,8 @@ impl FrankenStorage {
                 |row| {
                     let workspace_path: Option<String> = row.get_typed(2)?;
                     let source_path: String = row.get_typed(5)?;
-                    let source_id: Option<String> = row.get_typed(10)?;
-                    Ok(Conversation {
+                    let source_id: Option<String> = row.get_typed(8)?;
+                    Ok(LexicalRebuildConversationRow {
                         id: Some(row.get_typed(0)?),
                         agent_slug: row.get_typed(1)?,
                         workspace: workspace_path.map(|p| Path::new(&p).to_path_buf()),
@@ -3855,11 +3888,8 @@ impl FrankenStorage {
                         source_path: Path::new(&source_path).to_path_buf(),
                         started_at: row.get_typed(6)?,
                         ended_at: row.get_typed(7)?,
-                        approx_tokens: row.get_typed(8)?,
-                        metadata_json: franken_read_metadata_compat(row, 9, 12),
-                        messages: Vec::new(),
                         source_id: source_id.unwrap_or_else(|| "local".to_string()),
-                        origin_host: row.get_typed(11)?,
+                        origin_host: row.get_typed(9)?,
                     })
                 },
             )
@@ -3871,7 +3901,7 @@ impl FrankenStorage {
         self.conn
             .query_map_collect(
                 "SELECT id, idx, role, author, created_at, content, extra_json, extra_bin \
-                 FROM messages INDEXED BY idx_messages_conv_idx \
+                 FROM messages \
                  WHERE conversation_id = ?1 ORDER BY idx",
                 fparams![conversation_id],
                 |row| {
@@ -3906,7 +3936,7 @@ impl FrankenStorage {
         self.conn
             .query_map_collect(
                 "SELECT id, idx, role, author, created_at, content \
-                 FROM messages INDEXED BY idx_messages_conv_idx \
+                 FROM messages \
                  WHERE conversation_id = ?1 ORDER BY idx",
                 fparams![conversation_id],
                 |row| {
@@ -3948,7 +3978,7 @@ impl FrankenStorage {
 
         let mut sql = String::from(
             "SELECT conversation_id, id, idx, role, author, created_at, content \
-             FROM messages INDEXED BY idx_messages_conv_idx \
+             FROM messages \
              WHERE conversation_id IN (",
         );
         let mut params: Vec<ParamValue> = Vec::with_capacity(conversation_ids.len());
@@ -8633,7 +8663,7 @@ mod tests {
     }
 
     #[test]
-    fn lexical_rebuild_messages_query_forces_conversation_idx_index() {
+    fn lexical_rebuild_messages_query_uses_conversation_idx_access_path() {
         use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
         use std::path::PathBuf;
 
@@ -8697,23 +8727,25 @@ mod tests {
             )
             .unwrap();
 
-        let plan_details: Vec<String> = storage
+        let opcodes: Vec<String> = storage
             .conn
             .query_map_collect(
-                "EXPLAIN QUERY PLAN \
+                "EXPLAIN \
                  SELECT id, idx, role, author, created_at, content \
-                 FROM messages INDEXED BY idx_messages_conv_idx \
+                 FROM messages \
                  WHERE conversation_id = ?1 ORDER BY idx",
                 fparams![conversation_id],
-                |row| row.get_typed(3),
+                |row| row.get_typed(1),
             )
             .unwrap();
 
         assert!(
-            plan_details
-                .iter()
-                .any(|detail| detail.contains("idx_messages_conv_idx")),
-            "expected EXPLAIN QUERY PLAN to honor the explicit messages(conversation_id, idx) index hint, got {plan_details:?}"
+            opcodes.iter().any(|opcode| opcode == "SeekGE"),
+            "expected lexical rebuild message fetch to seek into the conversation_id/idx access path, got {opcodes:?}"
+        );
+        assert!(
+            !opcodes.iter().any(|opcode| opcode == "SorterOpen"),
+            "expected lexical rebuild message fetch to avoid sorter temp b-trees, got {opcodes:?}"
         );
     }
 

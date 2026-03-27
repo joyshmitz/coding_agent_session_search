@@ -408,7 +408,7 @@ impl Drop for RunIndexProgressReset {
     }
 }
 
-const LEXICAL_REBUILD_STATE_VERSION: u8 = 1;
+const LEXICAL_REBUILD_STATE_VERSION: u8 = 2;
 const LEXICAL_REBUILD_PAGE_SIZE: i64 = 200;
 
 #[derive(Debug)]
@@ -429,7 +429,7 @@ impl Drop for IndexRunLockGuard {
 struct LexicalRebuildDbState {
     db_path: String,
     total_conversations: usize,
-    total_messages: usize,
+    storage_fingerprint: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -711,16 +711,30 @@ fn reconcile_pending_lexical_commit(
     Ok(state)
 }
 
-fn count_total_messages(storage: &FrankenStorage) -> Result<usize> {
-    let total_messages: i64 = storage
-        .raw()
-        .query_row_map(
-            "SELECT COUNT(*) FROM messages",
-            &[] as &[ParamValue],
-            |row| row.get_typed(0),
-        )
-        .context("counting canonical messages for lexical rebuild state")?;
-    Ok(usize::try_from(total_messages.max(0)).unwrap_or(usize::MAX))
+fn metadata_stamp(path: &Path) -> Result<(u64, i64)> {
+    let metadata =
+        fs::metadata(path).with_context(|| format!("reading metadata for {}", path.display()))?;
+    let modified_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|ts| ts.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|dur| i64::try_from(dur.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0);
+    Ok((metadata.len(), modified_ms))
+}
+
+fn lexical_rebuild_storage_fingerprint(db_path: &Path) -> Result<String> {
+    let wal_path = PathBuf::from(format!("{}-wal", db_path.display()));
+    let (db_len, db_mtime_ms) = metadata_stamp(db_path)?;
+    let (wal_len, wal_mtime_ms) = match fs::metadata(&wal_path) {
+        Ok(_) => metadata_stamp(&wal_path)?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => (0, 0),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("reading metadata for {}", wal_path.display()));
+        }
+    };
+    Ok(format!("{db_len}:{db_mtime_ms}:{wal_len}:{wal_mtime_ms}"))
 }
 
 fn count_total_conversations_exact(storage: &FrankenStorage) -> Result<usize> {
@@ -811,7 +825,7 @@ fn lexical_rebuild_db_state(
     Ok(LexicalRebuildDbState {
         db_path: db_path.to_string_lossy().into_owned(),
         total_conversations: count_total_conversations_exact(storage)?,
-        total_messages: count_total_messages(storage)?,
+        storage_fingerprint: lexical_rebuild_storage_fingerprint(db_path)?,
     })
 }
 
@@ -829,7 +843,7 @@ fn has_pending_lexical_rebuild(
 pub(crate) struct LexicalRebuildSnapshot {
     pub db_path: String,
     pub total_conversations: usize,
-    pub total_messages: usize,
+    pub storage_fingerprint: String,
     pub committed_offset: i64,
     pub processed_conversations: usize,
     pub indexed_docs: usize,
@@ -852,7 +866,7 @@ pub(crate) fn load_lexical_rebuild_snapshot(
     Ok(Some(LexicalRebuildSnapshot {
         db_path: state.db.db_path,
         total_conversations: state.db.total_conversations,
-        total_messages: state.db.total_messages,
+        storage_fingerprint: state.db.storage_fingerprint,
         committed_offset: state.committed_offset,
         processed_conversations: state.processed_conversations,
         indexed_docs: state.indexed_docs,
@@ -2935,7 +2949,7 @@ pub(crate) fn rebuild_tantivy_from_db(
                 db_path = %db_path.display(),
                 existing_db_path = %state.db.db_path,
                 existing_total_conversations = state.db.total_conversations,
-                existing_total_messages = state.db.total_messages,
+                existing_storage_fingerprint = %state.db.storage_fingerprint,
                 "discarding incompatible lexical rebuild checkpoint and restarting from zero"
             );
             LexicalRebuildState::new(db_state.clone(), LEXICAL_REBUILD_PAGE_SIZE)
@@ -3071,7 +3085,6 @@ pub(crate) fn rebuild_tantivy_from_db(
             // rebuild does not devolve into a full table scan per conversation.
             let messages = storage.fetch_messages_for_lexical_rebuild(conv_id)?;
 
-            let mut metadata = conv.metadata_json.clone();
             let (kind, host_label) =
                 source_map.get(&conv.source_id).cloned().unwrap_or_else(|| {
                     let fallback_kind = if conv.source_id == LOCAL_SOURCE_ID {
@@ -3082,6 +3095,7 @@ pub(crate) fn rebuild_tantivy_from_db(
                     (fallback_kind, None)
                 });
             let host = conv.origin_host.as_deref().or(host_label.as_deref());
+            let mut metadata = serde_json::Value::Object(serde_json::Map::new());
             ensure_cass_origin(&mut metadata, &conv.source_id, kind, host);
 
             let mut conversation_message_count = 0usize;
@@ -7370,7 +7384,7 @@ mod tests {
         let db_state = LexicalRebuildDbState {
             db_path: "/tmp/agent_search.db".to_string(),
             total_conversations: 400,
-            total_messages: 2_000,
+            storage_fingerprint: "seed:400".to_string(),
         };
         let mut state = LexicalRebuildState::new(db_state, LEXICAL_REBUILD_PAGE_SIZE);
         state.record_pending_commit(200, 200, 600, index_meta_fingerprint(&index_path).unwrap());
@@ -7395,7 +7409,7 @@ mod tests {
         let db_state = LexicalRebuildDbState {
             db_path: "/tmp/agent_search.db".to_string(),
             total_conversations: 400,
-            total_messages: 2_000,
+            storage_fingerprint: "seed:400".to_string(),
         };
         let mut state = LexicalRebuildState::new(db_state.clone(), LEXICAL_REBUILD_PAGE_SIZE);
         state.committed_offset = 100;
@@ -7422,7 +7436,7 @@ mod tests {
             LexicalRebuildDbState {
                 db_path: "/tmp/agent_search.db".to_string(),
                 total_conversations: 12,
-                total_messages: 34,
+                storage_fingerprint: "seed:12".to_string(),
             },
             LEXICAL_REBUILD_PAGE_SIZE,
         );

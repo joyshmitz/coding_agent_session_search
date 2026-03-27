@@ -9248,12 +9248,12 @@ mod cli_read_db_tests {
         std::fs::write(
             index_path.join(".lexical-rebuild-state.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
-                "version": 1,
+                "version": 2,
                 "schema_hash": crate::search::tantivy::SCHEMA_HASH,
                 "db": {
                     "db_path": db_path.display().to_string(),
                     "total_conversations": 10,
-                    "total_messages": 42
+                    "storage_fingerprint": "10:42:0:0"
                 },
                 "page_size": 200,
                 "committed_offset": 4,
