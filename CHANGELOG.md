@@ -7,13 +7,45 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Repository: <https://github.com/Dicklesworthstone/coding_agent_session_search>
 
-> **Releases vs. tags**: Only [v0.1.64](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.1.64), [v0.2.0](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.0), [v0.2.1](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.1), and [v0.2.2](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.2) have published GitHub Releases with downloadable binaries. All other version numbers below are git tags only (no release artifacts).
+> **Releases vs. tags**: Only [v0.1.64](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.1.64), [v0.2.0](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.0), [v0.2.1](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.1), [v0.2.2](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.2), [v0.2.3](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.3), and [v0.2.4](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.4) have published GitHub Releases with downloadable binaries. All other version numbers below are git tags only (no release artifacts).
 
 ---
 
-## [Unreleased] (after v0.2.2)
+## [v0.2.4](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.4) -- 2026-03-27
 
-Work in progress on `main` since the v0.2.2 tag.
+**GitHub Release** with downloadable binaries.
+
+### Bug fixes
+
+- **INSERT...SELECT UPSERT/RETURNING fallback** (#134): Convert multi-row `INSERT OR IGNORE` to row-wise execution for frankensqlite compatibility ([`f4e1452`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/f4e1452e))
+- **Cross-database rowid watermark**: Remove invalid cross-database rowid comparison; force autoindex on message fetches ([`f4424ee`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/f4424ee9))
+- **Auto-repair missing analytics tables** when schema version markers lie ([`8d36a04`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/8d36a04c))
+- **FrankenStorage connection handling**: Explicitly close all connections instead of relying on Drop ([`7f2a589`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/7f2a5899), [`92a4173`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/92a41737))
+- Include `extra_json` in conversation character count ([`d744ea7`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/d744ea78))
+- Suppress frankensqlite internal telemetry in default log filter ([`b4bde82`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/b4bde82c))
+- Drop and recreate FTS on full reset; batch historical imports with queryable-first sort ([`06564e6`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/06564e63))
+
+### New features
+
+- **Historical session recovery toolkit**: Recover sessions from historical bundles ([`548d50b`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/548d50b9))
+- **Database health integration**: quick_check, FTS consistency repair, historical bundle watermark probing ([`4c91ad3`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/4c91ad30))
+- **Crush connector**: Integrate Crush connector from franken_agent_detection ([`dfe9cff`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/dfe9cffa))
+- **Resumable lexical rebuild**: Durable checkpoints for lexical rebuild and historical salvage ([`d192703`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/d192703f))
+- **Seed canonical DB** from best historical bundle via VACUUM INTO ([`d4e7126`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/d4e7126c))
+
+### Performance
+
+- Replace `COUNT(*)` rebuild fingerprint with fs stat; lightweight conversation projection ([`cec08ac`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/cec08ac4))
+- Batch message fetching and multi-threshold commit triggers for lexical rebuild ([`bc48c67`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/bc48c670))
+- Restructure daily stats rebuild to co-locate message scanning with conversation batches ([`7959d04`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/7959d04b))
+
+---
+
+## [v0.2.3](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.3) -- 2026-03-24
+
+**GitHub Release** with downloadable binaries.
+
+Incremental reliability release covering streaming, indexing, and UI fixes since v0.2.2.
 
 ### Search and indexing
 
