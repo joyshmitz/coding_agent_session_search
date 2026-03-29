@@ -4,8 +4,8 @@ import argparse
 from collections import deque
 import hashlib
 import json
+import math
 import os
-import sqlite3
 import subprocess
 import sys
 import threading
@@ -73,6 +73,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=1,
         help="Smallest batch size allowed when shrinking after failures.",
+    )
+    parser.add_argument(
+        "--max-batch-bytes-mib",
+        type=int,
+        default=None,
+        help="Optional upper bound on the estimated raw input MiB per batch. One file is always allowed through even if it exceeds the cap.",
     )
     parser.add_argument(
         "--max-batches",
@@ -158,8 +164,10 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def read_explicit_paths(paths_files: List[str]) -> List[Path]:
+def read_explicit_paths(paths_files: List[str]) -> Tuple[List[Path], Dict[str, int]]:
     explicit_paths: List[Path] = []
+    listed_paths = 0
+    missing_paths = 0
     for path_file_text in paths_files:
         path_file = Path(path_file_text).expanduser().resolve()
         if not path_file.exists():
@@ -168,6 +176,7 @@ def read_explicit_paths(paths_files: List[str]) -> List[Path]:
             entry = raw_line.strip()
             if not entry or entry.startswith("#"):
                 continue
+            listed_paths += 1
             path = Path(entry).expanduser()
             if not path.is_absolute():
                 path = (path_file.parent / path).resolve()
@@ -175,12 +184,20 @@ def read_explicit_paths(paths_files: List[str]) -> List[Path]:
                 path = path.resolve()
             if path.is_file():
                 explicit_paths.append(path)
-    return explicit_paths
+            else:
+                missing_paths += 1
+    return explicit_paths, {
+        "listed_explicit_paths": listed_paths,
+        "missing_explicit_paths": missing_paths,
+    }
 
 
-def collect_paths(roots: List[str], patterns: List[str], paths_files: List[str]) -> List[Path]:
+def collect_paths(
+    roots: List[str], patterns: List[str], paths_files: List[str]
+) -> Tuple[List[Path], Dict[str, int]]:
     seen: Dict[str, Path] = {}
-    for path in read_explicit_paths(paths_files):
+    explicit_paths, path_stats = read_explicit_paths(paths_files)
+    for path in explicit_paths:
         seen[str(path)] = path
     for root_text in roots:
         root = Path(root_text).expanduser().resolve()
@@ -190,7 +207,42 @@ def collect_paths(roots: List[str], patterns: List[str], paths_files: List[str])
             for path in root.glob(pattern):
                 if path.is_file():
                     seen[str(path)] = path
-    return [seen[key] for key in sorted(seen.keys())]
+    path_stats["collected_paths"] = len(seen)
+    return [seen[key] for key in sorted(seen.keys())], path_stats
+
+
+def estimated_file_size_bytes(path: Path) -> int:
+    try:
+        return max(0, path.stat().st_size)
+    except OSError:
+        return 0
+
+
+def select_batch_paths(
+    paths: List[Path],
+    start_index: int,
+    target_batch_size: int,
+    max_batch_bytes: Optional[int],
+) -> tuple[List[Path], int]:
+    if start_index >= len(paths):
+        return [], 0
+
+    batch: List[Path] = []
+    batch_bytes = 0
+    stop_index = min(len(paths), start_index + max(1, target_batch_size))
+    for path in paths[start_index:stop_index]:
+        size_bytes = estimated_file_size_bytes(path)
+        if batch and max_batch_bytes is not None and (batch_bytes + size_bytes) > max_batch_bytes:
+            break
+        batch.append(path)
+        batch_bytes += size_bytes
+
+    if not batch:
+        first = paths[start_index]
+        batch = [first]
+        batch_bytes = estimated_file_size_bytes(first)
+
+    return batch, batch_bytes
 
 
 def config_signature(
@@ -267,6 +319,8 @@ def maybe_migrate_legacy_state(
         return {}
     if legacy_state.get("patterns") != signature_payload["patterns"]:
         return {}
+    if legacy_state.get("paths_files", []) != signature_payload["paths_files"]:
+        return {}
     save_state(state_file, legacy_state)
     if legacy_log_file.exists() and not log_file.exists():
         log_file.write_text(legacy_log_file.read_text())
@@ -280,34 +334,121 @@ def normalize_state_metadata(
     state_file: Path,
     log_file: Path,
     fallback_batch_size: int,
+    fallback_max_batch_size: int,
+    fallback_max_batch_bytes: Optional[int],
 ) -> Dict[str, Any]:
     normalized = dict(state)
     normalized["signature"] = signature_payload
     normalized["signature_id"] = signature_id
     normalized["roots"] = signature_payload["roots"]
     normalized["patterns"] = signature_payload["patterns"]
+    normalized["paths_files"] = signature_payload["paths_files"]
     normalized["state_file"] = str(state_file)
     normalized["log_file"] = str(log_file)
     normalized.setdefault("current_batch_size", fallback_batch_size)
+    normalized.setdefault("max_batch_size", fallback_max_batch_size)
+    normalized.setdefault("max_batch_bytes", fallback_max_batch_bytes)
+    normalized.setdefault("successful_batches_this_run", 0)
     tuning = dict(normalized.get("tuning", {}))
     tuning.setdefault("best_batch_size", int(normalized["current_batch_size"]))
     normalized["tuning"] = tuning
     return normalized
 
 
-def db_counts(data_dir: Path) -> Dict[str, int]:
-    db_path = data_dir / "agent_search.db"
-    conn = sqlite3.connect(db_path)
+def build_state_snapshot(
+    *,
+    signature_payload: Dict[str, List[str]],
+    signature_id: str,
+    total_paths: int,
+    next_index: int,
+    current_batch_size: int,
+    max_batch_size: int,
+    max_batch_bytes: Optional[int],
+    successful_batches: int,
+    run_started_at: int,
+    baseline_counts: Dict[str, Any],
+    path_stats: Dict[str, int],
+    latest_counts: Dict[str, Any],
+    tuning: Dict[str, Any],
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    state: Dict[str, Any] = {
+        "signature": signature_payload,
+        "signature_id": signature_id,
+        "roots": signature_payload["roots"],
+        "patterns": signature_payload["patterns"],
+        "paths_files": signature_payload["paths_files"],
+        "total_paths": total_paths,
+        "next_index": next_index,
+        "current_batch_size": current_batch_size,
+        "max_batch_size": max_batch_size,
+        "max_batch_bytes": max_batch_bytes,
+        "successful_batches_this_run": successful_batches,
+        "run_started_at": run_started_at,
+        "updated_at": int(time.time()),
+        "baseline_counts": baseline_counts,
+        "path_stats": path_stats,
+        "latest_counts": latest_counts,
+        "tuning": tuning,
+    }
+    if extra:
+        state.update(extra)
+    return state
+
+
+def db_counts(cass_binary: Path, data_dir: Path) -> Dict[str, Any]:
     try:
-        cur = conn.cursor()
-        conversations = cur.execute("SELECT count(*) FROM conversations").fetchone()[0]
-        messages = cur.execute("SELECT count(*) FROM messages").fetchone()[0]
+        proc = subprocess.run(
+            [
+                str(cass_binary),
+                "--color=never",
+                "stats",
+                "--json",
+                "--data-dir",
+                str(data_dir),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
         return {
-            "conversations": int(conversations),
-            "messages": int(messages),
+            "conversations": None,
+            "messages": None,
+            "error": f"cass_stats_timeout: {exc}",
         }
-    finally:
-        conn.close()
+
+    if proc.returncode != 0:
+        return {
+            "conversations": None,
+            "messages": None,
+            "error": f"cass_stats_failed: rc={proc.returncode}",
+            "stderr_tail": proc.stderr[-1000:],
+        }
+
+    lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    if not lines:
+        return {
+            "conversations": None,
+            "messages": None,
+            "error": "cass_stats_failed: empty_stdout",
+        }
+
+    try:
+        payload = json.loads(lines[-1])
+    except json.JSONDecodeError as exc:
+        return {
+            "conversations": None,
+            "messages": None,
+            "error": f"cass_stats_failed: invalid_json: {exc}",
+            "stdout_tail": proc.stdout[-1000:],
+        }
+
+    return {
+        "conversations": int(payload.get("conversations", 0)),
+        "messages": int(payload.get("messages", 0)),
+    }
 
 
 def read_meminfo_kb() -> Dict[str, int]:
@@ -424,8 +565,10 @@ def run_batch(
     env["CASS_INDEXER_SERIAL_CHUNK_SIZE"] = str(serial_chunk_size)
     if defer_lexical_updates:
         env["CASS_DEFER_LEXICAL_UPDATES"] = "1"
+        env["CASS_DEFER_ANALYTICS_UPDATES"] = "1"
     else:
         env.pop("CASS_DEFER_LEXICAL_UPDATES", None)
+        env.pop("CASS_DEFER_ANALYTICS_UPDATES", None)
     mem_before = read_meminfo_kb()
     proc = subprocess.Popen(
         cmd,
@@ -498,7 +641,11 @@ def autotune_after_success(
 ) -> Tuple[int, Dict[str, Any], str]:
     elapsed_seconds = max(elapsed_ms / 1000.0, 0.001)
     throughput = batch_size / elapsed_seconds
-    best_throughput = float(tuning.get("best_throughput_paths_per_sec", 0.0))
+    raw_best_throughput = tuning.get("best_throughput_paths_per_sec", 0.0)
+    try:
+        best_throughput = float(raw_best_throughput or 0.0)
+    except (TypeError, ValueError):
+        best_throughput = 0.0
     best_batch_size = int(tuning.get("best_batch_size", batch_size))
     if throughput >= best_throughput:
         best_throughput = throughput
@@ -516,13 +663,27 @@ def autotune_after_success(
     elif above_soft_limit and batch_size > args.min_batch_size:
         next_batch_size = max(args.min_batch_size, batch_size - max(1, batch_size // 4))
         reason = "decrease_soft_rss"
-    elif comfortably_safe and batch_size < args.max_batch_size:
-        growth_step = max(1, min(32, batch_size // 2))
+    elif very_safe and batch_size < args.max_batch_size:
+        grown = max(
+            batch_size + 1,
+            min(
+                args.max_batch_size,
+                int(math.ceil(batch_size * max(args.growth_factor, 1.0))),
+            ),
+        )
+        growth_step = max(1, min(32, grown - batch_size))
         grown = batch_size + growth_step
         next_batch_size = min(args.max_batch_size, grown)
-        reason = "increase_safe_headroom"
-    elif very_safe and batch_size < args.max_batch_size:
-        growth_step = max(1, min(16, batch_size // 4))
+        reason = "increase_very_safe_headroom"
+    elif comfortably_safe and batch_size < args.max_batch_size:
+        grown = max(
+            batch_size + 1,
+            min(
+                args.max_batch_size,
+                int(math.ceil(batch_size * min(max(args.growth_factor, 1.0), 1.5))),
+            ),
+        )
+        growth_step = max(1, min(16, grown - batch_size))
         grown = batch_size + growth_step
         next_batch_size = min(args.max_batch_size, grown)
         reason = "increase_safe_headroom"
@@ -561,11 +722,26 @@ def main() -> int:
         legacy_log_file,
     ) = state_paths(args)
 
-    paths = collect_paths(args.root, args.pattern, args.paths_file)
+    paths, path_stats = collect_paths(args.root, args.pattern, args.paths_file)
     if not paths:
-        print(json.dumps({"status": "no_paths", "roots": args.root, "patterns": args.pattern}))
+        print(
+            json.dumps(
+                {
+                    "status": "no_paths",
+                    "roots": args.root,
+                    "patterns": args.pattern,
+                    "paths_files": args.paths_file,
+                    "path_stats": path_stats,
+                }
+            )
+        )
         return 0
 
+    max_batch_bytes = (
+        None
+        if args.max_batch_bytes_mib is None
+        else max(1, int(args.max_batch_bytes_mib)) * 1024 * 1024
+    )
     state = maybe_migrate_legacy_state(
         state_file=state_file,
         log_file=log_file,
@@ -580,6 +756,8 @@ def main() -> int:
         state_file=state_file,
         log_file=log_file,
         fallback_batch_size=args.batch_size,
+        fallback_max_batch_size=args.max_batch_size,
+        fallback_max_batch_bytes=max_batch_bytes,
     )
     next_index = int(state.get("next_index", 0))
     current_batch_size = int(state.get("current_batch_size", args.batch_size))
@@ -589,16 +767,22 @@ def main() -> int:
         current_batch_size = args.batch_size
     current_batch_size = max(args.min_batch_size, min(args.max_batch_size, current_batch_size))
 
-    baseline_counts = db_counts(data_dir)
+    baseline_counts = db_counts(cass_binary, data_dir)
     run_started_at = int(time.time())
     successful_batches = 0
+    max_batch_bytes = int(state["max_batch_bytes"]) if state.get("max_batch_bytes") is not None else max_batch_bytes
 
     while next_index < len(paths):
         if args.max_batches is not None and successful_batches >= args.max_batches:
             break
 
         batch_size = max(args.min_batch_size, current_batch_size)
-        batch = paths[next_index : next_index + batch_size]
+        batch, batch_bytes = select_batch_paths(
+            paths=paths,
+            start_index=next_index,
+            target_batch_size=batch_size,
+            max_batch_bytes=max_batch_bytes,
+        )
         started_at = time.time()
         batch_result = run_batch(
             cass_binary=cass_binary,
@@ -631,6 +815,7 @@ def main() -> int:
             "start_index": next_index,
             "end_index": next_index + len(batch),
             "batch_size": len(batch),
+            "batch_bytes": batch_bytes,
             "first_path": str(batch[0]),
             "last_path": str(batch[-1]),
             "exit_code": proc.returncode,
@@ -650,7 +835,7 @@ def main() -> int:
         }
 
         if effective_returncode == 0:
-            counts = db_counts(data_dir)
+            counts = db_counts(cass_binary, data_dir)
             remaining_paths = len(paths) - (next_index + len(batch))
             current_batch_size, tuning, tune_reason = autotune_after_success(
                 args=args,
@@ -665,33 +850,37 @@ def main() -> int:
             log_entry["db_counts"] = counts
             log_entry["next_batch_size"] = current_batch_size
             log_entry["autotune_reason"] = tune_reason
+            log_entry["max_batch_bytes"] = max_batch_bytes
             append_log(log_file, log_entry)
             next_index += len(batch)
             successful_batches += 1
-            state = {
-                "signature": signature_payload,
-                "signature_id": signature_id,
-                "roots": signature_payload["roots"],
-                "patterns": signature_payload["patterns"],
-                "total_paths": len(paths),
-                "next_index": next_index,
-                "current_batch_size": current_batch_size,
-                "successful_batches_this_run": successful_batches,
-                "run_started_at": run_started_at,
-                "updated_at": int(time.time()),
-                "baseline_counts": baseline_counts,
-                "latest_counts": counts,
-                "tuning": tuning,
-                "last_batch": {
-                    "size": len(batch),
-                    "first_path": str(batch[0]),
-                    "last_path": str(batch[-1]),
-                    "elapsed_ms": elapsed_ms,
-                    "peak_memory_kb": peak_memory_kb,
-                    "next_batch_size": current_batch_size,
-                    "autotune_reason": tune_reason,
+            state = build_state_snapshot(
+                signature_payload=signature_payload,
+                signature_id=signature_id,
+                total_paths=len(paths),
+                next_index=next_index,
+                current_batch_size=current_batch_size,
+                max_batch_size=args.max_batch_size,
+                max_batch_bytes=max_batch_bytes,
+                successful_batches=successful_batches,
+                run_started_at=run_started_at,
+                baseline_counts=baseline_counts,
+                path_stats=path_stats,
+                latest_counts=counts,
+                tuning=tuning,
+                extra={
+                    "last_batch": {
+                        "size": len(batch),
+                        "bytes": batch_bytes,
+                        "first_path": str(batch[0]),
+                        "last_path": str(batch[-1]),
+                        "elapsed_ms": elapsed_ms,
+                        "peak_memory_kb": peak_memory_kb,
+                        "next_batch_size": current_batch_size,
+                        "autotune_reason": tune_reason,
+                    }
                 },
-            }
+            )
             save_state(state_file, state)
             print(
                 json.dumps(
@@ -700,6 +889,7 @@ def main() -> int:
                         "next_index": next_index,
                         "total_paths": len(paths),
                         "batch_size": len(batch),
+                        "batch_bytes": batch_bytes,
                         "elapsed_ms": elapsed_ms,
                         "peak_memory_kb": peak_memory_kb,
                         "next_batch_size": current_batch_size,
@@ -723,28 +913,30 @@ def main() -> int:
                     "last_autotune_reason": "shrink_after_oom",
                 }
             )
-            state = {
-                "signature": signature_payload,
-                "signature_id": signature_id,
-                "roots": signature_payload["roots"],
-                "patterns": signature_payload["patterns"],
-                "total_paths": len(paths),
-                "next_index": next_index,
-                "current_batch_size": current_batch_size,
-                "successful_batches_this_run": successful_batches,
-                "run_started_at": run_started_at,
-                "updated_at": int(time.time()),
-                "baseline_counts": baseline_counts,
-                "latest_counts": db_counts(data_dir),
-                "tuning": tuning,
-                "last_failure": {
-                    "reason": "out_of_memory",
-                    "failed_batch_size": batch_size,
-                    "retry_batch_size": current_batch_size,
-                    "first_path": str(batch[0]),
-                    "last_path": str(batch[-1]),
+            state = build_state_snapshot(
+                signature_payload=signature_payload,
+                signature_id=signature_id,
+                total_paths=len(paths),
+                next_index=next_index,
+                current_batch_size=current_batch_size,
+                max_batch_size=args.max_batch_size,
+                max_batch_bytes=max_batch_bytes,
+                successful_batches=successful_batches,
+                run_started_at=run_started_at,
+                baseline_counts=baseline_counts,
+                path_stats=path_stats,
+                latest_counts=db_counts(cass_binary, data_dir),
+                tuning=tuning,
+                extra={
+                    "last_failure": {
+                        "reason": "out_of_memory",
+                        "failed_batch_size": batch_size,
+                        "retry_batch_size": current_batch_size,
+                        "first_path": str(batch[0]),
+                        "last_path": str(batch[-1]),
+                    }
                 },
-            }
+            )
             save_state(state_file, state)
             print(
                 json.dumps(
@@ -762,41 +954,44 @@ def main() -> int:
 
         print(proc.stdout, end="", file=sys.stdout)
         print(proc.stderr, end="", file=sys.stderr)
-        state = {
-            "signature": signature_payload,
-            "signature_id": signature_id,
-            "roots": signature_payload["roots"],
-            "patterns": signature_payload["patterns"],
-            "total_paths": len(paths),
-            "next_index": next_index,
-            "current_batch_size": current_batch_size,
-            "successful_batches_this_run": successful_batches,
-            "run_started_at": run_started_at,
-            "updated_at": int(time.time()),
-            "baseline_counts": baseline_counts,
-            "latest_counts": db_counts(data_dir),
-            "tuning": tuning,
-            "last_failure": {
-                "reason": "masked_watch_failure"
-                if masked_watch_failure
-                else "subprocess_failed",
-                "exit_code": proc.returncode,
-                "effective_exit_code": effective_returncode,
-                "batch_size": batch_size,
-                "first_path": str(batch[0]),
-                "last_path": str(batch[-1]),
+        state = build_state_snapshot(
+            signature_payload=signature_payload,
+            signature_id=signature_id,
+            total_paths=len(paths),
+            next_index=next_index,
+            current_batch_size=current_batch_size,
+            max_batch_size=args.max_batch_size,
+            max_batch_bytes=max_batch_bytes,
+            successful_batches=successful_batches,
+            run_started_at=run_started_at,
+            baseline_counts=baseline_counts,
+            path_stats=path_stats,
+            latest_counts=db_counts(cass_binary, data_dir),
+            tuning=tuning,
+            extra={
+                "last_failure": {
+                    "reason": "masked_watch_failure"
+                    if masked_watch_failure
+                    else "subprocess_failed",
+                    "exit_code": proc.returncode,
+                    "effective_exit_code": effective_returncode,
+                    "batch_size": batch_size,
+                    "first_path": str(batch[0]),
+                    "last_path": str(batch[-1]),
+                }
             },
-        }
+        )
         save_state(state_file, state)
         return effective_returncode
 
-    final_counts = db_counts(data_dir)
+    final_counts = db_counts(cass_binary, data_dir)
     summary = {
         "status": "done",
         "successful_batches_this_run": successful_batches,
         "next_index": next_index,
         "total_paths": len(paths),
         "baseline_counts": baseline_counts,
+        "path_stats": path_stats,
         "final_counts": final_counts,
         "state_file": str(state_file),
         "log_file": str(log_file),
