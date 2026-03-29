@@ -230,6 +230,28 @@ def maybe_migrate_legacy_state(
     return legacy_state
 
 
+def normalize_state_metadata(
+    state: Dict[str, Any],
+    signature_payload: Dict[str, List[str]],
+    signature_id: str,
+    state_file: Path,
+    log_file: Path,
+    fallback_batch_size: int,
+) -> Dict[str, Any]:
+    normalized = dict(state)
+    normalized["signature"] = signature_payload
+    normalized["signature_id"] = signature_id
+    normalized["roots"] = signature_payload["roots"]
+    normalized["patterns"] = signature_payload["patterns"]
+    normalized["state_file"] = str(state_file)
+    normalized["log_file"] = str(log_file)
+    normalized.setdefault("current_batch_size", fallback_batch_size)
+    tuning = dict(normalized.get("tuning", {}))
+    tuning.setdefault("best_batch_size", int(normalized["current_batch_size"]))
+    normalized["tuning"] = tuning
+    return normalized
+
+
 def db_counts(data_dir: Path) -> Dict[str, int]:
     db_path = data_dir / "agent_search.db"
     conn = sqlite3.connect(db_path)
@@ -367,6 +389,10 @@ def failure_text(proc: subprocess.CompletedProcess[str]) -> str:
     return "\n".join(part for part in [proc.stdout, proc.stderr] if part).lower()
 
 
+def has_masked_watch_failure(proc: subprocess.CompletedProcess[str]) -> bool:
+    return "watch reindex failed" in failure_text(proc)
+
+
 def autotune_after_success(
     args: argparse.Namespace,
     batch_size: int,
@@ -444,6 +470,14 @@ def main() -> int:
         legacy_log_file=legacy_log_file,
         signature_payload=signature_payload,
     )
+    state = normalize_state_metadata(
+        state=state,
+        signature_payload=signature_payload,
+        signature_id=signature_id,
+        state_file=state_file,
+        log_file=log_file,
+        fallback_batch_size=args.batch_size,
+    )
     next_index = int(state.get("next_index", 0))
     current_batch_size = int(state.get("current_batch_size", args.batch_size))
     tuning: Dict[str, Any] = dict(state.get("tuning", {}))
@@ -474,6 +508,8 @@ def main() -> int:
         proc = batch_result["proc"]
         elapsed_ms = int((time.time() - started_at) * 1000)
         combined_failure = failure_text(proc)
+        masked_watch_failure = has_masked_watch_failure(proc)
+        effective_returncode = proc.returncode if not masked_watch_failure else 90
         peak_memory_kb = max(
             int(batch_result.get("peak_rss_kb", 0)),
             int(batch_result.get("peak_hwm_kb", 0)),
@@ -495,9 +531,11 @@ def main() -> int:
             "first_path": str(batch[0]),
             "last_path": str(batch[-1]),
             "exit_code": proc.returncode,
+            "effective_exit_code": effective_returncode,
             "elapsed_ms": elapsed_ms,
             "stdout_tail": proc.stdout[-2000:],
             "stderr_tail": proc.stderr[-2000:],
+            "masked_watch_failure": masked_watch_failure,
             "peak_rss_kb": int(batch_result.get("peak_rss_kb", 0)),
             "peak_hwm_kb": int(batch_result.get("peak_hwm_kb", 0)),
             "mem_total_kb": int(batch_result.get("mem_total_kb", 0)),
@@ -508,7 +546,7 @@ def main() -> int:
             "sample_count": int(batch_result.get("sample_count", 0)),
         }
 
-        if proc.returncode == 0:
+        if effective_returncode == 0:
             counts = db_counts(data_dir)
             remaining_paths = len(paths) - (next_index + len(batch))
             current_batch_size, tuning, tune_reason = autotune_after_success(
@@ -636,15 +674,18 @@ def main() -> int:
             "latest_counts": db_counts(data_dir),
             "tuning": tuning,
             "last_failure": {
-                "reason": "subprocess_failed",
+                "reason": "masked_watch_failure"
+                if masked_watch_failure
+                else "subprocess_failed",
                 "exit_code": proc.returncode,
+                "effective_exit_code": effective_returncode,
                 "batch_size": batch_size,
                 "first_path": str(batch[0]),
                 "last_path": str(batch[-1]),
             },
         }
         save_state(state_file, state)
-        return proc.returncode
+        return effective_returncode
 
     final_counts = db_counts(data_dir)
     summary = {

@@ -2457,6 +2457,11 @@ pub fn run_index(
         // Clone detector for the callback
         let detector_clone = stale_detector.clone();
 
+        let watch_once_mode = opts
+            .watch_once_paths
+            .as_ref()
+            .is_some_and(|paths| !paths.is_empty());
+
         let watch_result = watch_sources(
             opts.watch_once_paths.clone(),
             watch_roots.clone(),
@@ -2491,6 +2496,28 @@ pub fn run_index(
                         opts_clone.progress.as_ref(),
                         "watch rebuild reindex",
                     )
+                } else if watch_once_mode {
+                    let indexed = finalize_watch_once_reindex_result(
+                        reindex_paths(
+                            &opts_clone,
+                            paths,
+                            roots,
+                            &state,
+                            &storage_for_watch,
+                            &t_index,
+                            false,
+                        ),
+                        &detector_clone,
+                        opts_clone.progress.as_ref(),
+                        "watch incremental reindex",
+                    )?;
+
+                    if let Ok(mut guard) = t_index.lock()
+                        && let Err(e) = guard.optimize_if_idle()
+                    {
+                        tracing::warn!(error = %e, "segment merge failed during watch");
+                    }
+                    indexed
                 } else {
                     let indexed = finalize_watch_reindex_result(
                         reindex_paths(
@@ -2553,6 +2580,8 @@ pub fn run_index(
                         }
                     }
                 }
+
+                Ok(())
             },
         );
 
@@ -3391,7 +3420,7 @@ impl ConnectorKind {
     }
 }
 
-fn watch_sources<F: Fn(Vec<PathBuf>, &[(ConnectorKind, ScanRoot)], bool)>(
+fn watch_sources<F: Fn(Vec<PathBuf>, &[(ConnectorKind, ScanRoot)], bool) -> Result<()>>(
     watch_once_paths: Option<Vec<PathBuf>>,
     roots: Vec<(ConnectorKind, ScanRoot)>,
     event_channel: Option<(Sender<IndexerEvent>, Receiver<IndexerEvent>)>,
@@ -3401,7 +3430,7 @@ fn watch_sources<F: Fn(Vec<PathBuf>, &[(ConnectorKind, ScanRoot)], bool)>(
 ) -> Result<()> {
     if let Some(paths) = watch_once_paths {
         if !paths.is_empty() {
-            callback(paths, &roots, false);
+            callback(paths, &roots, false)?;
         }
         return Ok(());
     }
@@ -3476,7 +3505,9 @@ fn watch_sources<F: Fn(Vec<PathBuf>, &[(ConnectorKind, ScanRoot)], bool)>(
             if elapsed >= max_wait {
                 if cooldown_remaining.is_zero() {
                     // Cooldown elapsed and max_wait exceeded: fire now.
-                    callback(std::mem::take(&mut pending), &roots, false);
+                    if let Err(error) = callback(std::mem::take(&mut pending), &roots, false) {
+                        tracing::warn!(error = %error, "watch incremental callback failed");
+                    }
                     last_scan = Instant::now();
                     first_event = None;
                     continue;
@@ -3504,9 +3535,16 @@ fn watch_sources<F: Fn(Vec<PathBuf>, &[(ConnectorKind, ScanRoot)], bool)>(
                     // Full rebuild commands bypass cooldown for responsive
                     // operator-initiated rebuilds.
                     if !pending.is_empty() {
-                        callback(std::mem::take(&mut pending), &roots, false);
+                        if let Err(error) = callback(std::mem::take(&mut pending), &roots, false) {
+                            tracing::warn!(
+                                error = %error,
+                                "watch incremental callback failed"
+                            );
+                        }
                     }
-                    callback(vec![], &roots, true);
+                    if let Err(error) = callback(vec![], &roots, true) {
+                        tracing::warn!(error = %error, "watch rebuild callback failed");
+                    }
                     last_scan = Instant::now();
                     first_event = None;
                 }
@@ -3514,7 +3552,9 @@ fn watch_sources<F: Fn(Vec<PathBuf>, &[(ConnectorKind, ScanRoot)], bool)>(
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 // Process pending events only if cooldown has elapsed
                 if !pending.is_empty() && last_scan.elapsed() >= min_scan_interval {
-                    callback(std::mem::take(&mut pending), &roots, false);
+                    if let Err(error) = callback(std::mem::take(&mut pending), &roots, false) {
+                        tracing::warn!(error = %error, "watch incremental callback failed");
+                    }
                     last_scan = Instant::now();
                     first_event = None;
                 }
@@ -3546,7 +3586,12 @@ fn watch_sources<F: Fn(Vec<PathBuf>, &[(ConnectorKind, ScanRoot)], bool)>(
                                     "stale state detected, triggering automatic full rebuild"
                                 );
                                 // Trigger full rebuild
-                                callback(vec![], &roots, true);
+                                if let Err(error) = callback(vec![], &roots, true) {
+                                    tracing::warn!(
+                                        error = %error,
+                                        "watch stale-rebuild callback failed"
+                                    );
+                                }
                                 last_scan = Instant::now();
                             }
                             StaleAction::None => {
@@ -3972,6 +4017,51 @@ fn finalize_watch_reindex_result(
     }
 }
 
+fn finalize_watch_once_reindex_result(
+    result: Result<usize>,
+    detector: &StaleDetector,
+    progress: Option<&Arc<IndexingProgress>>,
+    context: &str,
+) -> Result<usize> {
+    match result {
+        Ok(indexed) => {
+            set_progress_last_error(progress, None);
+            detector.record_scan(indexed);
+            Ok(indexed)
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, context, "watch reindex failed");
+            reset_progress_to_idle(progress);
+            set_progress_last_error(progress, Some(format!("{context}: {error}")));
+            detector.record_scan(0);
+            Err(error)
+        }
+    }
+}
+
+fn explicit_watch_once_connector_hint(path: &Path) -> Option<ConnectorKind> {
+    let components: Vec<String> = path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_ascii_lowercase())
+        .collect();
+
+    let has_pair = |left: &str, right: &str| {
+        components
+            .windows(2)
+            .any(|window| window[0] == left && window[1] == right)
+    };
+
+    if has_pair(".codex", "sessions") {
+        Some(ConnectorKind::Codex)
+    } else if has_pair(".claude", "projects") {
+        Some(ConnectorKind::Claude)
+    } else if has_pair(".gemini", "tmp") {
+        Some(ConnectorKind::Gemini)
+    } else {
+        None
+    }
+}
+
 fn classify_paths(
     paths: Vec<PathBuf>,
     roots: &[(ConnectorKind, ScanRoot)],
@@ -3981,6 +4071,9 @@ fn classify_paths(
     let mut batch_map: BatchClassificationMap = HashMap::new();
 
     for p in paths {
+        let hinted_kind = prefer_explicit_paths
+            .then(|| explicit_watch_once_connector_hint(&p))
+            .flatten();
         if let Ok(meta) = std::fs::metadata(&p)
             && let Ok(time) = meta.modified()
             && let Ok(dur) = time.duration_since(std::time::UNIX_EPOCH)
@@ -3989,6 +4082,11 @@ fn classify_paths(
 
             // Find ALL matching roots
             for (kind, root) in roots {
+                if let Some(hinted_kind) = hinted_kind
+                    && *kind != hinted_kind
+                {
+                    continue;
+                }
                 if p.starts_with(&root.path) {
                     let scan_path = if prefer_explicit_paths {
                         p.clone()
@@ -6731,6 +6829,27 @@ mod tests {
     }
 
     #[test]
+    fn classify_paths_hints_codex_connector_for_explicit_codex_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let codex_root = tmp.path().join(".codex").join("sessions");
+        let session = codex_root.join("2026").join("03").join("rollout-1.jsonl");
+        std::fs::create_dir_all(session.parent().unwrap()).unwrap();
+        std::fs::write(&session, b"{}").unwrap();
+
+        let roots = vec![
+            (ConnectorKind::Codex, ScanRoot::local(codex_root.clone())),
+            (ConnectorKind::Claude, ScanRoot::local(codex_root.clone())),
+            (ConnectorKind::Gemini, ScanRoot::local(codex_root)),
+        ];
+
+        let classified = classify_paths(vec![session.clone()], &roots, true);
+
+        assert_eq!(classified.len(), 1);
+        assert_eq!(classified[0].0, ConnectorKind::Codex);
+        assert_eq!(classified[0].1.path, session);
+    }
+
+    #[test]
     fn watch_event_filter_ignores_read_access_noise() {
         let event = notify::Event::new(notify::event::EventKind::Access(AccessKind::Read))
             .add_path(PathBuf::from("/tmp/session.jsonl"));
@@ -7937,6 +8056,72 @@ mod tests {
                 .as_deref(),
             None,
             "successful watch reindex should clear stale error diagnostics"
+        );
+    }
+
+    #[test]
+    fn finalize_watch_once_reindex_result_propagates_error_and_resets_phase() {
+        let detector = StaleDetector::new(StaleConfig::default());
+        let progress = Arc::new(IndexingProgress::default());
+        progress.phase.store(2, Ordering::Relaxed);
+
+        let error = finalize_watch_once_reindex_result(
+            Err(anyhow::anyhow!("boom")),
+            &detector,
+            Some(&progress),
+            "watch incremental reindex",
+        )
+        .expect_err("watch-once failures must propagate to the CLI");
+
+        assert_eq!(error.to_string(), "boom");
+        assert_eq!(
+            detector.stats().consecutive_zero_scans,
+            1,
+            "failed watch-once reindex should still count as a zero-result scan for stale detection"
+        );
+        assert_eq!(
+            progress.phase.load(Ordering::Relaxed),
+            0,
+            "failed watch-once reindex should reset progress phase back to idle"
+        );
+        assert_eq!(
+            progress
+                .last_error
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_deref(),
+            Some("watch incremental reindex: boom"),
+            "failed watch-once reindex should surface the real error"
+        );
+    }
+
+    #[test]
+    fn finalize_watch_once_reindex_result_clears_stale_error_on_success() {
+        let detector = StaleDetector::new(StaleConfig::default());
+        let progress = Arc::new(IndexingProgress::default());
+        *progress
+            .last_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some("old".to_string());
+
+        let indexed = finalize_watch_once_reindex_result(
+            Ok(5),
+            &detector,
+            Some(&progress),
+            "watch incremental reindex",
+        )
+        .expect("watch-once success should be preserved");
+
+        assert_eq!(indexed, 5);
+        assert_eq!(detector.stats().total_ingests, 1);
+        assert_eq!(
+            progress
+                .last_error
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_deref(),
+            None,
+            "successful watch-once reindex should clear stale error diagnostics"
         );
     }
 

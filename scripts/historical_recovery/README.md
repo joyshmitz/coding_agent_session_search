@@ -40,6 +40,7 @@ These scripts are for:
 - Drives native `cass index --watch-once` over large raw session trees in resumable batches
 - Keeps all parsing/insertion logic inside `cass`; the Python only chunks paths and records progress
 - Learns a per-root batch size automatically by growing on safe headroom and shrinking on OOM or high RSS
+- Treats stderr-side `watch reindex failed` diagnostics as hard failures even if an older `cass` binary exits `0`
 - Persists per-root/per-pattern state so Claude, Codex, Gemini, and backup roots can all resume independently
 
 ## Typical usage
