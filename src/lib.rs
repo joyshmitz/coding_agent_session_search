@@ -22,12 +22,11 @@ use anyhow::Result;
 use base64::prelude::*;
 use chrono::Utc;
 use clap::{Arg, ArgAction, Command, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
-use fs2::FileExt;
 use indexer::IndexOptions;
 use serde::Serialize;
 use std::collections::HashSet;
 use std::fs::OpenOptions;
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
@@ -420,9 +419,7 @@ pub enum Commands {
         stale_threshold: u64,
     },
     /// Discover available features, versions, and limits for agent introspection
-    Capabilities {
-
-    },
+    Capabilities {},
     /// Quick state/health check (alias of status)
     State {
         /// Override data dir
@@ -437,13 +434,9 @@ pub enum Commands {
         stale_threshold: u64,
     },
     /// Show API + contract version info
-    ApiVersion {
-
-    },
+    ApiVersion {},
     /// Full API schema introspection - commands, arguments, and response schemas
-    Introspect {
-
-    },
+    Introspect {},
     /// View a source file at a specific line (follow up on search results)
     View {
         /// Path to the source file
@@ -454,7 +447,6 @@ pub enum Commands {
         /// Number of context lines before/after
         #[arg(long, short = 'C', default_value_t = 5)]
         context: usize,
-
     },
     /// Minimal health check (<50ms). Exit 0=healthy, 1=unhealthy. For agent pre-flight checks.
     Health {
@@ -468,7 +460,7 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         robot_meta: bool,
         /// Staleness threshold in seconds (default: 300)
-        #[arg(long, default_value = "300")]
+        #[arg(long, default = "300")]
         stale_threshold: u64,
     },
     /// Diagnose and repair cass installation issues. Safe by default - never deletes user data.
@@ -511,10 +503,12 @@ pub enum Commands {
         /// Maximum sessions to return (defaults: 10, or 1 with --current)
         #[arg(long)]
         limit: Option<usize>,
+        /// Output as JSON (for automation)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
         /// Override data dir
         #[arg(long)]
         data_dir: Option<PathBuf>,
-
     },
     /// Export a conversation to markdown or other formats
     Export {
@@ -607,7 +601,6 @@ pub enum Commands {
         /// Number of messages before/after (default: 3)
         #[arg(long, short = 'C', default_value_t = 3)]
         context: usize,
-
     },
     /// Show activity timeline for a time range
     Timeline {
@@ -806,8 +799,6 @@ pub enum ImportCommand {
         /// Output directory (default: ChatGPT app support dir on macOS, or ~/.local/share/cass/chatgpt/ on Linux)
         #[arg(long)]
         output_dir: Option<PathBuf>,
-
-
     },
 }
 
@@ -819,7 +810,6 @@ pub enum SourcesCommand {
         /// Show detailed information
         #[arg(long, short)]
         verbose: bool,
-
     },
     /// Add a new remote source
     Add {
@@ -854,7 +844,6 @@ pub enum SourcesCommand {
         /// Check only specific source (defaults to all)
         #[arg(long, short)]
         source: Option<String>,
-
     },
     /// Synchronize sessions from remote sources
     Sync {
@@ -870,7 +859,6 @@ pub enum SourcesCommand {
         /// Dry run - show what would be synced without actually syncing
         #[arg(long)]
         dry_run: bool,
-
     },
     /// Manage path mappings for a source (P6.3)
     #[command(subcommand)]
@@ -883,7 +871,6 @@ pub enum SourcesCommand {
         /// Skip hosts that are already configured as sources
         #[arg(long)]
         skip_existing: bool,
-
     },
     /// Interactive wizard to discover, configure, and set up remote sources.
     ///
@@ -976,9 +963,7 @@ pub enum SourcesCommand {
 #[derive(Subcommand, Debug, Clone)]
 pub enum ModelsCommand {
     /// Show model installation status
-    Status {
-
-    },
+    Status {},
     /// Download and install the semantic search model
     Install {
         /// Model to install (default: all-minilm-l6-v2)
@@ -1005,7 +990,6 @@ pub enum ModelsCommand {
         /// Override data dir
         #[arg(long)]
         data_dir: Option<PathBuf>,
-
     },
     /// Remove model files to free disk space
     Remove {
@@ -1021,7 +1005,6 @@ pub enum ModelsCommand {
     },
     /// Check for model updates
     CheckUpdate {
-
         /// Override data dir
         #[arg(long)]
         data_dir: Option<PathBuf>,
@@ -1035,7 +1018,6 @@ pub enum MappingsAction {
     List {
         /// Source name
         source: String,
-
     },
     /// Add a path mapping
     Add {
@@ -1186,7 +1168,9 @@ pub struct AnalyticsCommon {
     pub source: Option<String>,
 
     // ---- Output ----
-
+    /// Output as JSON (for automation)
+    #[arg(long, visible_alias = "robot")]
+    pub json: bool,
 
     /// Override data dir
     #[arg(long)]
@@ -1883,10 +1867,7 @@ fn format_missing_subcommand_error(args: &[String]) -> String {
                 "cass models verify --json",
             ],
         ),
-        "import" => (
-            &["chatgpt"],
-            &["cass import chatgpt /path/to/conversations.json"],
-        ),
+        "import" => (&["chatgpt"], &["cass import chatgpt /path/to/conversations.json"]),
         _ => (&[], &["cass --help"]),
     };
 
@@ -2893,9 +2874,9 @@ async fn execute_cli(
                         tier_mode,
                     };
 
-                    let effective_format = cli.robot_format.unwrap_or_else(|| {
-                        robot_format_from_env().unwrap_or(RobotFormat::Json)
-                    });
+                    let effective_format = cli
+                        .robot_format
+                        .unwrap_or_else(|| robot_format_from_env().unwrap_or(RobotFormat::Json));
 
                     run_cli_search(
                         &query,
@@ -2950,10 +2931,7 @@ async fn execute_cli(
                         by_source,
                     )?;
                 }
-                Commands::Diag {
-                    data_dir,
-                    verbose,
-                } => {
+                Commands::Diag { data_dir, verbose } => {
                     let structured_format = cli.robot_format.or_else(robot_format_from_env);
                     run_diag(&data_dir, cli.db.clone(), structured_format, verbose)?;
                 }
@@ -3128,7 +3106,10 @@ async fn execute_cli(
                         }
 
                         // Print warnings
-                        if !validation.warnings.is_empty() && structured_format.is_none() && !robot_mode_here {
+                        if !validation.warnings.is_empty()
+                            && structured_format.is_none()
+                            && !robot_mode_here
+                        {
                             eprintln!("Warnings:");
                             for warn in &validation.warnings {
                                 eprintln!("  - {}", warn);
@@ -3598,9 +3579,13 @@ async fn execute_cli(
                     workspace,
                     current,
                     limit,
+                    json,
                     data_dir,
                 } => {
-                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    let structured_format = cli
+                        .robot_format
+                        .or(if json { Some(RobotFormat::Json) } else { None })
+                        .or_else(robot_format_from_env);
                     run_sessions(
                         workspace.as_ref(),
                         current,
@@ -3697,9 +3682,10 @@ async fn execute_cli(
                 Commands::Models(subcmd) => {
                     let subcmd = subcmd.clone();
                     let cli_clone = cli.clone();
-                    let result =
-                        asupersync::runtime::spawn_blocking(move || run_models_command(subcmd, &cli_clone))
-                            .await;
+                    let result = asupersync::runtime::spawn_blocking(move || {
+                        run_models_command(subcmd, &cli_clone)
+                    })
+                    .await;
                     result?;
                 }
                 Commands::Import(subcmd) => {
@@ -3715,10 +3701,7 @@ async fn execute_cli(
 
 async fn handle_import(cmd: ImportCommand, cli: &Cli) -> CliResult<()> {
     match cmd {
-        ImportCommand::Chatgpt {
-            path,
-            output_dir,
-        } => {
+        ImportCommand::Chatgpt { path, output_dir } => {
             let structured_format = cli.robot_format.or_else(robot_format_from_env);
             import_chatgpt_export(&path, output_dir.as_deref(), structured_format).await
         }
@@ -3783,7 +3766,14 @@ fn run_analytics(cmd: AnalyticsCommand, db_path: Option<PathBuf>, cli: &Cli) -> 
 
     let elapsed_ms = start.elapsed().as_millis() as u64;
 
-    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+    let structured_format = cli
+        .robot_format
+        .or(if common.json {
+            Some(RobotFormat::Json)
+        } else {
+            None
+        })
+        .or_else(robot_format_from_env);
 
     let envelope = serde_json::json!({
         "command": format!("analytics/{label}"),
@@ -4356,15 +4346,13 @@ async fn import_chatgpt_export(
         imported += 1;
     }
 
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(_fmt) = structured_format {
         let result = serde_json::json!({
@@ -4461,34 +4449,6 @@ fn probe_state_db(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IndexRunMode {
-    Index,
-    WatchStartup,
-    Watch,
-    WatchOnce,
-}
-
-impl IndexRunMode {
-    fn parse(raw: &str) -> Option<Self> {
-        match raw.trim() {
-            "index" => Some(Self::Index),
-            "watch_startup" => Some(Self::WatchStartup),
-            "watch" => Some(Self::Watch),
-            "watch_once" => Some(Self::WatchOnce),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-struct IndexRunSnapshot {
-    active: bool,
-    pid: Option<u32>,
-    started_at_ms: Option<i64>,
-    db_path: Option<PathBuf>,
-    mode: Option<IndexRunMode>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ActiveIndexRunDetails {
     pid: Option<u32>,
@@ -4498,7 +4458,11 @@ struct ActiveIndexRunDetails {
 }
 
 impl ActiveIndexRunDetails {
-    fn from_snapshot(data_dir: &Path, db_path: &Path, snapshot: IndexRunSnapshot) -> Option<Self> {
+    fn from_snapshot(
+        data_dir: &Path,
+        db_path: &Path,
+        snapshot: crate::search::asset_state::SearchMaintenanceSnapshot,
+    ) -> Option<Self> {
         snapshot.active.then(|| Self {
             pid: snapshot.pid,
             started_at_ms: snapshot.started_at_ms,
@@ -4564,55 +4528,19 @@ fn format_timestamp_millis_rfc3339(ts: i64) -> Option<String> {
     chrono::DateTime::from_timestamp_millis(ts).map(|dt| dt.to_rfc3339())
 }
 
-fn read_index_run_lock_snapshot(data_dir: &Path) -> IndexRunSnapshot {
-    let lock_path = data_dir.join("index-run.lock");
-    let mut file = match OpenOptions::new().read(true).write(true).open(&lock_path) {
-        Ok(file) => file,
-        Err(_) => return IndexRunSnapshot::default(),
-    };
-
-    let mut raw = String::new();
-    let _ = file.read_to_string(&mut raw);
-
-    let mut pid = None;
-    let mut started_at_ms = None;
-    let mut lock_db_path = None::<PathBuf>;
-    let mut mode = None;
-    for line in raw.lines() {
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        match key.trim() {
-            "pid" => pid = value.trim().parse::<u32>().ok(),
-            "started_at_ms" => started_at_ms = value.trim().parse::<i64>().ok(),
-            "db_path" => lock_db_path = Some(PathBuf::from(value.trim())),
-            "mode" => mode = IndexRunMode::parse(value),
-            _ => {}
-        }
-    }
-
-    let active = match file.try_lock_exclusive() {
-        Ok(()) => {
-            let _ = file.unlock();
-            false
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => true,
-        Err(_) => false,
-    };
-
-    IndexRunSnapshot {
-        active,
-        pid,
-        started_at_ms,
-        db_path: lock_db_path,
-        mode,
-    }
+fn read_index_run_lock_snapshot(
+    data_dir: &Path,
+) -> crate::search::asset_state::SearchMaintenanceSnapshot {
+    crate::search::asset_state::read_search_maintenance_snapshot(data_dir)
 }
 
-fn probe_index_run_lock(data_dir: &Path, db_path: &Path) -> IndexRunSnapshot {
+fn probe_index_run_lock(
+    data_dir: &Path,
+    db_path: &Path,
+) -> crate::search::asset_state::SearchMaintenanceSnapshot {
     let snapshot = read_index_run_lock_snapshot(data_dir);
     if snapshot.db_path.as_deref() != Some(db_path) {
-        return IndexRunSnapshot::default();
+        return crate::search::asset_state::SearchMaintenanceSnapshot::default();
     }
     snapshot
 }
@@ -4649,24 +4577,8 @@ fn state_meta_json(
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    // Use the actual versioned index path (index/v4, not tantivy_index)
-    let index_path = crate::search::tantivy::index_dir(data_dir)
-        .unwrap_or_else(|_| data_dir.join("index").join("v4"));
-    let index_exists = index_path.exists();
     let db_exists = db_path.exists();
-    let rebuild_snapshot = crate::indexer::load_lexical_rebuild_snapshot(&index_path, db_path)
-        .ok()
-        .flatten();
     let index_run = probe_index_run_lock(data_dir, db_path);
-    let watch_active = index_run.active
-        && matches!(
-            index_run.mode,
-            Some(IndexRunMode::WatchStartup | IndexRunMode::Watch)
-        );
-    // The index-run lock covers the full `cass index` lifecycle. Distinguish
-    // steady-state watch mode from rebuild work so `cass status` does not
-    // report an idle watcher as perpetually rebuilding.
-    let rebuild_active = index_run.active && !matches!(index_run.mode, Some(IndexRunMode::Watch));
 
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4689,7 +4601,9 @@ fn state_meta_json(
     let db_open_error = db_snapshot.open_error;
     let counts_skipped = db_snapshot.counts_skipped;
 
-    if last_indexed_at.is_none() && index_exists {
+    let index_path = crate::search::tantivy::index_dir(data_dir)
+        .unwrap_or_else(|_| data_dir.join("index").join("v4"));
+    if last_indexed_at.is_none() && index_path.exists() {
         let meta_path = index_path.join("meta.json");
         let probe_path = if meta_path.exists() {
             meta_path
@@ -4702,32 +4616,74 @@ fn state_meta_json(
             .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as i64);
     }
-
-    let pending_sessions = rebuild_snapshot
-        .as_ref()
-        .map(|snapshot| {
-            snapshot
-                .total_conversations
-                .saturating_sub(snapshot.processed_conversations)
-        })
-        .unwrap_or(0);
-
-    let index_age_secs = last_indexed_at.and_then(|ts| {
-        if ts <= 0 {
-            return None;
+    let assets = crate::search::asset_state::inspect_search_assets(
+        data_dir,
+        db_path,
+        stale_threshold,
+        last_indexed_at,
+        now_secs,
+        index_run.clone(),
+        crate::search::asset_state::SemanticPreference::DefaultModel,
+    )
+    .unwrap_or_else(|err| {
+        let summary = err.to_string();
+        crate::search::asset_state::SearchAssetSnapshot {
+            lexical: crate::search::asset_state::LexicalAssetState {
+                status: "error",
+                exists: index_path.exists(),
+                fresh: false,
+                stale: true,
+                rebuilding: index_run
+                    .mode
+                    .is_some_and(crate::search::asset_state::SearchMaintenanceMode::rebuild_active)
+                    && index_run.active,
+                watch_active: index_run
+                    .mode
+                    .is_some_and(crate::search::asset_state::SearchMaintenanceMode::watch_active)
+                    && index_run.active,
+                last_indexed_at_ms: last_indexed_at,
+                age_seconds: last_indexed_at
+                    .and_then(|ts| (ts > 0).then(|| now_secs.saturating_sub((ts / 1000) as u64))),
+                stale_threshold_seconds: stale_threshold,
+                activity_at_ms: index_run.started_at_ms,
+                pending_sessions: 0,
+                processed_conversations: None,
+                total_conversations: None,
+                indexed_docs: None,
+                status_reason: Some(format!("asset inspection failed: {summary}")),
+                fingerprint: crate::search::asset_state::LexicalFingerprintState {
+                    current_db_fingerprint: None,
+                    checkpoint_fingerprint: None,
+                    matches_current_db_fingerprint: None,
+                },
+                checkpoint: crate::search::asset_state::LexicalCheckpointState {
+                    present: false,
+                    completed: None,
+                    db_matches: None,
+                    schema_matches: None,
+                    page_size_matches: None,
+                },
+            },
+            semantic: crate::search::asset_state::SemanticAssetState {
+                status: "error",
+                availability: "load_failed",
+                summary: format!("asset inspection failed: {summary}"),
+                available: false,
+                can_search: false,
+                fallback_mode: Some("lexical"),
+                preferred_backend: "fastembed",
+                embedder_id: None,
+                vector_index_path: None,
+                model_dir: None,
+                hnsw_path: None,
+                hnsw_ready: false,
+                progressive_ready: false,
+                hint: Some("Use --mode lexical until semantic assets are repaired".to_string()),
+            },
         }
-        let ts_secs = (ts / 1000) as u64;
-        Some(now_secs.saturating_sub(ts_secs))
     });
-    let is_stale = match index_age_secs {
-        None => true,
-        Some(age) => age > stale_threshold,
-    };
-    let fresh = index_exists && !is_stale;
-    let rebuild_updated_at = rebuild_snapshot
-        .as_ref()
-        .and_then(|snapshot| (snapshot.updated_at_ms > 0).then_some(snapshot.updated_at_ms))
-        .or(index_run.started_at_ms);
+    let lexical = &assets.lexical;
+    let semantic = &assets.semantic;
 
     let ts_str = chrono::DateTime::from_timestamp(now_secs as i64, 0)
         .unwrap_or_else(chrono::Utc::now)
@@ -4735,22 +4691,36 @@ fn state_meta_json(
 
     serde_json::json!({
         "index": {
-            "exists": index_exists,
-            "fresh": fresh,
+            "exists": lexical.exists,
+            "status": lexical.status,
+            "reason": lexical.status_reason,
+            "fresh": lexical.fresh,
             "last_indexed_at": last_indexed_at.map(|ts| {
                 chrono::DateTime::from_timestamp_millis(ts)
                     .unwrap_or_else(chrono::Utc::now)
                     .to_rfc3339()
             }),
-            "age_seconds": index_age_secs,
-            "stale": is_stale,
+            "age_seconds": lexical.age_seconds,
+            "stale": lexical.stale,
             "stale_threshold_seconds": stale_threshold,
-            "rebuilding": rebuild_active,
-            "activity_at": rebuild_updated_at.map(|ts| {
+            "rebuilding": lexical.rebuilding,
+            "activity_at": lexical.activity_at_ms.map(|ts| {
                 chrono::DateTime::from_timestamp_millis(ts)
                     .unwrap_or_else(chrono::Utc::now)
                     .to_rfc3339()
-            })
+            }),
+            "fingerprint": {
+                "current_db_fingerprint": lexical.fingerprint.current_db_fingerprint,
+                "checkpoint_fingerprint": lexical.fingerprint.checkpoint_fingerprint,
+                "matches_current_db_fingerprint": lexical.fingerprint.matches_current_db_fingerprint,
+            },
+            "checkpoint": {
+                "present": lexical.checkpoint.present,
+                "completed": lexical.checkpoint.completed,
+                "db_matches": lexical.checkpoint.db_matches,
+                "schema_matches": lexical.checkpoint.schema_matches,
+                "page_size_matches": lexical.checkpoint.page_size_matches,
+            }
         },
         "database": {
             "exists": db_exists,
@@ -4761,29 +4731,42 @@ fn state_meta_json(
             "counts_skipped": counts_skipped
         },
         "pending": {
-            "sessions": pending_sessions,
-            "watch_active": watch_active
+            "sessions": lexical.pending_sessions,
+            "watch_active": lexical.watch_active
         },
         "rebuild": {
-            "active": rebuild_active,
+            "active": lexical.rebuilding,
             "pid": index_run.pid,
+            "mode": index_run.mode.map(|mode| mode.as_lock_value()),
             "started_at": index_run.started_at_ms.map(|ts| {
                 chrono::DateTime::from_timestamp_millis(ts)
                     .unwrap_or_else(chrono::Utc::now)
                     .to_rfc3339()
             }),
-            "updated_at": rebuild_updated_at.map(|ts| {
+            "updated_at": lexical.activity_at_ms.map(|ts| {
                 chrono::DateTime::from_timestamp_millis(ts)
                     .unwrap_or_else(chrono::Utc::now)
                     .to_rfc3339()
             }),
-            "processed_conversations": rebuild_snapshot
-                .as_ref()
-                .map(|snapshot| snapshot.processed_conversations),
-            "total_conversations": rebuild_snapshot
-                .as_ref()
-                .map(|snapshot| snapshot.total_conversations),
-            "indexed_docs": rebuild_snapshot.as_ref().map(|snapshot| snapshot.indexed_docs)
+            "processed_conversations": lexical.processed_conversations,
+            "total_conversations": lexical.total_conversations,
+            "indexed_docs": lexical.indexed_docs
+        },
+        "semantic": {
+            "status": semantic.status,
+            "availability": semantic.availability,
+            "summary": semantic.summary,
+            "available": semantic.available,
+            "can_search": semantic.can_search,
+            "fallback_mode": semantic.fallback_mode,
+            "preferred_backend": semantic.preferred_backend,
+            "embedder_id": semantic.embedder_id,
+            "vector_index_path": semantic.vector_index_path.as_ref().map(|path| path.display().to_string()),
+            "model_dir": semantic.model_dir.as_ref().map(|path| path.display().to_string()),
+            "hnsw_path": semantic.hnsw_path.as_ref().map(|path| path.display().to_string()),
+            "hnsw_ready": semantic.hnsw_ready,
+            "progressive_ready": semantic.progressive_ready,
+            "hint": semantic.hint,
         },
         "_meta": {
             "timestamp": ts_str,
@@ -4798,6 +4781,8 @@ fn state_index_freshness(state: &serde_json::Value) -> Option<serde_json::Value>
     let pending = state.get("pending");
     Some(serde_json::json!({
         "exists": index.get("exists"),
+        "status": index.get("status"),
+        "reason": index.get("reason"),
         "fresh": index.get("fresh"),
         "last_indexed_at": index.get("last_indexed_at"),
         "age_seconds": index.get("age_seconds"),
@@ -4807,7 +4792,6 @@ fn state_index_freshness(state: &serde_json::Value) -> Option<serde_json::Value>
         "pending_sessions": pending.and_then(|p| p.get("sessions"))
     }))
 }
-
 fn state_db_count_json(count: i64, counts_skipped: bool) -> serde_json::Value {
     if counts_skipped {
         serde_json::Value::Null
@@ -8601,6 +8585,20 @@ fn run_status(
         .and_then(|p| p.get("sessions"))
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
+    let semantic_summary = state
+        .get("semantic")
+        .and_then(|s| s.get("summary"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("Semantic asset status unknown");
+    let semantic_status = state
+        .get("semantic")
+        .and_then(|s| s.get("status"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let semantic_hint = state
+        .get("semantic")
+        .and_then(|s| s.get("hint"))
+        .and_then(|v| v.as_str());
 
     let healthy = db_exists && db_opened && index_exists && index_fresh && !rebuild_active;
     let status = if rebuild_active {
@@ -8613,7 +8611,6 @@ fn run_status(
         "unhealthy"
     };
 
-    // Build recommended action
     let recommended_action = if rebuild_active {
         Some("Index rebuild is already in progress".to_string())
     } else if !db_exists {
@@ -8635,15 +8632,13 @@ fn run_status(
         None
     };
 
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(fmt) = structured_format {
         let payload = serde_json::json!({
@@ -8661,6 +8656,7 @@ fn run_status(
             }),
             "pending": state.get("pending").cloned().unwrap_or(serde_json::Value::Null),
             "rebuild": state.get("rebuild").cloned().unwrap_or(serde_json::Value::Null),
+            "semantic": state.get("semantic").cloned().unwrap_or(serde_json::Value::Null),
             "recommended_action": recommended_action,
             "_meta": state.get("_meta").cloned().unwrap_or(serde_json::Value::Null),
         });
@@ -8685,7 +8681,6 @@ fn run_status(
     println!("{status_icon} CASS Status: {status_word}");
     println!();
 
-    // Index info
     println!("Index:");
     if index_exists {
         if let Some(age) = index_age_secs.as_u64() {
@@ -8715,7 +8710,6 @@ fn run_status(
         println!("  Not found - run 'cass index --full'");
     }
 
-    // Database info
     println!();
     println!("Database:");
     if db_exists {
@@ -8748,13 +8742,19 @@ fn run_status(
         println!("  Not found");
     }
 
-    // Pending
+    println!();
+    println!("Semantic:");
+    println!("  Status: {semantic_status}");
+    println!("  Summary: {semantic_summary}");
+    if let Some(hint) = semantic_hint {
+        println!("  Hint: {hint}");
+    }
+
     if pending_sessions > 0 {
         println!();
         println!("Pending: {pending_sessions} sessions awaiting indexing");
     }
 
-    // Recommended action
     if let Some(action) = &recommended_action {
         println!();
         println!("Recommended: {action}");
@@ -8762,16 +8762,6 @@ fn run_status(
 
     Ok(())
 }
-
-/// Minimal health check (<50ms). Exit 0=healthy, 1=unhealthy.
-/// Designed for agent pre-flight checks before complex operations.
-///
-/// Invariant: when --json is requested, this function ALWAYS emits valid JSON
-/// to stdout before returning, even if the database is corrupt or WAL-damaged.
-fn run_health(
-    data_dir_override: &Option<PathBuf>,
-    db_override: Option<PathBuf>,
-    output_format: Option<RobotFormat>,
     stale_threshold: u64,
     _robot_meta: bool,
 ) -> CliResult<()> {

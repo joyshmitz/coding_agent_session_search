@@ -31,6 +31,7 @@ use crate::connectors::{
     pi_agent::PiAgentConnector, qwen::QwenConnector, vibe::VibeConnector,
 };
 use crate::connectors::{NormalizedConversation, NormalizedMessage};
+use crate::search::asset_state::SearchMaintenanceMode;
 use crate::search::tantivy::{TantivyIndex, index_dir, schema_hash_matches};
 use crate::search::vector_index::{ROLE_ASSISTANT, ROLE_SYSTEM, ROLE_TOOL, ROLE_USER};
 
@@ -414,25 +415,7 @@ impl Drop for RunIndexProgressReset {
 
 const LEXICAL_REBUILD_STATE_VERSION: u8 = 2;
 const LEXICAL_REBUILD_PAGE_SIZE: i64 = 200;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IndexRunMode {
-    Index,
-    WatchStartup,
-    Watch,
-    WatchOnce,
-}
-
-impl IndexRunMode {
-    fn as_lock_value(self) -> &'static str {
-        match self {
-            Self::Index => "index",
-            Self::WatchStartup => "watch_startup",
-            Self::Watch => "watch",
-            Self::WatchOnce => "watch_once",
-        }
-    }
-}
+pub(crate) const LEXICAL_REBUILD_PAGE_SIZE_PUBLIC: i64 = LEXICAL_REBUILD_PAGE_SIZE;
 
 #[derive(Debug)]
 struct IndexRunLockGuard {
@@ -450,7 +433,7 @@ impl Drop for IndexRunLockGuard {
 }
 
 impl IndexRunLockGuard {
-    fn write_metadata(&mut self, mode: IndexRunMode) -> Result<()> {
+    fn write_metadata(&mut self, mode: SearchMaintenanceMode) -> Result<()> {
         self.file.set_len(0).with_context(|| {
             format!(
                 "truncating index-run lock file before metadata update: {}",
@@ -478,7 +461,7 @@ impl IndexRunLockGuard {
         Ok(())
     }
 
-    fn set_mode(&mut self, mode: IndexRunMode) -> Result<()> {
+    fn set_mode(&mut self, mode: SearchMaintenanceMode) -> Result<()> {
         self.write_metadata(mode)
     }
 }
@@ -588,7 +571,7 @@ impl LexicalRebuildState {
 fn acquire_index_run_lock(
     data_dir: &Path,
     db_path: &Path,
-    mode: IndexRunMode,
+    mode: SearchMaintenanceMode,
 ) -> Result<IndexRunLockGuard> {
     fs::create_dir_all(data_dir)
         .with_context(|| format!("creating cass data directory {}", data_dir.display()))?;
@@ -889,6 +872,7 @@ fn has_pending_lexical_rebuild(
     Ok(state.matches_run(db_state, LEXICAL_REBUILD_PAGE_SIZE) && state.is_incomplete())
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct LexicalRebuildSnapshot {
     pub db_path: String,
@@ -901,6 +885,46 @@ pub(crate) struct LexicalRebuildSnapshot {
     pub updated_at_ms: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct LexicalRebuildCheckpoint {
+    pub db_path: String,
+    pub total_conversations: usize,
+    pub storage_fingerprint: String,
+    pub committed_offset: i64,
+    pub processed_conversations: usize,
+    pub indexed_docs: usize,
+    pub schema_hash: String,
+    pub page_size: i64,
+    pub completed: bool,
+    pub updated_at_ms: i64,
+}
+
+pub(crate) fn load_lexical_rebuild_checkpoint(
+    index_path: &Path,
+) -> Result<Option<LexicalRebuildCheckpoint>> {
+    let Some(state) = load_lexical_rebuild_state(index_path)? else {
+        return Ok(None);
+    };
+
+    Ok(Some(LexicalRebuildCheckpoint {
+        db_path: state.db.db_path,
+        total_conversations: state.db.total_conversations,
+        storage_fingerprint: state.db.storage_fingerprint,
+        committed_offset: state.committed_offset,
+        processed_conversations: state.processed_conversations,
+        indexed_docs: state.indexed_docs,
+        schema_hash: state.schema_hash,
+        page_size: state.page_size,
+        completed: state.completed,
+        updated_at_ms: state.updated_at_ms,
+    }))
+}
+
+pub(crate) fn lexical_storage_fingerprint_for_db(db_path: &Path) -> Result<String> {
+    lexical_rebuild_storage_fingerprint(db_path)
+}
+
+#[cfg(test)]
 pub(crate) fn load_lexical_rebuild_snapshot(
     index_path: &Path,
     db_path: &Path,
@@ -2032,15 +2056,15 @@ pub fn run_index(
     let _progress_reset = RunIndexProgressReset::new(opts.progress.clone());
     set_progress_last_error(opts.progress.as_ref(), None);
     let initial_lock_mode = if opts.watch {
-        IndexRunMode::WatchStartup
+        SearchMaintenanceMode::WatchStartup
     } else if opts
         .watch_once_paths
         .as_ref()
         .is_some_and(|paths| !paths.is_empty())
     {
-        IndexRunMode::WatchOnce
+        SearchMaintenanceMode::WatchOnce
     } else {
-        IndexRunMode::Index
+        SearchMaintenanceMode::Index
     };
     let mut index_run_lock =
         acquire_index_run_lock(&opts.data_dir, &opts.db_path, initial_lock_mode)?;
@@ -2553,7 +2577,7 @@ pub fn run_index(
         // disabled indefinitely.
         restore_watch_steady_state_checkpoint_policy(&storage, opts.watch);
         if opts.watch {
-            index_run_lock.set_mode(IndexRunMode::Watch)?;
+            index_run_lock.set_mode(SearchMaintenanceMode::Watch)?;
         }
 
         let opts_clone = opts.clone();

@@ -262,6 +262,7 @@ fn state_matches_status() {
         status_json["pending"]["sessions"],
         state_json["pending"]["sessions"]
     );
+    assert_eq!(status_json["semantic"], state_json["semantic"]);
 }
 
 #[test]
@@ -1764,6 +1765,7 @@ fn status_json_returns_health_info() {
     assert!(json["index"].is_object(), "Should have index object");
     assert!(json["database"].is_object(), "Should have database object");
     assert!(json["pending"].is_object(), "Should have pending object");
+    assert!(json["semantic"].is_object(), "Should have semantic object");
 
     // Database should exist in fixture
     assert_eq!(

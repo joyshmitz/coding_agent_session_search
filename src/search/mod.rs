@@ -19,6 +19,7 @@
 //! - **[`two_tier_search`]**: Two-tier progressive search with fast/quality embeddings (bd-3dcw).
 
 pub mod ann_index;
+pub mod asset_state;
 pub mod canonicalize;
 pub mod daemon_client;
 pub mod embedder;

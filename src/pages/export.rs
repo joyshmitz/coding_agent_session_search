@@ -38,6 +38,14 @@ pub struct ExportStats {
     pub messages_processed: usize,
 }
 
+type SnippetExportRow = (
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    Option<String>,
+    String,
+);
+
 impl ExportEngine {
     pub fn new(source_db_path: &Path, output_path: &Path, filter: ExportFilter) -> Self {
         Self {
@@ -359,7 +367,7 @@ impl ExportEngine {
                         )?;
 
                         // 5. Migrate Snippets for this message (bd-4x92)
-                        let snip_rows: Vec<(Option<String>, Option<i64>, Option<i64>, Option<String>, String)> = src.query_map_collect(
+                        let snip_rows: Vec<SnippetExportRow> = src.query_map_collect(
                             "SELECT file_path, start_line, end_line, language, snippet_text FROM snippets WHERE message_id = ?1",
                             params![*source_message_id],
                             |row: &FrankenRow| {
