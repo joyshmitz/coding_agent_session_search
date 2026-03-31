@@ -2294,8 +2294,7 @@ pub fn run_index(
 
         if rebuild_from_canonical_only {
             drop(t_index);
-            let rebuild_convs =
-                count_total_conversations_exact(&storage)?;
+            let rebuild_convs = count_total_conversations_exact(&storage)?;
             let rebuild_docs = rebuild_tantivy_from_db(
                 &opts.db_path,
                 &opts.data_dir,
@@ -2365,8 +2364,7 @@ pub fn run_index(
 
                 if opts.full || historical_salvage.messages_imported > 0 {
                     drop(t_index);
-                    let rebuild_convs =
-                        count_total_conversations_exact(&storage)?;
+                    let rebuild_convs = count_total_conversations_exact(&storage)?;
                     let rebuild_docs = rebuild_tantivy_from_db(
                         &opts.db_path,
                         &opts.data_dir,
@@ -4990,12 +4988,24 @@ pub mod persist {
             agent_slug: conv.agent_slug.clone(),
             workspace: conv.workspace.clone(),
             external_id: conv.external_id.clone(),
-            title: conv.title.clone(),
+            title: if should_redact {
+                conv.title
+                    .as_ref()
+                    .map(|t| super::redact_secrets::redact_text(t))
+            } else {
+                conv.title.clone()
+            },
             source_path: conv.source_path.clone(),
             started_at: conv.started_at,
             ended_at: conv.ended_at,
             approx_tokens: None,
-            metadata_json: conv.metadata.clone(),
+            metadata_json: if should_redact {
+                let s = serde_json::to_string(&conv.metadata).unwrap_or_default();
+                let redacted = super::redact_secrets::redact_text(&s);
+                serde_json::from_str(&redacted).unwrap_or_else(|_| conv.metadata.clone())
+            } else {
+                conv.metadata.clone()
+            },
             messages: conv
                 .messages
                 .iter()
@@ -5027,7 +5037,13 @@ pub mod persist {
                                 start_line: s.start_line,
                                 end_line: s.end_line,
                                 language: s.language.clone(),
-                                snippet_text: s.snippet_text.clone(),
+                                snippet_text: s.snippet_text.as_ref().map(|snippet_text| {
+                                    if should_redact {
+                                        super::redact_secrets::redact_text(snippet_text)
+                                    } else {
+                                        snippet_text.clone()
+                                    }
+                                }),
                             })
                             .collect(),
                     }

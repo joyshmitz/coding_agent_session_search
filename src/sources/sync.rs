@@ -1236,10 +1236,18 @@ impl SyncEngine {
         let mut files_transferred = 0u64;
         let mut bytes_transferred = 0u64;
 
+        // For consistency with rsync and scp, we should create a subdirectory
+        // with the remote path's leaf name inside the container directory.
+        let leaf_name = Path::new(remote_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("remote");
+        let target_local_path = local_path.join(leaf_name);
+
         if let Err(e) = self.sftp_download_recursive(
             &sftp,
             Path::new(&expanded_path),
-            &local_path,
+            &target_local_path,
             &mut files_transferred,
             &mut bytes_transferred,
         ) {
@@ -1351,7 +1359,7 @@ impl SyncEngine {
             .map_err(|e| format!("Failed to stat {}: {}", remote_path.display(), e))?;
 
         if stat.is_dir() {
-            // Create local directory
+            // Create local directory for this directory item
             std::fs::create_dir_all(local_path)
                 .map_err(|e| format!("Failed to create {}: {}", local_path.display(), e))?;
 
@@ -1390,19 +1398,14 @@ impl SyncEngine {
                 // Skip symlinks and other types for safety
             }
         } else if stat.is_file() {
-            // Single file - download to local path
-            // Ensure the safe-name directory exists for this remote path
-            std::fs::create_dir_all(local_path)
-                .map_err(|e| format!("Failed to create local dir: {}", e))?;
+            // Ensure the parent directory exists
+            if let Some(parent) = local_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    format!("Failed to create local dir {}: {}", parent.display(), e)
+                })?;
+            }
 
-            // For single files, use the file name from remote path
-            let file_name = remote_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("file");
-            let local_file = local_path.join(file_name);
-
-            self.sftp_download_file(sftp, remote_path, &local_file, bytes_transferred)?;
+            self.sftp_download_file(sftp, remote_path, local_path, bytes_transferred)?;
             *files_transferred += 1;
         } else {
             // Not a regular file or directory (symlink, socket, etc.) - skip with warning

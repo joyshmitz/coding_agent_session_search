@@ -62,6 +62,7 @@ pub enum SecretLocation {
     ConversationMetadata,
     MessageContent,
     MessageMetadata,
+    MessageSnippet,
 }
 
 impl SecretLocation {
@@ -71,6 +72,7 @@ impl SecretLocation {
             SecretLocation::ConversationMetadata => "conversation.metadata",
             SecretLocation::MessageContent => "message.content",
             SecretLocation::MessageMetadata => "message.metadata",
+            SecretLocation::MessageSnippet => "message.snippet",
         }
     }
 }
@@ -386,6 +388,59 @@ pub fn scan_database<P: AsRef<Path>>(
                     &mut truncated,
                 );
             }
+
+            if truncated {
+                break;
+            }
+
+            if let Some(pb) = progress {
+                pb.inc(1);
+            }
+        }
+    }
+
+    if !truncated {
+        let (snip_where, snip_params) = build_where_clause(filters)?;
+        let snip_sql = format!(
+            "SELECT s.snippet_text, m.id, m.idx, c.id, c.source_path, a.slug, w.path\n             FROM snippets s\n             JOIN messages m ON s.message_id = m.id\n             JOIN conversations c ON m.conversation_id = c.id\n             JOIN agents a ON c.agent_id = a.id\n             LEFT JOIN workspaces w ON c.workspace_id = w.id{}",
+            snip_where
+        );
+        let snip_param_values = params_from_iter(snip_params);
+        let snip_rows = conn.query_with_params(&snip_sql, &snip_param_values)?;
+
+        for row in &snip_rows {
+            if running
+                .as_ref()
+                .is_some_and(|flag| !flag.load(Ordering::Relaxed))
+            {
+                break;
+            }
+            let snippet_text: String = row.get_typed(0)?;
+            let msg_id: i64 = row.get_typed(1)?;
+            let msg_idx: i64 = row.get_typed(2)?;
+            let conv_id: i64 = row.get_typed(3)?;
+            let source_path: String = row.get_typed(4)?;
+            let agent_slug: String = row.get_typed(5)?;
+            let workspace_path: Option<String> = row.get_typed(6)?;
+
+            let ctx = ScanContext {
+                agent: Some(agent_slug),
+                workspace: workspace_path,
+                source_path: Some(source_path),
+                conversation_id: Some(conv_id),
+                message_id: Some(msg_id),
+                message_idx: Some(msg_idx),
+            };
+
+            scan_text(
+                &snippet_text,
+                SecretLocation::MessageSnippet,
+                &ctx,
+                config,
+                &mut findings,
+                &mut seen,
+                &mut truncated,
+            );
 
             if truncated {
                 break;

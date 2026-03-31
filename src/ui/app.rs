@@ -7747,8 +7747,6 @@ impl CassApp {
             inner
         };
 
-        self.last_suggestion_rects.borrow_mut().clear();
-
         if self.panes.is_empty() {
             // Show a loading spinner while the empty state is still being
             // actively searched or refined.
@@ -16049,6 +16047,11 @@ impl super::ftui_adapter::Model for CassApp {
                     self.push_undo("Set time filter");
                     self.filters.created_from = from;
                     self.filters.created_to = to;
+                    self.time_preset = if from.is_none() && to.is_none() {
+                        TimePreset::All
+                    } else {
+                        TimePreset::Custom
+                    };
                     ftui::Cmd::msg(CassMsg::SearchRequested)
                 }
             }
@@ -17204,7 +17207,10 @@ impl super::ftui_adapter::Model for CassApp {
                                     until_ms: to_ms,
                                 })
                             } else {
-                                ftui::Cmd::msg(CassMsg::FilterTimeSet { from: ts, to: to_ms })
+                                ftui::Cmd::msg(CassMsg::FilterTimeSet {
+                                    from: ts,
+                                    to: to_ms,
+                                })
                             }
                         } else {
                             self.status = format!("Invalid date: {buf}");
@@ -17231,7 +17237,10 @@ impl super::ftui_adapter::Model for CassApp {
                                     until_ms: ts,
                                 })
                             } else {
-                                ftui::Cmd::msg(CassMsg::FilterTimeSet { from: from_ms, to: ts })
+                                ftui::Cmd::msg(CassMsg::FilterTimeSet {
+                                    from: from_ms,
+                                    to: ts,
+                                })
                             }
                         } else {
                             self.status = format!("Invalid date: {buf}");
@@ -19821,6 +19830,21 @@ impl super::ftui_adapter::Model for CassApp {
         };
         let render_content = deco.render_content;
 
+        // Initialize last_terminal_size if not already set.
+        if self.last_terminal_size.get() == (0, 0) {
+            self.last_terminal_size.set((frame.width(), frame.height()));
+        }
+
+        // On resize, clear all layout-dependent hit-test caches.
+        if self.last_terminal_size.get() != (frame.width(), frame.height()) {
+            self.last_terminal_size.set((frame.width(), frame.height()));
+            self.last_pill_rects.borrow_mut().clear();
+            self.last_pane_rects.borrow_mut().clear();
+            self.last_saved_view_row_areas.borrow_mut().clear();
+            self.last_suggestion_rects.borrow_mut().clear();
+            *self.last_pane_first_index.borrow_mut() = 0;
+        }
+
         let styles = self.resolved_style_context();
         let plain = ftui::Style::default();
 
@@ -20012,7 +20036,6 @@ impl super::ftui_adapter::Model for CassApp {
                     });
                 let query_inner = query_block.inner(vertical[0]);
                 query_block.render(vertical[0], frame);
-                self.last_pill_rects.borrow_mut().clear();
                 if !query_inner.is_empty() {
                     let rows = if query_inner.height >= 2 {
                         Flex::vertical()
@@ -20567,19 +20590,6 @@ impl super::ftui_adapter::Model for CassApp {
             }
 
             AppSurface::Analytics => {
-                // Clear search hit regions — not visible on analytics surface.
-                *self.last_search_bar_area.borrow_mut() = None;
-                *self.last_results_inner.borrow_mut() = None;
-                *self.last_detail_area.borrow_mut() = None;
-                *self.last_status_area.borrow_mut() = None;
-                *self.last_content_area.borrow_mut() = None;
-                *self.last_split_handle_area.borrow_mut() = None;
-                self.last_pill_rects.borrow_mut().clear();
-                self.last_pane_rects.borrow_mut().clear();
-                *self.last_pane_first_index.borrow_mut() = 0;
-                self.last_saved_view_row_areas.borrow_mut().clear();
-                self.last_suggestion_rects.borrow_mut().clear();
-
                 // ── Analytics surface layout ─────────────────────────────
                 let atopo = breakpoint.analytics_topology();
                 let analytics_footer_rows = if self.should_show_progress_bar() {
@@ -20837,19 +20847,6 @@ impl super::ftui_adapter::Model for CassApp {
             }
 
             AppSurface::Sources => {
-                // Clear search hit regions — not visible on sources surface.
-                *self.last_search_bar_area.borrow_mut() = None;
-                *self.last_results_inner.borrow_mut() = None;
-                *self.last_detail_area.borrow_mut() = None;
-                *self.last_status_area.borrow_mut() = None;
-                *self.last_content_area.borrow_mut() = None;
-                *self.last_split_handle_area.borrow_mut() = None;
-                self.last_pill_rects.borrow_mut().clear();
-                self.last_pane_rects.borrow_mut().clear();
-                *self.last_pane_first_index.borrow_mut() = 0;
-                self.last_saved_view_row_areas.borrow_mut().clear();
-                self.last_suggestion_rects.borrow_mut().clear();
-
                 // ── Sources surface layout ─────────────────────────────
                 let vertical = Flex::vertical()
                     .constraints([

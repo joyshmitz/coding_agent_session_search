@@ -126,6 +126,20 @@ impl ExportEngine {
                 .context("Failed to create messages table")?;
 
                 tx.execute(
+                    "CREATE TABLE snippets (
+                id INTEGER PRIMARY KEY,
+                message_id INTEGER NOT NULL,
+                file_path TEXT,
+                start_line INTEGER,
+                end_line INTEGER,
+                language TEXT,
+                snippet_text TEXT,
+                FOREIGN KEY (message_id) REFERENCES messages(id)
+            )",
+                )
+                .context("Failed to create snippets table")?;
+
+                tx.execute(
                     "CREATE TABLE export_meta (
                 key TEXT PRIMARY KEY,
                 value TEXT
@@ -343,6 +357,29 @@ impl ExportEngine {
                             "INSERT INTO messages_code_fts (rowid, content) VALUES (?1, ?2)",
                             params![*source_message_id, content.as_str()],
                         )?;
+
+                        // 5. Migrate Snippets for this message (bd-4x92)
+                        let snip_rows: Vec<(Option<String>, Option<i64>, Option<i64>, Option<String>, String)> = src.query_map_collect(
+                            "SELECT file_path, start_line, end_line, language, snippet_text FROM snippets WHERE message_id = ?1",
+                            params![*source_message_id],
+                            |row: &FrankenRow| {
+                                Ok((
+                                    row.get_typed::<Option<String>>(0)?,
+                                    row.get_typed::<Option<i64>>(1)?,
+                                    row.get_typed::<Option<i64>>(2)?,
+                                    row.get_typed::<Option<String>>(3)?,
+                                    row.get_typed::<String>(4)?,
+                                ))
+                            },
+                        )?;
+
+                        for (fpath, start, end, lang, stext) in snip_rows {
+                            tx.execute_compat(
+                                "INSERT INTO snippets (message_id, file_path, start_line, end_line, language, snippet_text)
+                                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                                params![*source_message_id, fpath, start, end, lang, stext.as_str()],
+                            )?;
+                        }
 
                         msg_processed += 1;
                     }

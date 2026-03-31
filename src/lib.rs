@@ -127,6 +127,10 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub nowrap: bool,
 
+    /// Output format for robot mode (overrides --json when specified)
+    #[arg(long, value_enum, global = true)]
+    pub robot_format: Option<RobotFormat>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -254,10 +258,6 @@ pub enum Commands {
         /// Output as JSON (--robot also works). Equivalent to --robot-format json
         #[arg(long, visible_alias = "robot")]
         json: bool,
-        /// Robot output format: json (pretty), jsonl (streaming), compact (single-line), sessions (paths), toon (token-optimized).
-        /// Env: CASS_OUTPUT_FORMAT, TOON_DEFAULT_FORMAT.
-        #[arg(long, value_enum)]
-        robot_format: Option<RobotFormat>,
         /// Include extended metadata in robot output (`elapsed_ms`, `wildcard_fallback`, `cache_stats`)
         #[arg(long)]
         robot_meta: bool,
@@ -388,9 +388,7 @@ pub enum Commands {
         /// Override data dir
         #[arg(long)]
         data_dir: Option<PathBuf>,
-        /// Output as JSON
-        #[arg(long, visible_alias = "robot")]
-        json: bool,
+
         /// Filter by source: 'local', 'remote', 'all', or a specific source hostname
         #[arg(long)]
         source: Option<String>,
@@ -403,9 +401,7 @@ pub enum Commands {
         /// Override data dir
         #[arg(long)]
         data_dir: Option<PathBuf>,
-        /// Output as JSON
-        #[arg(long, visible_alias = "robot")]
-        json: bool,
+
         /// Include verbose information (file sizes, timestamps)
         #[arg(long, short)]
         verbose: bool,
@@ -415,9 +411,7 @@ pub enum Commands {
         /// Override data dir
         #[arg(long)]
         data_dir: Option<PathBuf>,
-        /// Output as JSON (default for robot consumption)
-        #[arg(long, visible_alias = "robot")]
-        json: bool,
+
         /// Include _meta block (elapsed, freshness, data_dir/db_path)
         #[arg(long, default_value_t = false)]
         robot_meta: bool,
@@ -427,18 +421,14 @@ pub enum Commands {
     },
     /// Discover available features, versions, and limits for agent introspection
     Capabilities {
-        /// Output as JSON (default for robot consumption)
-        #[arg(long, visible_alias = "robot")]
-        json: bool,
+
     },
     /// Quick state/health check (alias of status)
     State {
         /// Override data dir
         #[arg(long)]
         data_dir: Option<PathBuf>,
-        /// Output as JSON (default for robot consumption)
-        #[arg(long, visible_alias = "robot")]
-        json: bool,
+
         /// Include _meta block (elapsed, freshness, data_dir/db_path)
         #[arg(long, default_value_t = false)]
         robot_meta: bool,
@@ -448,15 +438,11 @@ pub enum Commands {
     },
     /// Show API + contract version info
     ApiVersion {
-        /// Output as JSON (default for robot consumption)
-        #[arg(long, visible_alias = "robot")]
-        json: bool,
+
     },
     /// Full API schema introspection - commands, arguments, and response schemas
     Introspect {
-        /// Output as JSON (default for robot consumption)
-        #[arg(long, visible_alias = "robot")]
-        json: bool,
+
     },
     /// View a source file at a specific line (follow up on search results)
     View {
@@ -468,9 +454,7 @@ pub enum Commands {
         /// Number of context lines before/after
         #[arg(long, short = 'C', default_value_t = 5)]
         context: usize,
-        /// Output as JSON
-        #[arg(long, visible_alias = "robot")]
-        json: bool,
+
     },
     /// Minimal health check (<50ms). Exit 0=healthy, 1=unhealthy. For agent pre-flight checks.
     Health {
@@ -493,9 +477,7 @@ pub enum Commands {
         /// Override data dir
         #[arg(long)]
         data_dir: Option<PathBuf>,
-        /// Output as JSON
-        #[arg(long, visible_alias = "robot")]
-        json: bool,
+
         /// Apply safe fixes automatically (rebuilds index/db from source data)
         #[arg(long)]
         fix: bool,
@@ -513,9 +495,7 @@ pub enum Commands {
         /// Override data dir
         #[arg(long)]
         data_dir: Option<PathBuf>,
-        /// Output as JSON
-        #[arg(long, visible_alias = "robot")]
-        json: bool,
+
         /// Maximum results per relation type (default: 5)
         #[arg(long, default_value_t = 5)]
         limit: usize,
@@ -534,9 +514,7 @@ pub enum Commands {
         /// Override data dir
         #[arg(long)]
         data_dir: Option<PathBuf>,
-        /// Output as JSON
-        #[arg(long, visible_alias = "robot")]
-        json: bool,
+
     },
     /// Export a conversation to markdown or other formats
     Export {
@@ -629,9 +607,7 @@ pub enum Commands {
         /// Number of messages before/after (default: 3)
         #[arg(long, short = 'C', default_value_t = 3)]
         context: usize,
-        /// Output as JSON
-        #[arg(long, visible_alias = "robot")]
-        json: bool,
+
     },
     /// Show activity timeline for a time range
     Timeline {
@@ -650,9 +626,7 @@ pub enum Commands {
         /// Override data dir
         #[arg(long)]
         data_dir: Option<PathBuf>,
-        /// Output as JSON
-        #[arg(long, visible_alias = "robot")]
-        json: bool,
+
         /// Group by: hour, day, or none
         #[arg(long, value_enum, default_value_t = TimelineGrouping::Hour)]
         group_by: TimelineGrouping,
@@ -833,9 +807,7 @@ pub enum ImportCommand {
         #[arg(long)]
         output_dir: Option<PathBuf>,
 
-        /// Output as JSON
-        #[arg(long, visible_alias = "robot")]
-        json: bool,
+
     },
 }
 
@@ -847,9 +819,7 @@ pub enum SourcesCommand {
         /// Show detailed information
         #[arg(long, short)]
         verbose: bool,
-        /// Output as JSON
-        #[arg(long, visible_alias = "robot")]
-        json: bool,
+
     },
     /// Add a new remote source
     Add {
@@ -884,9 +854,7 @@ pub enum SourcesCommand {
         /// Check only specific source (defaults to all)
         #[arg(long, short)]
         source: Option<String>,
-        /// Output as JSON
-        #[arg(long, visible_alias = "robot")]
-        json: bool,
+
     },
     /// Synchronize sessions from remote sources
     Sync {
@@ -902,9 +870,7 @@ pub enum SourcesCommand {
         /// Dry run - show what would be synced without actually syncing
         #[arg(long)]
         dry_run: bool,
-        /// Output as JSON
-        #[arg(long, visible_alias = "robot")]
-        json: bool,
+
     },
     /// Manage path mappings for a source (P6.3)
     #[command(subcommand)]
@@ -917,9 +883,7 @@ pub enum SourcesCommand {
         /// Skip hosts that are already configured as sources
         #[arg(long)]
         skip_existing: bool,
-        /// Output as JSON
-        #[arg(long, visible_alias = "robot")]
-        json: bool,
+
     },
     /// Interactive wizard to discover, configure, and set up remote sources.
     ///
@@ -1013,9 +977,7 @@ pub enum SourcesCommand {
 pub enum ModelsCommand {
     /// Show model installation status
     Status {
-        /// Output as JSON
-        #[arg(long, visible_alias = "robot")]
-        json: bool,
+
     },
     /// Download and install the semantic search model
     Install {
@@ -1043,9 +1005,7 @@ pub enum ModelsCommand {
         /// Override data dir
         #[arg(long)]
         data_dir: Option<PathBuf>,
-        /// Output as JSON
-        #[arg(long, visible_alias = "robot")]
-        json: bool,
+
     },
     /// Remove model files to free disk space
     Remove {
@@ -1061,9 +1021,7 @@ pub enum ModelsCommand {
     },
     /// Check for model updates
     CheckUpdate {
-        /// Output as JSON
-        #[arg(long, visible_alias = "robot")]
-        json: bool,
+
         /// Override data dir
         #[arg(long)]
         data_dir: Option<PathBuf>,
@@ -1077,9 +1035,7 @@ pub enum MappingsAction {
     List {
         /// Source name
         source: String,
-        /// Output as JSON
-        #[arg(long, visible_alias = "robot")]
-        json: bool,
+
     },
     /// Add a path mapping
     Add {
@@ -1230,9 +1186,7 @@ pub struct AnalyticsCommon {
     pub source: Option<String>,
 
     // ---- Output ----
-    /// Output as JSON (robot-safe)
-    #[arg(long, visible_alias = "robot")]
-    pub json: bool,
+
 
     /// Override data dir
     #[arg(long)]
@@ -2602,7 +2556,7 @@ async fn execute_cli(
 
     // Auto-quiet in robot mode: suppress INFO logs for clean JSON output
     // This ensures AI agents get parseable stdout without log noise on stderr
-    let robot_mode = is_robot_mode(&command);
+    let robot_mode = is_robot_mode(&command, cli);
     let filter = if cli.quiet || robot_mode {
         // Robot mode implies quiet unless verbose is explicitly requested
         if cli.verbose {
@@ -2827,9 +2781,10 @@ async fn execute_cli(
                     semantic,
                     build_hnsw,
                     embedder,
-                    json,
                     idempotency_key,
+                    json: _,
                 } => {
+                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
                     run_index_with_data(
                         cli.db.clone(),
                         full,
@@ -2842,7 +2797,7 @@ async fn execute_cli(
                         build_hnsw,
                         embedder,
                         progress,
-                        json,
+                        structured_format,
                         idempotency_key,
                     )?;
                 }
@@ -2853,7 +2808,6 @@ async fn execute_cli(
                     limit,
                     offset,
                     json,
-                    robot_format,
                     robot_meta,
                     fields,
                     max_content_length,
@@ -2939,6 +2893,10 @@ async fn execute_cli(
                         tier_mode,
                     };
 
+                    let effective_format = cli.robot_format.unwrap_or_else(|| {
+                        robot_format_from_env().unwrap_or(RobotFormat::Json)
+                    });
+
                     run_cli_search(
                         &query,
                         &agent,
@@ -2946,7 +2904,7 @@ async fn execute_cli(
                         &limit,
                         &offset,
                         &json,
-                        robot_format,
+                        Some(effective_format),
                         robot_meta,
                         fields,
                         max_content_length,
@@ -2980,40 +2938,46 @@ async fn execute_cli(
                 }
                 Commands::Stats {
                     data_dir,
-                    json,
                     source,
                     by_source,
                 } => {
+                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
                     run_stats(
                         &data_dir,
                         cli.db.clone(),
-                        json,
+                        structured_format,
                         source.as_deref(),
                         by_source,
                     )?;
                 }
                 Commands::Diag {
                     data_dir,
-                    json,
                     verbose,
                 } => {
-                    run_diag(&data_dir, cli.db.clone(), json, verbose)?;
+                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    run_diag(&data_dir, cli.db.clone(), structured_format, verbose)?;
                 }
                 Commands::Status {
                     data_dir,
-                    json,
                     robot_meta,
                     stale_threshold,
                 } => {
-                    run_status(&data_dir, cli.db.clone(), json, stale_threshold, robot_meta)?;
+                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    run_status(
+                        &data_dir,
+                        cli.db.clone(),
+                        structured_format,
+                        stale_threshold,
+                        robot_meta,
+                    )?;
                 }
                 Commands::View {
                     path,
                     line,
                     context,
-                    json,
                 } => {
-                    run_view(&path, line, context, json || robot_mode)?;
+                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    run_view(&path, line, context, structured_format)?;
                 }
                 Commands::Pages {
                     export_only,
@@ -3033,7 +2997,6 @@ async fn execute_cli(
                     fail_on_secrets,
                     secrets_allow,
                     secrets_deny,
-                    json,
                     verbose,
                     no_encryption,
                     i_understand_unencrypted_risks,
@@ -3044,7 +3007,10 @@ async fn execute_cli(
                     config,
                     validate_config,
                     example_config,
+                    json: _,
                 } => {
+                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    let robot_mode_here = structured_format.is_some() || robot_mode;
                     // Handle --example-config (show example config and exit)
                     if example_config {
                         println!("{}", crate::pages::config_input::example_config());
@@ -3141,12 +3107,12 @@ async fn execute_cli(
                         }
 
                         if !validation.valid {
-                            if json || robot_mode {
-                                println!(
-                                    "{}",
-                                    serde_json::to_string_pretty(&validation).unwrap_or_default()
-                                );
-                            } else {
+                            if let Some(fmt) = structured_format {
+                                output_structured_value(
+                                    serde_json::to_value(&validation).unwrap_or_default(),
+                                    fmt,
+                                )?;
+                            } else if robot_mode_here {
                                 eprintln!("Configuration errors:");
                                 for err in &validation.errors {
                                     eprintln!("  - {}", err);
@@ -3162,7 +3128,7 @@ async fn execute_cli(
                         }
 
                         // Print warnings
-                        if !validation.warnings.is_empty() && !json && !robot_mode {
+                        if !validation.warnings.is_empty() && structured_format.is_none() && !robot_mode_here {
                             eprintln!("Warnings:");
                             for warn in &validation.warnings {
                                 eprintln!("  - {}", warn);
@@ -3191,7 +3157,7 @@ async fn execute_cli(
                             &wizard_state,
                             &db_path,
                             dry_run,
-                            json || robot_mode,
+                            structured_format,
                             verbose,
                         )
                         .map_err(|e| CliError {
@@ -3253,7 +3219,7 @@ async fn execute_cli(
                     }
 
                     // Check for unencrypted export in robot mode
-                    if no_encryption && (json || robot_mode) && !i_understand_unencrypted_risks {
+                    if no_encryption && robot_mode_here && !i_understand_unencrypted_risks {
                         let error = crate::pages::confirmation::robot_mode_blocked_error();
                         eprintln!(
                             "{}",
@@ -3282,11 +3248,11 @@ async fn execute_cli(
                                 retryable: false,
                             })?;
 
-                        if json {
-                            println!(
-                                "{}",
-                                serde_json::to_string_pretty(&result).unwrap_or_default()
-                            );
+                        if let Some(fmt) = structured_format {
+                            output_structured_value(
+                                serde_json::to_value(&result).unwrap_or_default(),
+                                fmt,
+                            )?;
                         } else {
                             crate::pages::verify::print_result(&result, verbose);
                         }
@@ -3337,7 +3303,7 @@ async fn execute_cli(
                             &db_path,
                             &filters,
                             &config,
-                            json,
+                            structured_format.is_some(),
                             fail_on_secrets,
                         )
                         .map_err(|e| CliError {
@@ -3349,7 +3315,7 @@ async fn execute_cli(
                         })?;
                     } else if let Some(output_path) = export_only {
                         // Interactive unencrypted export confirmation (non-robot mode)
-                        if no_encryption && !json && !robot_mode {
+                        if no_encryption && structured_format.is_none() && !robot_mode_here {
                             use console::style;
                             use std::io::Write;
 
@@ -3526,7 +3492,7 @@ async fn execute_cli(
                     }
                 }
                 Commands::Analytics(subcmd) => {
-                    run_analytics(subcmd, cli.db.clone())?;
+                    run_analytics(subcmd, cli.db.clone(), cli)?;
                 }
                 #[cfg(unix)]
                 Commands::Daemon {
@@ -3563,62 +3529,85 @@ async fn execute_cli(
                     man.render(&mut std::io::stdout())
                         .map_err(|e| CliError::unknown(format!("failed to render man: {e}")))?;
                 }
-                Commands::Capabilities { json } => {
-                    run_capabilities(json)?;
+                Commands::Capabilities { .. } => {
+                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    run_capabilities(structured_format)?;
                 }
-                Commands::ApiVersion { json } => {
-                    run_api_version(json)?;
+                Commands::ApiVersion { .. } => {
+                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    run_api_version(structured_format)?;
                 }
                 Commands::State {
                     data_dir,
-                    json,
                     robot_meta,
                     stale_threshold,
                 } => {
-                    run_status(&data_dir, None, json, stale_threshold, robot_meta)?;
+                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    run_status(
+                        &data_dir,
+                        None,
+                        structured_format,
+                        stale_threshold,
+                        robot_meta,
+                    )?;
                 }
-                Commands::Introspect { json } => {
-                    run_introspect(json)?;
+                Commands::Introspect { .. } => {
+                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    run_introspect(structured_format)?;
                 }
                 Commands::Health {
                     data_dir,
-                    json,
                     robot_meta,
                     stale_threshold,
+                    json: _,
                 } => {
-                    run_health(&data_dir, cli.db.clone(), json, stale_threshold, robot_meta)?;
+                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    run_health(
+                        &data_dir,
+                        cli.db.clone(),
+                        structured_format,
+                        stale_threshold,
+                        robot_meta,
+                    )?;
                 }
                 Commands::Doctor {
                     data_dir,
-                    json,
                     fix,
                     verbose,
                     force_rebuild,
                 } => {
-                    run_doctor(&data_dir, cli.db.clone(), json, fix, verbose, force_rebuild)?;
+                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    run_doctor(
+                        &data_dir,
+                        cli.db.clone(),
+                        structured_format,
+                        fix,
+                        verbose,
+                        force_rebuild,
+                    )?;
                 }
                 Commands::Context {
                     path,
                     data_dir,
-                    json,
                     limit,
                 } => {
-                    run_context(&path, &data_dir, cli.db.clone(), json, limit)?;
+                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    run_context(&path, &data_dir, cli.db.clone(), structured_format, limit)?;
                 }
                 Commands::Sessions {
                     workspace,
                     current,
                     limit,
                     data_dir,
-                    json,
                 } => {
+                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
                     run_sessions(
                         workspace.as_ref(),
                         current,
                         limit,
                         &data_dir,
                         cli.db.clone(),
-                        json,
+                        structured_format,
                     )?;
                 }
                 Commands::Export {
@@ -3651,8 +3640,9 @@ async fn execute_cli(
                     dry_run,
                     explain,
                     open,
-                    json,
+                    json: _,
                 } => {
+                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
                     run_export_html(
                         &session,
                         output_dir.as_deref(),
@@ -3668,16 +3658,16 @@ async fn execute_cli(
                         dry_run,
                         explain,
                         open,
-                        json,
+                        structured_format,
                     )?;
                 }
                 Commands::Expand {
                     path,
                     line,
                     context,
-                    json,
                 } => {
-                    run_expand(&path, line, context, json)?;
+                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    run_expand(&path, line, context, structured_format)?;
                 }
                 Commands::Timeline {
                     since,
@@ -3685,10 +3675,10 @@ async fn execute_cli(
                     today,
                     agent,
                     data_dir,
-                    json,
                     group_by,
                     source,
                 } => {
+                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
                     run_timeline(
                         since.as_deref(),
                         until.as_deref(),
@@ -3696,23 +3686,24 @@ async fn execute_cli(
                         &agent,
                         &data_dir,
                         cli.db.clone(),
-                        json,
+                        structured_format,
                         group_by,
                         source,
                     )?;
                 }
                 Commands::Sources(subcmd) => {
-                    run_sources_command(subcmd)?;
+                    run_sources_command(subcmd, cli)?;
                 }
                 Commands::Models(subcmd) => {
                     let subcmd = subcmd.clone();
+                    let cli_clone = cli.clone();
                     let result =
-                        asupersync::runtime::spawn_blocking(move || run_models_command(subcmd))
+                        asupersync::runtime::spawn_blocking(move || run_models_command(subcmd, &cli_clone))
                             .await;
                     result?;
                 }
                 Commands::Import(subcmd) => {
-                    handle_import(subcmd).await?;
+                    handle_import(subcmd, cli).await?;
                 }
                 _ => {}
             }
@@ -3722,13 +3713,15 @@ async fn execute_cli(
     Ok(())
 }
 
-async fn handle_import(cmd: ImportCommand) -> CliResult<()> {
+async fn handle_import(cmd: ImportCommand, cli: &Cli) -> CliResult<()> {
     match cmd {
         ImportCommand::Chatgpt {
             path,
             output_dir,
-            json,
-        } => import_chatgpt_export(&path, output_dir.as_deref(), json).await,
+        } => {
+            let structured_format = cli.robot_format.or_else(robot_format_from_env);
+            import_chatgpt_export(&path, output_dir.as_deref(), structured_format).await
+        }
     }
 }
 
@@ -3748,7 +3741,7 @@ async fn handle_import(cmd: ImportCommand) -> CliResult<()> {
 /// Implementation of the actual data queries is deferred to child beads;
 /// these stubs return a well-formed "not yet implemented" response so
 /// downstream consumers can parse the envelope immediately.
-fn run_analytics(cmd: AnalyticsCommand, db_path: Option<PathBuf>) -> CliResult<()> {
+fn run_analytics(cmd: AnalyticsCommand, db_path: Option<PathBuf>, cli: &Cli) -> CliResult<()> {
     use std::time::Instant;
 
     let start = Instant::now();
@@ -3792,6 +3785,8 @@ fn run_analytics(cmd: AnalyticsCommand, db_path: Option<PathBuf>) -> CliResult<(
 
     let elapsed_ms = start.elapsed().as_millis() as u64;
 
+    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+
     let envelope = serde_json::json!({
         "command": format!("analytics/{label}"),
         "data": data,
@@ -3802,11 +3797,8 @@ fn run_analytics(cmd: AnalyticsCommand, db_path: Option<PathBuf>) -> CliResult<(
         }
     });
 
-    if json_mode {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&envelope).unwrap_or_default()
-        );
+    if let Some(fmt) = structured_format {
+        return output_structured_value(envelope, fmt);
     } else {
         use colored::Colorize;
         let heading = match &cmd {
@@ -4250,7 +4242,7 @@ fn run_analytics_models(
 async fn import_chatgpt_export(
     export_path: &Path,
     output_dir: Option<&Path>,
-    json_output: bool,
+    output_format: Option<RobotFormat>,
 ) -> CliResult<()> {
     use std::io::Write;
 
@@ -4366,7 +4358,17 @@ async fn import_chatgpt_export(
         imported += 1;
     }
 
-    if json_output {
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
+
+    if let Some(fmt) = structured_format {
         let result = serde_json::json!({
             "success": true,
             "total": total,
@@ -5012,55 +5014,44 @@ fn describe_command(cli: &Cli) -> String {
 
 /// Returns true if the command is using robot/JSON output mode.
 /// Used to auto-suppress INFO logs for clean machine-parseable output.
-fn is_robot_mode(command: &Commands) -> bool {
+fn is_robot_mode(command: &Commands, cli: &Cli) -> bool {
     // Env-driven output formats should behave like robot mode (suppresses INFO logs).
     let env_robot_mode = robot_format_from_env().is_some();
 
     match command {
-        Commands::Search {
-            json,
-            robot_format,
-            robot_meta,
-            ..
-        } => *json || robot_format.is_some() || *robot_meta || env_robot_mode,
-        Commands::Index { json, .. } => *json || env_robot_mode,
-        Commands::Stats { json, .. } => *json || env_robot_mode,
-        Commands::Diag { json, .. } => *json || env_robot_mode,
-        Commands::Status { json, .. } => *json || env_robot_mode,
-        Commands::Health { json, .. } => *json || env_robot_mode,
-        Commands::Doctor { json, .. } => *json || env_robot_mode,
-        Commands::ApiVersion { json, .. } => *json || env_robot_mode,
-        Commands::State { json, .. } => *json || env_robot_mode,
-        Commands::View { json, .. } => *json || env_robot_mode,
-        Commands::Capabilities { json, .. } => *json || env_robot_mode,
-        Commands::Introspect { json, .. } => *json || env_robot_mode,
-        Commands::Context { json, .. } => *json || env_robot_mode,
-        Commands::Sessions { json, .. } => *json || env_robot_mode,
-        Commands::Expand { json, .. } => *json || env_robot_mode,
-        Commands::ExportHtml { json, .. } => *json || env_robot_mode,
-        Commands::Timeline { json, .. } => *json || env_robot_mode,
+        Commands::Search { robot_meta, .. } => {
+            cli.robot_format.is_some() || *robot_meta || env_robot_mode
+        }
+        Commands::Index { .. }
+        | Commands::Stats { .. }
+        | Commands::Diag { .. }
+        | Commands::Status { .. }
+        | Commands::Health { .. }
+        | Commands::Doctor { .. }
+        | Commands::ApiVersion { .. }
+        | Commands::State { .. }
+        | Commands::View { .. }
+        | Commands::Capabilities { .. }
+        | Commands::Introspect { .. }
+        | Commands::Context { .. }
+        | Commands::Sessions { .. }
+        | Commands::Expand { .. }
+        | Commands::ExportHtml { .. }
+        | Commands::Timeline { .. } => cli.robot_format.is_some() || env_robot_mode,
         Commands::Sources(cmd) => match cmd {
-            // Only `sources list` honors env-based structured output today.
-            SourcesCommand::List { json, .. } => *json || env_robot_mode,
-            SourcesCommand::Doctor { json, .. }
-            | SourcesCommand::Sync { json, .. }
-            | SourcesCommand::Discover { json, .. }
-            | SourcesCommand::Setup { json, .. } => *json,
+            SourcesCommand::List { .. }
+            | SourcesCommand::Doctor { .. }
+            | SourcesCommand::Sync { .. }
+            | SourcesCommand::Discover { .. }
+            | SourcesCommand::Setup { .. } => cli.robot_format.is_some() || env_robot_mode,
             _ => false,
         },
         Commands::Import(cmd) => match cmd {
-            ImportCommand::Chatgpt { json, .. } => *json || env_robot_mode,
+            ImportCommand::Chatgpt { .. } => cli.robot_format.is_some() || env_robot_mode,
         },
-        Commands::Analytics(cmd) => {
-            let json = match cmd {
-                AnalyticsCommand::Status { common, .. }
-                | AnalyticsCommand::Tokens { common, .. }
-                | AnalyticsCommand::Tools { common, .. }
-                | AnalyticsCommand::AnalyticsModels { common, .. }
-                | AnalyticsCommand::Rebuild { common, .. }
-                | AnalyticsCommand::Validate { common, .. } => common.json,
-            };
-            json || env_robot_mode
+        Commands::Analytics(_) => {
+            // Analytics subcommands now rely on the global robot_format or environment.
+            cli.robot_format.is_some() || env_robot_mode
         }
         _ => false,
     }
@@ -8041,7 +8032,7 @@ fn output_robot_results(
 fn run_stats(
     data_dir_override: &Option<PathBuf>,
     db_override: Option<PathBuf>,
-    json: bool,
+    output_format: Option<RobotFormat>,
     source: Option<&str>,
     by_source: bool,
 ) -> CliResult<()> {
@@ -8156,18 +8147,15 @@ fn run_stats(
         Vec::new()
     };
 
-    let structured_format = if json {
-        Some(RobotFormat::Json)
-    } else {
-        robot_format_from_env()
-    }
-    .map(|fmt| {
-        if matches!(fmt, RobotFormat::Sessions) {
-            RobotFormat::Compact
-        } else {
-            fmt
-        }
-    });
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
 
     if let Some(fmt) = structured_format {
         let mut payload = serde_json::json!({
@@ -8263,7 +8251,7 @@ fn run_stats(
 fn run_diag(
     data_dir_override: &Option<PathBuf>,
     db_override: Option<PathBuf>,
-    json: bool,
+    output_format: Option<RobotFormat>,
     verbose: bool,
 ) -> CliResult<()> {
     use frankensqlite::Connection;
@@ -8328,18 +8316,15 @@ fn run_diag(
     let platform = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
 
-    let structured_format = if json {
-        Some(RobotFormat::Json)
-    } else {
-        robot_format_from_env()
-    }
-    .map(|fmt| {
-        if matches!(fmt, RobotFormat::Sessions) {
-            RobotFormat::Compact
-        } else {
-            fmt
-        }
-    });
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
 
     if let Some(fmt) = structured_format {
         let payload = serde_json::json!({
@@ -8552,7 +8537,7 @@ fn truncate_end(s: &str, max_chars: usize) -> String {
 fn run_status(
     data_dir_override: &Option<PathBuf>,
     db_override: Option<PathBuf>,
-    json: bool,
+    output_format: Option<RobotFormat>,
     stale_threshold: u64,
     _robot_meta: bool,
 ) -> CliResult<()> {
@@ -8652,18 +8637,15 @@ fn run_status(
         None
     };
 
-    let structured_format = if json {
-        Some(RobotFormat::Json)
-    } else {
-        robot_format_from_env()
-    }
-    .map(|fmt| {
-        if matches!(fmt, RobotFormat::Sessions) {
-            RobotFormat::Compact
-        } else {
-            fmt
-        }
-    });
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
 
     if let Some(fmt) = structured_format {
         let payload = serde_json::json!({
@@ -8791,7 +8773,7 @@ fn run_status(
 fn run_health(
     data_dir_override: &Option<PathBuf>,
     db_override: Option<PathBuf>,
-    json: bool,
+    output_format: Option<RobotFormat>,
     stale_threshold: u64,
     _robot_meta: bool,
 ) -> CliResult<()> {
@@ -8873,18 +8855,15 @@ fn run_health(
 
     let latency_ms = start.elapsed().as_millis() as u64;
 
-    let structured_format = if json {
-        Some(RobotFormat::Json)
-    } else {
-        robot_format_from_env()
-    }
-    .map(|fmt| {
-        if matches!(fmt, RobotFormat::Sessions) {
-            RobotFormat::Compact
-        } else {
-            fmt
-        }
-    });
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
 
     if let Some(fmt) = structured_format {
         // Always emit valid JSON — even on WAL corruption or other DB errors.
@@ -9641,7 +9620,7 @@ mod cli_read_db_tests {
 fn run_doctor(
     data_dir_override: &Option<PathBuf>,
     db_override: Option<PathBuf>,
-    json: bool,
+    output_format: Option<RobotFormat>,
     fix: bool,
     verbose: bool,
     force_rebuild: bool,
@@ -10078,10 +10057,11 @@ fn run_doctor(
     // Apply fix: rebuild index if needed (only when --fix is passed)
     if needs_rebuild && fix {
         let stderr_is_tty = std::io::stderr().is_terminal();
-        let show_progress = !json && stderr_is_tty;
-        let show_plain = !json && !stderr_is_tty;
+        let is_robot = output_format.is_some();
+        let show_progress = !is_robot && stderr_is_tty;
+        let show_plain = !is_robot && !stderr_is_tty;
 
-        if !json {
+        if !is_robot {
             println!();
             println!(
                 "{} Rebuilding index (this may take a moment)...",
@@ -10295,18 +10275,15 @@ fn run_doctor(
     let all_pass = checks.iter().all(|c| c.status == "pass");
 
     // Output
-    let structured_format = if json {
-        Some(RobotFormat::Json)
-    } else {
-        robot_format_from_env()
-    }
-    .map(|fmt| {
-        if matches!(fmt, RobotFormat::Sessions) {
-            RobotFormat::Compact
-        } else {
-            fmt
-        }
-    });
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
 
     if let Some(fmt) = structured_format {
         let payload = serde_json::json!({
@@ -10473,7 +10450,7 @@ fn run_sessions(
     limit: Option<usize>,
     data_dir_override: &Option<PathBuf>,
     db_override: Option<PathBuf>,
-    json: bool,
+    output_format: Option<RobotFormat>,
 ) -> CliResult<()> {
     use frankensqlite::compat::{ConnectionExt, ParamValue, RowExt};
 
@@ -10608,18 +10585,15 @@ fn run_sessions(
         })
         .collect();
 
-    let structured_format = if json {
-        Some(RobotFormat::Json)
-    } else {
-        robot_format_from_env()
-    }
-    .map(|fmt| {
-        if matches!(fmt, RobotFormat::Sessions) {
-            RobotFormat::Compact
-        } else {
-            fmt
-        }
-    });
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
 
     if let Some(fmt) = structured_format {
         let payload = serde_json::json!({ "sessions": entries });
@@ -10662,7 +10636,7 @@ fn run_context(
     path: &Path,
     data_dir_override: &Option<PathBuf>,
     db_override: Option<PathBuf>,
-    json: bool,
+    output_format: Option<RobotFormat>,
     limit: usize,
 ) -> CliResult<()> {
     use frankensqlite::compat::{ConnectionExt, ParamValue, RowExt};
@@ -10799,18 +10773,15 @@ fn run_context(
         .map_err(|e| CliError::unknown(format!("query: {e}")))?
     };
 
-    let structured_format = if json {
-        Some(RobotFormat::Json)
-    } else {
-        robot_format_from_env()
-    }
-    .map(|fmt| {
-        if matches!(fmt, RobotFormat::Sessions) {
-            RobotFormat::Compact
-        } else {
-            fmt
-        }
-    });
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
 
     if let Some(fmt) = structured_format {
         let format_ts = |ts: Option<i64>| -> Option<String> {
@@ -11142,7 +11113,7 @@ fn build_global_flag_schemas() -> Vec<ArgumentSchema> {
 }
 
 /// Discover available features, versions, and limits for agent introspection.
-fn run_capabilities(json: bool) -> CliResult<()> {
+fn run_capabilities(output_format: Option<RobotFormat>) -> CliResult<()> {
     let response = CapabilitiesResponse {
         crate_version: env!("CARGO_PKG_VERSION").to_string(),
         api_version: 1,
@@ -11180,19 +11151,16 @@ fn run_capabilities(json: bool) -> CliResult<()> {
         },
     };
 
-    let structured_format = if json {
-        Some(RobotFormat::Json)
-    } else {
-        robot_format_from_env()
-    }
-    .map(|fmt| {
-        // sessions is search-only; for other commands treat it as compact JSON.
-        if matches!(fmt, RobotFormat::Sessions) {
-            RobotFormat::Compact
-        } else {
-            fmt
-        }
-    });
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            // sessions is search-only; for other commands treat it as compact JSON.
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
 
     if let Some(fmt) = structured_format {
         let payload = serde_json::to_value(&response).unwrap_or_default();
@@ -11231,7 +11199,7 @@ fn run_capabilities(json: bool) -> CliResult<()> {
 }
 
 /// Full API schema introspection - commands, arguments, and response schemas.
-fn run_introspect(json: bool) -> CliResult<()> {
+fn run_introspect(output_format: Option<RobotFormat>) -> CliResult<()> {
     let global_flags = build_global_flag_schemas();
     let commands = build_command_schemas();
     let response_schemas = build_response_schemas();
@@ -11244,18 +11212,15 @@ fn run_introspect(json: bool) -> CliResult<()> {
         response_schemas,
     };
 
-    let structured_format = if json {
-        Some(RobotFormat::Json)
-    } else {
-        robot_format_from_env()
-    }
-    .map(|fmt| {
-        if matches!(fmt, RobotFormat::Sessions) {
-            RobotFormat::Compact
-        } else {
-            fmt
-        }
-    });
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
 
     if let Some(fmt) = structured_format {
         let payload = serde_json::to_value(&response).unwrap_or_default();
@@ -11343,7 +11308,7 @@ fn run_config_based_export(
     wizard_state: &crate::pages::wizard::WizardState,
     db_path: &std::path::Path,
     dry_run: bool,
-    json_output: bool,
+    output_format: Option<RobotFormat>,
     _verbose: bool,
 ) -> anyhow::Result<()> {
     use chrono::DateTime;
@@ -11352,13 +11317,13 @@ fn run_config_based_export(
     use std::sync::atomic::AtomicBool;
 
     if dry_run {
-        if json_output {
+        if let Some(fmt) = output_format {
             let result = serde_json::json!({
                 "status": "dry_run",
                 "output_dir": wizard_state.output_dir,
                 "config_valid": true,
             });
-            println!("{}", serde_json::to_string_pretty(&result)?);
+            output_structured_value(result, fmt)?;
         } else {
             println!("Dry run: would export to {:?}", wizard_state.output_dir);
         }
@@ -11513,7 +11478,17 @@ fn run_config_based_export(
     };
 
     // Output results
-    if json_output {
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
+
+    if let Some(fmt) = structured_format {
         let result = serde_json::json!({
             "status": "success",
             "output_dir": output_dir,
@@ -11565,25 +11540,22 @@ fn run_config_based_export(
 }
 
 /// Show API and contract versions (robot-friendly)
-fn run_api_version(json: bool) -> CliResult<()> {
+fn run_api_version(output_format: Option<RobotFormat>) -> CliResult<()> {
     let payload = serde_json::json!({
         "crate_version": env!("CARGO_PKG_VERSION"),
         "api_version": 1,
         "contract_version": CONTRACT_VERSION,
     });
 
-    let structured_format = if json {
-        Some(RobotFormat::Json)
-    } else {
-        robot_format_from_env()
-    }
-    .map(|fmt| {
-        if matches!(fmt, RobotFormat::Sessions) {
-            RobotFormat::Compact
-        } else {
-            fmt
-        }
-    });
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
 
     if let Some(fmt) = structured_format {
         return output_structured_value(payload, fmt);
@@ -12295,7 +12267,7 @@ fn try_load_indexed_conversation(source_path: &Path) -> Option<crate::ui::data::
     try_load_indexed_conversation_from_db(source_path, &db_path)
 }
 
-fn run_view(path: &PathBuf, line: Option<usize>, context: usize, json: bool) -> CliResult<()> {
+fn run_view(path: &PathBuf, line: Option<usize>, context: usize, output_format: Option<RobotFormat>) -> CliResult<()> {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 
@@ -12390,18 +12362,15 @@ fn run_view(path: &PathBuf, line: Option<usize>, context: usize, json: bool) -> 
     // Only highlight a specific line if -n was explicitly provided
     let highlight_line = line.is_some();
 
-    let structured_format = if json {
-        Some(RobotFormat::Json)
-    } else {
-        robot_format_from_env()
-    }
-    .map(|fmt| {
-        if matches!(fmt, RobotFormat::Sessions) {
-            RobotFormat::Compact
-        } else {
-            fmt
-        }
-    });
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
 
     if let Some(fmt) = structured_format {
         let content_lines: Vec<serde_json::Value> = lines
@@ -12463,7 +12432,7 @@ fn run_index_with_data(
     build_hnsw: bool,
     embedder: String,
     progress: ProgressResolved,
-    json: bool,
+    output_format: Option<RobotFormat>,
     idempotency_key: Option<String>,
 ) -> CliResult<()> {
     use frankensqlite::compat::{ConnectionExt, RowExt};
@@ -12472,18 +12441,15 @@ fn run_index_with_data(
     let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
     let db_path = db_override.unwrap_or_else(|| data_dir.join("agent_search.db"));
 
-    let structured_format = if json {
-        Some(RobotFormat::Json)
-    } else {
-        robot_format_from_env()
-    }
-    .map(|fmt| {
-        if matches!(fmt, RobotFormat::Sessions) {
-            RobotFormat::Compact
-        } else {
-            fmt
-        }
-    });
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
     let structured_output = structured_format.is_some();
 
     // Generate params hash for idempotency validation
@@ -13454,7 +13420,7 @@ fn run_export_html(
     dry_run: bool,
     explain: bool,
     open: bool,
-    json_output: bool,
+    output_format: Option<RobotFormat>,
 ) -> CliResult<()> {
     use chrono::TimeZone;
     use html_export::{
@@ -13479,7 +13445,17 @@ fn run_export_html(
             hint: Some("Use 'cass search' to find session paths".to_string()),
             retryable: false,
         };
-        if json_output {
+        let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
+
+    if let Some(fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::json!({
@@ -13520,7 +13496,17 @@ fn run_export_html(
                 hint: Some("Use --password <pwd> or --password-stdin".to_string()),
                 retryable: false,
             };
-            if json_output {
+            let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
+
+    if let Some(fmt) = structured_format {
                 println!(
                     "{}",
                     serde_json::json!({
@@ -14000,7 +13986,17 @@ fn run_export_html(
     }
 
     // --- Output result ---
-    if json_output {
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
+
+    if let Some(fmt) = structured_format {
         let result = serde_json::json!({
             "success": true,
             "exported": {
@@ -14662,7 +14658,7 @@ mod export_timestamp_tests {
             false,
             false,
             false,
-            false,
+            None,
         )
         .expect_err("invalid utf-8 should fail explicitly");
 
@@ -15509,7 +15505,7 @@ fn html_escape(s: &str) -> String {
 }
 
 /// Show messages around a specific line in a session file
-fn run_expand(path: &Path, line: usize, context: usize, json: bool) -> CliResult<()> {
+fn run_expand(path: &Path, line: usize, context: usize, output_format: Option<RobotFormat>) -> CliResult<()> {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 
@@ -15588,18 +15584,15 @@ fn run_expand(path: &Path, line: usize, context: usize, json: bool) -> CliResult
         })
         .collect();
 
-    let structured_format = if json {
-        Some(RobotFormat::Json)
-    } else {
-        robot_format_from_env()
-    }
-    .map(|fmt| {
-        if matches!(fmt, RobotFormat::Sessions) {
-            RobotFormat::Compact
-        } else {
-            fmt
-        }
-    });
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
 
     if let Some(fmt) = structured_format {
         let output: Vec<serde_json::Value> = context_messages
@@ -15803,7 +15796,7 @@ fn run_timeline(
     agents: &[String],
     data_dir: &Option<PathBuf>,
     db_override: Option<PathBuf>,
-    json: bool,
+    output_format: Option<RobotFormat>,
     group_by: TimelineGrouping,
     source: Option<String>,
 ) -> CliResult<()> {
@@ -15922,18 +15915,15 @@ fn run_timeline(
     )> = rows;
     close_franken_cli_read_db(conn, &db_path, "timeline")?;
 
-    let structured_format = if json {
-        Some(RobotFormat::Json)
-    } else {
-        robot_format_from_env()
-    }
-    .map(|fmt| {
-        if matches!(fmt, RobotFormat::Sessions) {
-            RobotFormat::Compact
-        } else {
-            fmt
-        }
-    });
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
 
     if let Some(fmt) = structured_format {
         let output = match group_by {
@@ -16124,10 +16114,11 @@ fn run_timeline(
 }
 
 /// Handle sources subcommands (P5.x)
-fn run_sources_command(cmd: SourcesCommand) -> CliResult<()> {
+fn run_sources_command(cmd: SourcesCommand, cli: &Cli) -> CliResult<()> {
     match cmd {
-        SourcesCommand::List { verbose, json } => {
-            run_sources_list(verbose, json)?;
+        SourcesCommand::List { verbose } => {
+            let structured_format = cli.robot_format.or_else(robot_format_from_env);
+            run_sources_list(verbose, structured_format)
         }
         SourcesCommand::Add {
             url,
@@ -16136,32 +16127,33 @@ fn run_sources_command(cmd: SourcesCommand) -> CliResult<()> {
             paths,
             no_test,
         } => {
-            run_sources_add(&url, name, preset, paths, no_test)?;
+            run_sources_add(&url, name, preset, paths, no_test)
         }
         SourcesCommand::Remove { name, purge, yes } => {
-            run_sources_remove(&name, purge, yes)?;
+            run_sources_remove(&name, purge, yes)
         }
-        SourcesCommand::Doctor { source, json } => {
-            run_sources_doctor(source.as_deref(), json)?;
+        SourcesCommand::Doctor { source } => {
+            let structured_format = cli.robot_format.or_else(robot_format_from_env);
+            run_sources_doctor(source.as_deref(), structured_format)
         }
         SourcesCommand::Sync {
             source,
             no_index,
             verbose,
             dry_run,
-            json,
         } => {
-            run_sources_sync(source, no_index, verbose, dry_run, json)?;
+            let structured_format = cli.robot_format.or_else(robot_format_from_env);
+            run_sources_sync(source, no_index, verbose, dry_run, structured_format)
         }
         SourcesCommand::Mappings(action) => {
-            run_mappings_command(action)?;
+            run_mappings_command(action, cli)
         }
         SourcesCommand::Discover {
             preset,
             skip_existing,
-            json,
         } => {
-            run_sources_discover(&preset, skip_existing, json)?;
+            let structured_format = cli.robot_format.or_else(robot_format_from_env);
+            run_sources_discover(&preset, skip_existing, structured_format)
         }
         SourcesCommand::Setup {
             dry_run,
@@ -16173,11 +16165,13 @@ fn run_sources_command(cmd: SourcesCommand) -> CliResult<()> {
             timeout,
             resume,
             verbose,
-            json,
+            json: _,
         } => {
+            let structured_format = cli.robot_format.or_else(robot_format_from_env);
+            let is_robot = structured_format.is_some();
             run_sources_setup(sources::setup::SetupOptions {
                 dry_run,
-                non_interactive: non_interactive || json,
+                non_interactive: non_interactive || is_robot,
                 hosts,
                 skip_install,
                 skip_index,
@@ -16185,15 +16179,14 @@ fn run_sources_command(cmd: SourcesCommand) -> CliResult<()> {
                 timeout,
                 resume,
                 verbose,
-                json,
-            })?;
+                json: is_robot,
+            })
         }
     }
-    Ok(())
 }
 
 /// List configured sources (P5.3)
-fn run_sources_list(verbose: bool, json: bool) -> CliResult<()> {
+fn run_sources_list(verbose: bool, output_format: Option<RobotFormat>) -> CliResult<()> {
     use crate::sources::config::SourcesConfig;
 
     let config = SourcesConfig::load().map_err(|e| CliError {
@@ -16210,18 +16203,15 @@ fn run_sources_list(verbose: bool, json: bool) -> CliResult<()> {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "unknown".into());
 
-    let structured_format = if json {
-        Some(RobotFormat::Json)
-    } else {
-        robot_format_from_env()
-    }
-    .map(|fmt| {
-        if matches!(fmt, RobotFormat::Sessions) {
-            RobotFormat::Compact
-        } else {
-            fmt
-        }
-    });
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
 
     if let Some(fmt) = structured_format {
         let sources_json: Vec<serde_json::Value> = config
@@ -16662,7 +16652,7 @@ struct SourceDiagnostics {
 }
 
 /// Diagnose source connectivity and configuration issues (P5.6)
-fn run_sources_doctor(source_filter: Option<&str>, json_output: bool) -> CliResult<()> {
+fn run_sources_doctor(source_filter: Option<&str>, output_format: Option<RobotFormat>) -> CliResult<()> {
     use crate::sources::config::{SourcesConfig, source_names_equal};
     use colored::Colorize;
 
@@ -16675,7 +16665,17 @@ fn run_sources_doctor(source_filter: Option<&str>, json_output: bool) -> CliResu
     })?;
 
     if config.sources.is_empty() {
-        if json_output {
+        let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
+
+    if let Some(fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::json!({
@@ -16746,7 +16746,17 @@ fn run_sources_doctor(source_filter: Option<&str>, json_output: bool) -> CliResu
     }
 
     // Output results
-    if json_output {
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
+
+    if let Some(fmt) = structured_format {
         println!(
             "{}",
             serde_json::to_string_pretty(&all_diagnostics).unwrap_or_default()
@@ -17001,7 +17011,7 @@ fn run_sources_sync(
     no_index: bool,
     verbose: bool,
     dry_run: bool,
-    json_output: bool,
+    output_format: Option<RobotFormat>,
 ) -> CliResult<()> {
     use crate::sources::config::{SourcesConfig, source_names_equal};
     use crate::sources::sync::{SyncEngine, SyncReport, SyncStatus};
@@ -17019,7 +17029,17 @@ fn run_sources_sync(
     let remote_sources: Vec<_> = config.remote_sources().collect();
 
     if remote_sources.is_empty() {
-        if json_output {
+        let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
+
+    if let Some(fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::json!({
@@ -17047,7 +17067,17 @@ fn run_sources_sync(
     };
 
     if sources_to_sync.is_empty() {
-        if json_output {
+        let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
+
+    if let Some(fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::json!({
@@ -17071,7 +17101,8 @@ fn run_sources_sync(
     // Load existing sync status
     let mut status = SyncStatus::load(&data_dir).unwrap_or_default();
 
-    if dry_run && !json_output {
+    let is_robot = output_format.is_some();
+    if dry_run && !is_robot {
         println!("{}", "DRY RUN - no changes will be made".cyan().bold());
         println!();
     }
@@ -17081,7 +17112,7 @@ fn run_sources_sync(
     let mut total_bytes = 0u64;
 
     for source in &sources_to_sync {
-        if !json_output {
+        if !is_robot {
             println!(
                 "{} {}...",
                 "Syncing".cyan().bold(),
@@ -17091,7 +17122,7 @@ fn run_sources_sync(
 
         if dry_run {
             // In dry run, just show what would be synced
-            if !json_output {
+            if !is_robot {
                 for path in &source.paths {
                     println!("  {} {}", "Would sync:".dimmed(), path);
                 }
@@ -17107,7 +17138,17 @@ fn run_sources_sync(
                 let failed_report = SyncReport::failed(source.name.clone(), e);
                 status.update(&source.name, &failed_report);
 
-                if json_output {
+                let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
+
+    if let Some(fmt) = structured_format {
                     all_reports.push(serde_json::json!({
                         "source": source.name,
                         "status": "error",
@@ -17144,7 +17185,17 @@ fn run_sources_sync(
         status.update(&source.name, &report);
 
         // Print results
-        if json_output {
+        let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
+
+    if let Some(fmt) = structured_format {
             all_reports.push(serde_json::json!({
                 "source": source.name,
                 "status": if report.all_succeeded { "success" } else { "partial" },
@@ -17216,7 +17267,17 @@ fn run_sources_sync(
     }
 
     // Output summary
-    if json_output {
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
+
+    if let Some(fmt) = structured_format {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -17233,7 +17294,7 @@ fn run_sources_sync(
 
     // Trigger re-index if requested
     if !no_index && !dry_run && total_files > 0 {
-        if !json_output {
+        if !is_robot {
             println!(
                 "{} {} new files...",
                 "Re-indexing".cyan().bold(),
@@ -17242,7 +17303,7 @@ fn run_sources_sync(
         }
 
         // Call indexer to include synced sessions
-        let progress = if json_output {
+        let progress = if output_format.is_some() {
             ProgressResolved::None
         } else if std::io::stdout().is_terminal() {
             ProgressResolved::Bars
@@ -17262,7 +17323,7 @@ fn run_sources_sync(
             false,          // build_hnsw
             "fastembed".to_string(),
             progress,
-            json_output,
+            output_format,
             None, // idempotency_key
         )?;
     }
@@ -17271,7 +17332,7 @@ fn run_sources_sync(
 }
 
 /// Auto-discover SSH hosts from ~/.ssh/config (P5.6)
-fn run_sources_discover(preset: &str, skip_existing: bool, json_output: bool) -> CliResult<()> {
+fn run_sources_discover(preset: &str, skip_existing: bool, output_format: Option<RobotFormat>) -> CliResult<()> {
     use crate::sources::config::{SourcesConfig, discover_ssh_hosts, get_preset_paths};
     use colored::Colorize;
 
@@ -17288,7 +17349,17 @@ fn run_sources_discover(preset: &str, skip_existing: bool, json_output: bool) ->
     let discovered = discover_ssh_hosts();
 
     if discovered.is_empty() {
-        if json_output {
+        let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
+
+    if let Some(fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::json!({
@@ -17320,7 +17391,17 @@ fn run_sources_discover(preset: &str, skip_existing: bool, json_output: bool) ->
     };
 
     if hosts_to_add.is_empty() {
-        if json_output {
+        let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
+
+    if let Some(fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::json!({
@@ -17338,7 +17419,17 @@ fn run_sources_discover(preset: &str, skip_existing: bool, json_output: bool) ->
     }
 
     // Output discovered hosts
-    if json_output {
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
+
+    if let Some(fmt) = structured_format {
         let hosts_json: Vec<_> = hosts_to_add
             .iter()
             .map(|h| {
@@ -17471,9 +17562,12 @@ fn run_sources_setup(opts: sources::setup::SetupOptions) -> CliResult<()> {
 }
 
 /// Handle models subcommands
-fn run_models_command(cmd: ModelsCommand) -> CliResult<()> {
+fn run_models_command(cmd: ModelsCommand, cli: &Cli) -> CliResult<()> {
     match cmd {
-        ModelsCommand::Status { json } => run_models_status(json),
+        ModelsCommand::Status {} => {
+            let structured_format = cli.robot_format.or_else(robot_format_from_env);
+            run_models_status(structured_format)
+        }
         ModelsCommand::Install {
             model,
             mirror,
@@ -17487,22 +17581,24 @@ fn run_models_command(cmd: ModelsCommand) -> CliResult<()> {
             yes,
             data_dir,
         ),
-        ModelsCommand::Verify {
-            repair,
-            data_dir,
-            json,
-        } => run_models_verify(repair, data_dir, json),
+        ModelsCommand::Verify { repair, data_dir } => {
+            let structured_format = cli.robot_format.or_else(robot_format_from_env);
+            run_models_verify(repair, data_dir, structured_format)
+        }
         ModelsCommand::Remove {
             model,
             yes,
             data_dir,
         } => run_models_remove(&model, yes, data_dir),
-        ModelsCommand::CheckUpdate { json, data_dir } => run_models_check_update(json, data_dir),
+        ModelsCommand::CheckUpdate { data_dir } => {
+            let structured_format = cli.robot_format.or_else(robot_format_from_env);
+            run_models_check_update(structured_format, data_dir)
+        }
     }
 }
 
 /// Show semantic model installation status
-fn run_models_status(json_output: bool) -> CliResult<()> {
+fn run_models_status(output_format: Option<RobotFormat>) -> CliResult<()> {
     use crate::search::fastembed_embedder::FastEmbedder;
     use crate::search::model_download::{ModelManifest, ModelState, check_model_installed};
 
@@ -17537,7 +17633,17 @@ fn run_models_status(json_output: bool) -> CliResult<()> {
         }));
     }
 
-    if json_output {
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
+
+    if let Some(fmt) = structured_format {
         let output = serde_json::json!({
             "model_id": manifest.id,
             "model_dir": model_dir.display().to_string(),
@@ -17926,7 +18032,7 @@ fn run_models_install(
 fn run_models_verify(
     repair: bool,
     data_dir_override: Option<PathBuf>,
-    json_output: bool,
+    output_format: Option<RobotFormat>,
 ) -> CliResult<()> {
     use crate::search::fastembed_embedder::FastEmbedder;
     use crate::search::model_download::{ModelManifest, compute_sha256};
@@ -17937,7 +18043,17 @@ fn run_models_verify(
     let manifest = ModelManifest::minilm_v2();
 
     if !model_dir.is_dir() {
-        if json_output {
+        let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
+
+    if let Some(fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -17961,7 +18077,8 @@ fn run_models_verify(
     let mut all_valid = true;
     let mut files_to_repair: Vec<&str> = Vec::new();
 
-    if !json_output {
+    let is_robot = output_format.is_some();
+    if !is_robot {
         println!("Verifying model files...");
         println!();
     }
@@ -17996,7 +18113,7 @@ fn run_models_verify(
             "error": error,
         }));
 
-        if !json_output {
+        if !is_robot {
             let status = if valid {
                 "✓".green().to_string()
             } else {
@@ -18017,7 +18134,17 @@ fn run_models_verify(
         }
     }
 
-    if json_output {
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
+
+    if let Some(fmt) = structured_format {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -18140,7 +18267,7 @@ fn run_models_remove(
 }
 
 /// Check for model updates
-fn run_models_check_update(json_output: bool, data_dir_override: Option<PathBuf>) -> CliResult<()> {
+fn run_models_check_update(output_format: Option<RobotFormat>, data_dir_override: Option<PathBuf>) -> CliResult<()> {
     use crate::search::fastembed_embedder::FastEmbedder;
     use crate::search::model_download::{
         ModelManifest, ModelState, check_model_installed, check_version_mismatch,
@@ -18154,7 +18281,17 @@ fn run_models_check_update(json_output: bool, data_dir_override: Option<PathBuf>
     let state = check_model_installed(&model_dir);
 
     if !state.is_ready() {
-        if json_output {
+        let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
+
+    if let Some(fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -18181,12 +18318,22 @@ fn run_models_check_update(json_output: bool, data_dir_override: Option<PathBuf>
     // Check for version mismatch
     let update_info = check_version_mismatch(&model_dir, &manifest);
 
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
+
     if let Some(ModelState::UpdateAvailable {
         current_revision,
         latest_revision,
     }) = update_info
     {
-        if json_output {
+        if let Some(fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -18210,7 +18357,7 @@ fn run_models_check_update(json_output: bool, data_dir_override: Option<PathBuf>
             println!("To update, run:");
             println!("  cass models install");
         }
-    } else if json_output {
+    } else if let Some(fmt) = structured_format {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -18232,10 +18379,11 @@ fn run_models_check_update(json_output: bool, data_dir_override: Option<PathBuf>
 }
 
 /// Handle mappings subcommands (P6.3)
-fn run_mappings_command(action: MappingsAction) -> CliResult<()> {
+fn run_mappings_command(action: MappingsAction, cli: &Cli) -> CliResult<()> {
     match action {
-        MappingsAction::List { source, json } => {
-            run_mappings_list(&source, json)?;
+        MappingsAction::List { source } => {
+            let structured_format = cli.robot_format.or_else(robot_format_from_env);
+            run_mappings_list(&source, structured_format)?;
         }
         MappingsAction::Add {
             source,
@@ -18260,7 +18408,7 @@ fn run_mappings_command(action: MappingsAction) -> CliResult<()> {
 }
 
 /// List path mappings for a source (P6.3)
-fn run_mappings_list(source_name: &str, json_output: bool) -> CliResult<()> {
+fn run_mappings_list(source_name: &str, output_format: Option<RobotFormat>) -> CliResult<()> {
     use crate::sources::config::SourcesConfig;
 
     let config = SourcesConfig::load().map_err(|e| CliError {
@@ -18279,7 +18427,17 @@ fn run_mappings_list(source_name: &str, json_output: bool) -> CliResult<()> {
         retryable: false,
     })?;
 
-    if json_output {
+    let structured_format = output_format
+        .or_else(robot_format_from_env)
+        .map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
+            }
+        });
+
+    if let Some(fmt) = structured_format {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
