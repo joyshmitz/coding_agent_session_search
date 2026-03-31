@@ -3349,17 +3349,17 @@ enum PendingConversationKey {
 struct MessageMergeFingerprint {
     idx: i64,
     created_at: Option<i64>,
-    role: String,
+    role: MessageRole,
     author: Option<String>,
-    content_hash: String,
+    content_hash: [u8; 32],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct MessageReplayFingerprint {
     created_at: Option<i64>,
-    role: String,
+    role: MessageRole,
     author: Option<String>,
-    content_hash: String,
+    content_hash: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3376,22 +3376,32 @@ fn conversation_effective_started_at(conv: &Conversation) -> Option<i64> {
         .or_else(|| conv.messages.iter().filter_map(|msg| msg.created_at).min())
 }
 
+fn role_from_str(role: &str) -> MessageRole {
+    match role {
+        "user" => MessageRole::User,
+        "agent" | "assistant" => MessageRole::Agent,
+        "tool" => MessageRole::Tool,
+        "system" => MessageRole::System,
+        other => MessageRole::Other(other.to_string()),
+    }
+}
+
 fn message_merge_fingerprint(msg: &Message) -> MessageMergeFingerprint {
     MessageMergeFingerprint {
         idx: msg.idx,
         created_at: msg.created_at,
-        role: role_str(&msg.role).to_string(),
+        role: msg.role.clone(),
         author: msg.author.clone(),
-        content_hash: blake3::hash(msg.content.as_bytes()).to_hex().to_string(),
+        content_hash: *blake3::hash(msg.content.as_bytes()).as_bytes(),
     }
 }
 
 fn message_replay_fingerprint(msg: &Message) -> MessageReplayFingerprint {
     MessageReplayFingerprint {
         created_at: msg.created_at,
-        role: role_str(&msg.role).to_string(),
+        role: msg.role.clone(),
         author: msg.author.clone(),
-        content_hash: blake3::hash(msg.content.as_bytes()).to_hex().to_string(),
+        content_hash: *blake3::hash(msg.content.as_bytes()).as_bytes(),
     }
 }
 
@@ -3418,7 +3428,7 @@ fn replay_fingerprint_from_merge(
         created_at: fingerprint.created_at,
         role: fingerprint.role.clone(),
         author: fingerprint.author.clone(),
-        content_hash: fingerprint.content_hash.clone(),
+        content_hash: fingerprint.content_hash,
     }
 }
 
@@ -6304,9 +6314,9 @@ fn franken_existing_message_fingerprints(
         fingerprints.insert(MessageMergeFingerprint {
             idx: row.get_typed(0)?,
             created_at: row.get_typed(3)?,
-            role,
+            role: role_from_str(&role),
             author: row.get_typed(2)?,
-            content_hash: blake3::hash(content.as_bytes()).to_hex().to_string(),
+            content_hash: *blake3::hash(content.as_bytes()).as_bytes(),
         });
     }
     Ok(fingerprints)
@@ -6316,10 +6326,14 @@ fn franken_existing_message_fingerprints_by_idx(
     tx: &FrankenTransaction<'_>,
     conversation_id: i64,
 ) -> Result<HashMap<i64, MessageMergeFingerprint>> {
+    // Optimization: only fetch fingerprints for recent messages to avoid O(N^2) scaling
+    // on huge conversations. Most incremental updates happen at the end.
     let rows = tx.query_params(
         "SELECT idx, role, author, created_at, content
          FROM messages
-         WHERE conversation_id = ?1",
+         WHERE conversation_id = ?1
+         ORDER BY idx DESC
+         LIMIT 1000",
         fparams![conversation_id],
     )?;
     let mut fingerprints = HashMap::with_capacity(rows.len());
@@ -6332,9 +6346,9 @@ fn franken_existing_message_fingerprints_by_idx(
             MessageMergeFingerprint {
                 idx,
                 created_at: row.get_typed(3)?,
-                role,
+                role: role_from_str(&role),
                 author: row.get_typed(2)?,
-                content_hash: blake3::hash(content.as_bytes()).to_hex().to_string(),
+                content_hash: *blake3::hash(content.as_bytes()).as_bytes(),
             },
         );
     }
@@ -6345,10 +6359,13 @@ fn franken_existing_message_replay_fingerprints(
     tx: &FrankenTransaction<'_>,
     conversation_id: i64,
 ) -> Result<HashSet<MessageReplayFingerprint>> {
+    // Optimization: only fetch fingerprints for recent messages.
     let rows = tx.query_params(
         "SELECT role, author, created_at, content
          FROM messages
-         WHERE conversation_id = ?1",
+         WHERE conversation_id = ?1
+         ORDER BY idx DESC
+         LIMIT 100",
         fparams![conversation_id],
     )?;
     let mut fingerprints = HashSet::with_capacity(rows.len());
@@ -6357,9 +6374,9 @@ fn franken_existing_message_replay_fingerprints(
         let content: String = row.get_typed(3)?;
         fingerprints.insert(MessageReplayFingerprint {
             created_at: row.get_typed(2)?,
-            role,
+            role: role_from_str(&role),
             author: row.get_typed(1)?,
-            content_hash: blake3::hash(content.as_bytes()).to_hex().to_string(),
+            content_hash: *blake3::hash(content.as_bytes()).as_bytes(),
         });
     }
     Ok(fingerprints)
@@ -10772,6 +10789,7 @@ mod tests {
                 content: "third".into(),
                 extra: serde_json::Value::Null,
                 snippets: Vec::new(),
+                invocations: Vec::new(),
             },
             NormalizedMessage {
                 idx: 3,
@@ -10781,6 +10799,7 @@ mod tests {
                 content: "fourth".into(),
                 extra: serde_json::Value::Null,
                 snippets: Vec::new(),
+                invocations: Vec::new(),
             },
         ]));
         let conv_b = map_to_internal(&base_conv(vec![
@@ -10792,6 +10811,7 @@ mod tests {
                 content: "first".into(),
                 extra: serde_json::Value::Null,
                 snippets: Vec::new(),
+                invocations: Vec::new(),
             },
             NormalizedMessage {
                 idx: 1,
@@ -10801,6 +10821,7 @@ mod tests {
                 content: "second".into(),
                 extra: serde_json::Value::Null,
                 snippets: Vec::new(),
+                invocations: Vec::new(),
             },
             NormalizedMessage {
                 idx: 3,
@@ -10810,6 +10831,7 @@ mod tests {
                 content: "fourth".into(),
                 extra: serde_json::Value::Null,
                 snippets: Vec::new(),
+                invocations: Vec::new(),
             },
         ]));
 
