@@ -569,6 +569,7 @@ impl ConversationFixtureBuilder {
                     content,
                     extra: json!({"seed": i}),
                     snippets,
+                    invocations: Vec::new(),
                 }
             })
             .collect();

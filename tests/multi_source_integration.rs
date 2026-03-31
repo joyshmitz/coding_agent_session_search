@@ -107,6 +107,7 @@ fn norm_msg(
         content: content.to_string(),
         extra: json!({}),
         snippets: vec![],
+        invocations: Vec::new(),
     }
 }
 

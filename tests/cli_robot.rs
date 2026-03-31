@@ -256,8 +256,8 @@ fn state_matches_status() {
 
     // Core assertion: status and state report the same health
     assert_eq!(status_json["healthy"], state_json["healthy"]);
-    // Pending sessions should match between the two commands (value depends on watch_state.json
-    // which may not exist in CI - so just check they're consistent with each other)
+    // Pending sessions should match between the two commands, regardless of the
+    // rebuild/watch state observed in the fixture dataset.
     assert_eq!(
         status_json["pending"]["sessions"],
         state_json["pending"]["sessions"]

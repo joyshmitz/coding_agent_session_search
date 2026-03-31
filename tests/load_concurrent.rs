@@ -36,6 +36,7 @@ fn generate_conversation(conv_id: i64, msg_count: i64) -> NormalizedConversation
             ),
             extra: serde_json::json!({ "concurrent_test": true }),
             snippets: Vec::new(),
+            invocations: Vec::new(),
         })
         .collect();
 

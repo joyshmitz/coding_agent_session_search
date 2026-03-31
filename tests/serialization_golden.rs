@@ -70,6 +70,7 @@ fn make_test_message() -> NormalizedMessage {
                 snippet_text: Some("import asyncio".to_string()),
             },
         ],
+        invocations: Vec::new(),
     }
 }
 
@@ -106,6 +107,7 @@ fn make_test_conversation() -> NormalizedConversation {
                             .to_string(),
                     ),
                 }],
+                invocations: Vec::new(),
             },
             NormalizedMessage {
                 idx: 1,
@@ -115,6 +117,7 @@ fn make_test_conversation() -> NormalizedConversation {
                 content: "I'll fix the authentication bug by adding input validation.".to_string(),
                 extra: serde_json::json!({"model": "claude-3-opus"}),
                 snippets: vec![],
+                invocations: Vec::new(),
             },
             NormalizedMessage {
                 idx: 2,
@@ -124,6 +127,7 @@ fn make_test_conversation() -> NormalizedConversation {
                 content: "Thanks, that works!".to_string(),
                 extra: serde_json::json!({}),
                 snippets: vec![],
+                invocations: Vec::new(),
             },
         ],
     }
@@ -148,6 +152,7 @@ fn make_minimal_conversation() -> NormalizedConversation {
             content: "Hello".to_string(),
             extra: serde_json::json!({}),
             snippets: vec![],
+            invocations: Vec::new(),
         }],
     }
 }
@@ -418,6 +423,7 @@ fn all_role_variants_roundtrip() {
             content: format!("Test message with role {role_str}"),
             extra: serde_json::json!({}),
             snippets: vec![],
+            invocations: Vec::new(),
         };
         let json = serde_json::to_string(&msg).expect("serialize");
         let restored: NormalizedMessage = serde_json::from_str(&json).expect("deserialize");
@@ -462,6 +468,7 @@ fn unicode_content_roundtrip() {
             language: None,
             snippet_text: Some("let π = 3.14159;".to_string()),
         }],
+        invocations: Vec::new(),
     };
     let json = serde_json::to_string(&msg).expect("serialize");
     let restored: NormalizedMessage = serde_json::from_str(&json).expect("deserialize");
@@ -483,6 +490,7 @@ fn large_idx_roundtrip() {
         content: "boundary test".to_string(),
         extra: serde_json::json!({}),
         snippets: vec![],
+        invocations: Vec::new(),
     };
     let json = serde_json::to_string(&msg).expect("serialize");
     let restored: NormalizedMessage = serde_json::from_str(&json).expect("deserialize");

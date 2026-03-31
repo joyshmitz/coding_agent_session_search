@@ -20,6 +20,7 @@ fn sample_conv(i: i64, msgs: i64) -> NormalizedConversation {
             content: format!("conversation {i} message {m} lorem ipsum dolor sit amet"),
             extra: serde_json::json!({}),
             snippets: Vec::new(),
+            invocations: Vec::new(),
         });
     }
     NormalizedConversation {
@@ -166,6 +167,7 @@ fn wildcard_sample_conv(i: i64, msgs: i64) -> NormalizedConversation {
             ),
             extra: serde_json::json!({}),
             snippets: Vec::new(),
+            invocations: Vec::new(),
         });
     }
     NormalizedConversation {

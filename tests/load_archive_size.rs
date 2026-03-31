@@ -95,6 +95,7 @@ fn generate_conversation(
                 content,
                 extra: serde_json::json!({ "load_test": true }),
                 snippets: Vec::new(),
+                invocations: Vec::new(),
             }
         })
         .collect();

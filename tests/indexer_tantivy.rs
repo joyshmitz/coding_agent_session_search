@@ -101,6 +101,7 @@ fn optimize_if_idle_triggers_when_segment_threshold_met() {
                 content: format!("hello-{i}"),
                 extra: json!({}),
                 snippets: Vec::new(),
+                invocations: Vec::new(),
             }],
         };
         index.add_conversation(&conv).expect("add conv");
@@ -147,6 +148,7 @@ fn incremental_commit_preserves_existing_docs() {
             content: "first message".into(),
             extra: json!({}),
             snippets: Vec::new(),
+            invocations: Vec::new(),
         }],
     };
     index.add_conversation(&conv_a).expect("add conv a");
@@ -175,6 +177,7 @@ fn incremental_commit_preserves_existing_docs() {
             content: "second message".into(),
             extra: json!({}),
             snippets: Vec::new(),
+            invocations: Vec::new(),
         }],
     };
     index.add_conversation(&conv_b).expect("add conv b");

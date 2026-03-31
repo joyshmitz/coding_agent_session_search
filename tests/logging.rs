@@ -16,6 +16,7 @@ fn norm_msg(idx: i64) -> NormalizedMessage {
         content: format!("hello-{idx}"),
         extra: serde_json::json!({}),
         snippets: Vec::new(),
+        invocations: Vec::new(),
     }
 }
 

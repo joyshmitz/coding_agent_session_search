@@ -59,6 +59,7 @@ fn build_full_conversation() -> NormalizedConversation {
                             .into(),
                     ),
                 }],
+                invocations: Vec::new(),
             },
             NormalizedMessage {
                 idx: 1,
@@ -68,6 +69,7 @@ fn build_full_conversation() -> NormalizedConversation {
                 content: "I'll fix the authentication bug by adding input validation.".into(),
                 extra: serde_json::json!({"model": "claude-3-opus"}),
                 snippets: vec![],
+                invocations: Vec::new(),
             },
             NormalizedMessage {
                 idx: 2,
@@ -77,6 +79,7 @@ fn build_full_conversation() -> NormalizedConversation {
                 content: "Thanks, that works!".into(),
                 extra: serde_json::json!({}),
                 snippets: vec![],
+                invocations: Vec::new(),
             },
         ],
     }
@@ -101,6 +104,7 @@ fn build_minimal_conversation() -> NormalizedConversation {
             content: "Hello".into(),
             extra: serde_json::json!({}),
             snippets: vec![],
+            invocations: Vec::new(),
         }],
     }
 }
@@ -138,6 +142,7 @@ fn build_full_message() -> NormalizedMessage {
                 snippet_text: Some("import asyncio".into()),
             },
         ],
+        invocations: Vec::new(),
     }
 }
 

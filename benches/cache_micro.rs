@@ -42,6 +42,7 @@ fn build_small_index() -> (TempDir, SearchClient) {
                     language: None,
                     snippet_text: None,
                 }],
+                invocations: Vec::new(),
             },
             NormalizedMessage {
                 idx: 1,
@@ -51,6 +52,7 @@ fn build_small_index() -> (TempDir, SearchClient) {
                 content: "delta epsilon zeta".into(),
                 extra: serde_json::json!({}),
                 snippets: vec![],
+                invocations: Vec::new(),
             },
         ],
     };
