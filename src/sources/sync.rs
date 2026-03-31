@@ -40,31 +40,37 @@ use ssh2::{Session, Sftp};
 use std::io::{Read as IoRead, Write as IoWrite};
 use std::net::{Shutdown, TcpStream};
 
-/// Returns true when the system `rsync` is openrsync (ships with macOS 15+).
-/// openrsync does not support `--protect-args`, so we skip it.
-fn is_openrsync() -> bool {
+/// Returns true when the system `rsync` supports the `--protect-args` flag.
+/// This flag was introduced in rsync 3.0.0 and is generally safer for paths
+/// with special characters. openrsync (macOS 15+) does not support it.
+fn supports_protect_args() -> bool {
     static CACHED: OnceLock<bool> = OnceLock::new();
     *CACHED.get_or_init(|| {
         Command::new("rsync")
-            .arg("--version")
+            .arg("--help")
             .output()
             .ok()
-            .and_then(|o| {
-                let first = String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .next()?
-                    .to_owned();
-                Some(first.starts_with("openrsync:"))
+            .map(|o| {
+                let help = String::from_utf8_lossy(&o.stdout);
+                help.contains("--protect-args")
             })
             .unwrap_or(false)
     })
 }
 
 fn quote_remote_shell_path(path: &str) -> String {
+    // POSIX shell single-quote escape:
+    // 1. Wrap the whole thing in single quotes.
+    // 2. Escape existing single quotes by closing the current quote,
+    //    inserting a backslash-escaped quote, and opening a new one.
+    // Result: 'foo'\''bar'
     format!("'{}'", path.replace('\'', r#"'\''"#))
 }
 
 fn remote_spec_for_shell_bound_copy(host: &str, remote_path: &str) -> String {
+    // host itself might contain user@ or be an alias, but we should not quote it
+    // if it's already a single token. However, if it contains spaces or other
+    // weirdness it's already broken for SSH. We focus on the path part.
     format!("{host}:{}", quote_remote_shell_path(remote_path))
 }
 
@@ -74,8 +80,10 @@ fn remote_spec_for_scp(host: &str, remote_path: &str) -> String {
 
 fn remote_spec_for_rsync(host: &str, remote_path: &str, protect_args_supported: bool) -> String {
     if protect_args_supported {
+        // With --protect-args, rsync handles its own escaping over the wire
         remote_spec_for_scp(host, remote_path)
     } else {
+        // Without it (e.g. openrsync), we must manually quote for the remote shell
         remote_spec_for_shell_bound_copy(host, remote_path)
     }
 }
@@ -302,6 +310,17 @@ impl SyncEngine {
     ///
     /// This is called once per source sync to avoid repeated SSH calls for each path.
     fn get_remote_home(&self, host: &str) -> Result<String, SyncError> {
+        // Validate host doesn't contain shell metacharacters to prevent injection
+        if host
+            .chars()
+            .any(|c| !c.is_alphanumeric() && c != '.' && c != '-' && c != '_' && c != '@')
+        {
+            return Err(SyncError::SshFailed(format!(
+                "Invalid characters in host: {}",
+                host
+            )));
+        }
+
         let output = Command::new("ssh")
             .args(strict_ssh_cli_tokens(self.connection_timeout))
             .arg("--")
@@ -543,7 +562,7 @@ impl SyncEngine {
 
         // Build rsync command
         // NOTE: NO --delete flag! Safe additive sync only.
-        let protect_args_supported = !is_openrsync();
+        let protect_args_supported = supports_protect_args();
         let remote_spec = remote_spec_for_rsync(host, &expanded_path, protect_args_supported);
         let ssh_opts = strict_ssh_command_for_rsync(self.connection_timeout);
 
@@ -564,7 +583,6 @@ impl SyncEngine {
         let timeout_str = self.transfer_timeout.to_string();
         let mut cmd = Command::new("rsync");
         cmd.args(["-avz", "--stats", "--partial"]);
-        // openrsync (macOS 15+) does not support --protect-args.
         if protect_args_supported {
             cmd.arg("--protect-args");
         }
