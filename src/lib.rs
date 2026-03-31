@@ -3756,8 +3756,6 @@ fn run_analytics(cmd: AnalyticsCommand, db_path: Option<PathBuf>, cli: &Cli) -> 
         AnalyticsCommand::Validate { common, .. } => ("validate", common),
     };
 
-    let json_mode = common.json;
-
     // Build a summary of the active filters for _meta.
     let filters = analytics_build_filters(common);
 
