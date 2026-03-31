@@ -92,7 +92,14 @@ impl ModelManager {
 
     /// Pre-warm the embedder by loading it.
     pub fn warm_embedder(&self) -> EmbedderResult<()> {
+        // Fast path: already loaded
         if self.embedder.read().is_some() {
+            return Ok(());
+        }
+
+        // Slow path: need to load. Take write lock and check again.
+        let mut embedder_guard = self.embedder.write();
+        if embedder_guard.is_some() {
             return Ok(());
         }
 
@@ -103,14 +110,14 @@ impl ModelManager {
             Ok(embedder) => {
                 let id = embedder.id().to_string();
                 let dimension = embedder.dimension();
-                *self.embedder.write() = Some(Arc::new(embedder));
+                *embedder_guard = Some(Arc::new(embedder));
                 *self.embedder_name.write() = "MiniLM-L6-v2".to_string();
                 info!(id = %id, dimension = dimension, "Embedder loaded");
                 Ok(())
             }
             Err(e) => {
                 warn!(error = %e, "Failed to load embedder, using hash fallback");
-                *self.embedder.write() = Some(self.fallback_embedder.clone());
+                *embedder_guard = Some(self.fallback_embedder.clone());
                 *self.embedder_name.write() = "hash-fallback".to_string();
                 // Return Ok since we have a fallback
                 Ok(())
@@ -120,7 +127,14 @@ impl ModelManager {
 
     /// Pre-warm the reranker by loading it.
     pub fn warm_reranker(&self) -> RerankerResult<()> {
+        // Fast path: already loaded
         if self.reranker.read().is_some() {
+            return Ok(());
+        }
+
+        // Slow path: need to load. Take write lock and check again.
+        let mut reranker_guard = self.reranker.write();
+        if reranker_guard.is_some() {
             return Ok(());
         }
 
@@ -130,7 +144,7 @@ impl ModelManager {
         match FastEmbedReranker::load_from_dir(&model_dir) {
             Ok(reranker) => {
                 let id = reranker.id().to_string();
-                *self.reranker.write() = Some(Arc::new(reranker));
+                *reranker_guard = Some(Arc::new(reranker));
                 *self.reranker_name.write() = "ms-marco-MiniLM-L-6-v2".to_string();
                 info!(id = %id, "Reranker loaded");
                 Ok(())

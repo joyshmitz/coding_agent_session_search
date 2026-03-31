@@ -7,14 +7,16 @@
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use fs2::FileExt;
 use parking_lot::Mutex;
 use tracing::{debug, info, warn};
 
+use super::daemon_spawn_guard_lock_path;
 use super::protocol::{
     EmbeddingJobInfo, ErrorCode, FramedMessage, HealthStatus, PROTOCOL_VERSION, Request, Response,
     decode_message, default_socket_path, encode_message,
@@ -168,6 +170,28 @@ impl UdsDaemonClient {
                 DaemonError::Unavailable("cannot determine daemon binary path".to_string())
             })?;
 
+        // Use a file lock to prevent multiple processes from spawning the daemon simultaneously
+        let lock_path = daemon_spawn_guard_lock_path(&self.config.socket_path);
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|e| DaemonError::Unavailable(format!("failed to open spawn lock: {}", e)))?;
+
+        // Acquire exclusive lock (blocks until available) so concurrent clients
+        // don't all try to auto-spawn the daemon at once.
+        lock_file.lock_exclusive().map_err(|e| {
+            DaemonError::Unavailable(format!("failed to acquire spawn lock: {}", e))
+        })?;
+
+        // Re-check if daemon is already running now that we hold the lock
+        if UnixStream::connect(&self.config.socket_path).is_ok() {
+            debug!("Daemon already running, skipping spawn");
+            return Ok(());
+        }
+
         // Remove existing socket if present (ignore NotFound — avoids TOCTOU race)
         if let Err(e) = std::fs::remove_file(&self.config.socket_path)
             && e.kind() != std::io::ErrorKind::NotFound
@@ -193,8 +217,12 @@ impl UdsDaemonClient {
                     socket = %self.config.socket_path.display(),
                     "Spawned daemon process"
                 );
+                self.wait_for_spawned_daemon_ready(&mut child)?;
                 // Reap the child in a background thread to avoid zombie processes.
                 // The daemon is long-lived, so we just detach and let it run.
+                // ubs:ignore — detached reaper thread intentionally waits on the
+                // spawned daemon child so an auto-started daemon does not become
+                // a zombie when it eventually exits.
                 std::thread::spawn(move || {
                     let _ = child.wait();
                 });
@@ -205,6 +233,35 @@ impl UdsDaemonClient {
                 e
             ))),
         }
+    }
+
+    fn wait_for_spawned_daemon_ready(&self, child: &mut Child) -> Result<(), DaemonError> {
+        let ready_timeout = self.config.connect_timeout.max(Duration::from_secs(5));
+        let started = Instant::now();
+        while started.elapsed() < ready_timeout {
+            if UnixStream::connect(&self.config.socket_path).is_ok() {
+                return Ok(());
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return Err(DaemonError::Unavailable(format!(
+                        "spawned daemon exited before becoming ready: {}",
+                        status
+                    )));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        socket = %self.config.socket_path.display(),
+                        "failed to poll spawned daemon status while waiting for readiness"
+                    );
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Ok(())
     }
 
     /// Get a fresh connection, reconnecting if needed.
@@ -625,5 +682,18 @@ mod tests {
         let first = client.request_counter.fetch_add(1, Ordering::Relaxed);
         let second = client.request_counter.fetch_add(1, Ordering::Relaxed);
         assert_eq!(second, first + 1);
+    }
+
+    #[test]
+    fn test_spawn_guard_lock_path_is_distinct_from_run_lock() {
+        let socket = PathBuf::from("/tmp/cass-semantic.sock");
+        assert_ne!(
+            crate::daemon::daemon_spawn_guard_lock_path(&socket),
+            crate::daemon::daemon_run_lock_path(&socket)
+        );
+        assert_eq!(
+            crate::daemon::daemon_spawn_guard_lock_path(&socket),
+            PathBuf::from("/tmp/cass-semantic.spawn-guard.lock")
+        );
     }
 }

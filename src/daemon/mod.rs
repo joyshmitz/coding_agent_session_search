@@ -48,6 +48,16 @@ pub mod protocol;
 pub mod resource;
 pub mod worker;
 
+use std::path::{Path, PathBuf};
+
+pub(crate) fn daemon_run_lock_path(socket_path: &Path) -> PathBuf {
+    socket_path.with_extension("spawnlock")
+}
+
+pub(crate) fn daemon_spawn_guard_lock_path(socket_path: &Path) -> PathBuf {
+    socket_path.with_extension("spawn-guard.lock")
+}
+
 // Re-export key types for convenience
 pub use client::{DaemonClientConfig, UdsDaemonClient};
 pub use core::{DaemonConfig, ModelDaemon};

@@ -13,7 +13,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::indexer::semantic::{EmbeddingInput, SemanticIndexer};
 use crate::search::canonicalize::{canonicalize_for_embedding, content_hash};
-use crate::search::vector_index::{VectorIndex, role_code_from_str, vector_index_path};
+use crate::search::vector_index::{
+    VectorIndex, parse_semantic_doc_id, role_code_from_str, vector_index_path,
+};
 use crate::storage::sqlite::FrankenStorage;
 
 /// Configuration for a single embedding job.
@@ -413,29 +415,15 @@ impl EmbeddingWorker {
             Ok(index) => {
                 let mut hashes = HashMap::new();
                 for idx in 0..index.record_count() {
-                    let doc_id = match index.doc_id_at(idx) {
+                    let doc_id_str = match index.doc_id_at(idx) {
                         Ok(doc_id) => doc_id,
                         Err(_) => continue,
                     };
-                    let mut parts = doc_id.split('|');
-                    if parts.next() != Some("m") {
-                        continue;
-                    }
-                    let message_id: u64 = match parts.next().and_then(|s| s.parse().ok()) {
-                        Some(id) => id,
-                        None => continue,
-                    };
-                    // Skip chunk_idx, agent_id, workspace_id, source_id, role, created_at_ms
-                    for _ in 0..6 {
-                        let _ = parts.next();
-                    }
-                    let hash_hex = match parts.next() {
-                        Some(h) if h.len() == 64 => h,
-                        _ => continue,
-                    };
-                    let mut hash = [0u8; 32];
-                    if hex::decode_to_slice(hash_hex, &mut hash).is_ok() {
-                        hashes.insert(message_id, hash);
+
+                    if let Some(parsed) = parse_semantic_doc_id(doc_id_str)
+                        && let Some(hash) = parsed.content_hash
+                    {
+                        hashes.insert(parsed.message_id, hash);
                     }
                 }
                 debug!(

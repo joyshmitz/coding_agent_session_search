@@ -10,9 +10,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use fs2::FileExt;
 use parking_lot::RwLock;
 use tracing::{debug, error, info, warn};
 
+use super::daemon_run_lock_path;
 use super::models::ModelManager;
 use super::protocol::{
     EmbedResponse, EmbeddingJobDetail, EmbeddingJobInfo, ErrorCode, ErrorResponse, FramedMessage,
@@ -191,6 +193,27 @@ impl ModelDaemon {
 
     /// Start the daemon server.
     pub fn run(&self) -> std::io::Result<()> {
+        // Use a file lock to ensure only one daemon instance runs for this socket path
+        let lock_path = daemon_run_lock_path(&self.config.socket_path);
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)?;
+
+        // Acquire exclusive lock (non-blocking to fail fast if another daemon is already running)
+        if lock_file.try_lock_exclusive().is_err() {
+            warn!(
+                socket = %self.config.socket_path.display(),
+                "Another daemon is already running for this socket path"
+            );
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                "Another daemon is already running",
+            ));
+        }
+
         // Apply resource limits
         if !self.resources.apply_nice(self.config.nice_value) {
             warn!(
@@ -339,8 +362,11 @@ impl ModelDaemon {
             }
 
             let len = u32::from_be_bytes(len_buf) as usize;
-            if len > 100 * 1024 * 1024 {
-                warn!(len = len, "Request too large, closing connection");
+            if len > 10 * 1024 * 1024 {
+                warn!(
+                    len = len,
+                    "Request too large (max 10MB), closing connection"
+                );
                 return Ok(());
             }
 
@@ -657,5 +683,14 @@ mod tests {
 
         // With idle_timeout = 0, should never trigger idle shutdown
         assert!(!daemon.should_shutdown_idle());
+    }
+
+    #[test]
+    fn test_daemon_run_lock_path_is_stable() {
+        let socket = PathBuf::from("/tmp/cass-semantic.sock");
+        assert_eq!(
+            daemon_run_lock_path(&socket),
+            PathBuf::from("/tmp/cass-semantic.spawnlock")
+        );
     }
 }
