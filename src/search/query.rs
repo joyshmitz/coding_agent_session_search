@@ -1117,6 +1117,8 @@ fn hash_bytes(mut hash: u64, bytes: &[u8]) -> u64 {
 pub(crate) fn stable_content_hash(content: &str) -> u64 {
     const FNV_OFFSET: u64 = 14695981039346656037;
     let mut hash = FNV_OFFSET;
+    // Fast path: hash bytes directly. We still split by whitespace to keep it
+    // whitespace-invariant for deduplication, but we avoid many tiny FNV updates.
     let mut first = true;
     for token in content.split_whitespace() {
         if !first {

@@ -709,8 +709,8 @@ impl<'a, D: DaemonClient> Iterator for TwoTierSearchIter<'a, D> {
                                 let mut blended: Vec<ScoredResult> =
                                     Vec::with_capacity(fast_results.len());
                                 for (idx, fast) in fast_results.iter().enumerate() {
+                                    let fast_s = fast_norm.get(idx).copied().unwrap_or(0.0);
                                     let score = if idx < quality_norm.len() {
-                                        let fast_s = fast_norm.get(idx).copied().unwrap_or(0.0);
                                         let quality_s =
                                             quality_norm.get(idx).copied().unwrap_or(0.0);
                                         (1.0 - weight) * fast_s + weight * quality_s
@@ -718,7 +718,7 @@ impl<'a, D: DaemonClient> Iterator for TwoTierSearchIter<'a, D> {
                                         // Unrefined documents get a penalized score that assumes 0.0 for quality
                                         // to preserve their original ranking but place them appropriately below
                                         // high-quality refined items.
-                                        fast_norm.get(idx).copied().unwrap_or(0.0) * (1.0 - weight)
+                                        fast_s * (1.0 - weight)
                                     };
                                     blended.push(ScoredResult {
                                         idx: fast.idx,

@@ -69,6 +69,7 @@ pub fn aes_gcm_decrypt(
     let nonce = Nonce::from_slice(nonce);
 
     // Combine ciphertext and tag for decryption (aes-gcm crate expects them together)
+    // Use the Payload API directly to avoid manual concatenation.
     let mut payload_vec = Vec::with_capacity(ciphertext.len() + tag.len());
     payload_vec.extend_from_slice(ciphertext);
     payload_vec.extend_from_slice(tag);

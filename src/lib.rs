@@ -4366,7 +4366,7 @@ async fn import_chatgpt_export(
             }
         });
 
-    if let Some(fmt) = structured_format {
+    if let Some(_fmt) = structured_format {
         let result = serde_json::json!({
             "success": true,
             "total": total,
@@ -11486,7 +11486,7 @@ fn run_config_based_export(
             }
         });
 
-    if let Some(fmt) = structured_format {
+    if let Some(_fmt) = structured_format {
         let result = serde_json::json!({
             "status": "success",
             "output_dir": output_dir,
@@ -13453,7 +13453,7 @@ fn run_export_html(
             }
         });
 
-    if let Some(fmt) = structured_format {
+    if let Some(_fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::json!({
@@ -13504,7 +13504,7 @@ fn run_export_html(
             }
         });
 
-    if let Some(fmt) = structured_format {
+    if let Some(_fmt) = structured_format {
                 println!(
                     "{}",
                     serde_json::json!({
@@ -13994,7 +13994,7 @@ fn run_export_html(
             }
         });
 
-    if let Some(fmt) = structured_format {
+    if let Some(_fmt) = structured_format {
         let result = serde_json::json!({
             "success": true,
             "exported": {
@@ -16673,7 +16673,7 @@ fn run_sources_doctor(source_filter: Option<&str>, output_format: Option<RobotFo
             }
         });
 
-    if let Some(fmt) = structured_format {
+    if let Some(_fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::json!({
@@ -16754,7 +16754,7 @@ fn run_sources_doctor(source_filter: Option<&str>, output_format: Option<RobotFo
             }
         });
 
-    if let Some(fmt) = structured_format {
+    if let Some(_fmt) = structured_format {
         println!(
             "{}",
             serde_json::to_string_pretty(&all_diagnostics).unwrap_or_default()
@@ -17037,7 +17037,7 @@ fn run_sources_sync(
             }
         });
 
-    if let Some(fmt) = structured_format {
+    if let Some(_fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::json!({
@@ -17075,7 +17075,7 @@ fn run_sources_sync(
             }
         });
 
-    if let Some(fmt) = structured_format {
+    if let Some(_fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::json!({
@@ -17146,7 +17146,7 @@ fn run_sources_sync(
             }
         });
 
-    if let Some(fmt) = structured_format {
+    if let Some(_fmt) = structured_format {
                     all_reports.push(serde_json::json!({
                         "source": source.name,
                         "status": "error",
@@ -17193,7 +17193,7 @@ fn run_sources_sync(
             }
         });
 
-    if let Some(fmt) = structured_format {
+    if let Some(_fmt) = structured_format {
             all_reports.push(serde_json::json!({
                 "source": source.name,
                 "status": if report.all_succeeded { "success" } else { "partial" },
@@ -17275,7 +17275,7 @@ fn run_sources_sync(
             }
         });
 
-    if let Some(fmt) = structured_format {
+    if let Some(_fmt) = structured_format {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -17357,7 +17357,7 @@ fn run_sources_discover(preset: &str, skip_existing: bool, output_format: Option
             }
         });
 
-    if let Some(fmt) = structured_format {
+    if let Some(_fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::json!({
@@ -17399,7 +17399,7 @@ fn run_sources_discover(preset: &str, skip_existing: bool, output_format: Option
             }
         });
 
-    if let Some(fmt) = structured_format {
+    if let Some(_fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::json!({
@@ -17427,7 +17427,7 @@ fn run_sources_discover(preset: &str, skip_existing: bool, output_format: Option
             }
         });
 
-    if let Some(fmt) = structured_format {
+    if let Some(_fmt) = structured_format {
         let hosts_json: Vec<_> = hosts_to_add
             .iter()
             .map(|h| {
@@ -17641,7 +17641,7 @@ fn run_models_status(output_format: Option<RobotFormat>) -> CliResult<()> {
             }
         });
 
-    if let Some(fmt) = structured_format {
+    if let Some(_fmt) = structured_format {
         let output = serde_json::json!({
             "model_id": manifest.id,
             "model_dir": model_dir.display().to_string(),
@@ -18051,7 +18051,7 @@ fn run_models_verify(
             }
         });
 
-    if let Some(fmt) = structured_format {
+    if let Some(_fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -18142,7 +18142,7 @@ fn run_models_verify(
             }
         });
 
-    if let Some(fmt) = structured_format {
+    if let Some(_fmt) = structured_format {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -18289,7 +18289,7 @@ fn run_models_check_update(output_format: Option<RobotFormat>, data_dir_override
             }
         });
 
-    if let Some(fmt) = structured_format {
+    if let Some(_fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -18331,7 +18331,7 @@ fn run_models_check_update(output_format: Option<RobotFormat>, data_dir_override
         latest_revision,
     }) = update_info
     {
-        if let Some(fmt) = structured_format {
+        if let Some(_fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -18355,7 +18355,7 @@ fn run_models_check_update(output_format: Option<RobotFormat>, data_dir_override
             println!("To update, run:");
             println!("  cass models install");
         }
-    } else if let Some(fmt) = structured_format {
+    } else if let Some(_fmt) = structured_format {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
@@ -18435,7 +18435,7 @@ fn run_mappings_list(source_name: &str, output_format: Option<RobotFormat>) -> C
             }
         });
 
-    if let Some(fmt) = structured_format {
+    if let Some(_fmt) = structured_format {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
