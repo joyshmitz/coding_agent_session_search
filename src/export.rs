@@ -342,19 +342,22 @@ fn truncate_text(text: &str, max_len: usize) -> String {
         return text.to_string();
     }
 
-    let char_count = text.chars().count();
-    if char_count <= max_len {
-        return text.to_string();
+    let mut chars = text.chars();
+    let mut preview: String = chars.by_ref().take(max_len).collect();
+
+    if chars.next().is_none() {
+        return preview;
     }
 
     // For very small max_len (≤3), truncate without ellipsis to avoid exceeding limit
     if max_len <= 3 {
-        return text.chars().take(max_len).collect();
+        return preview;
     }
 
-    let mut truncated: String = text.chars().take(max_len - 3).collect();
-    truncated.push_str("...");
-    truncated
+    let take = max_len.saturating_sub(3);
+    preview.truncate(preview.chars().take(take).map(|c| c.len_utf8()).sum());
+    preview.push_str("...");
+    preview
 }
 
 #[cfg(test)]

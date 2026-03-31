@@ -449,7 +449,7 @@ const ICON_BOT: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000
 const ICON_WRENCH: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>"#;
 
 /// Settings icon - for system messages
-const ICON_SETTINGS: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>"#;
+const ICON_SETTINGS: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 .73 2.73l-.22.39a2 2 0 0 0-2.73.73l-.15-.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>"#;
 
 /// Message square icon - fallback
 const ICON_MESSAGE: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>"#;
@@ -461,7 +461,7 @@ const ICON_TERMINAL: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org
 const ICON_FILE_TEXT: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></svg>"#;
 
 /// Pencil icon - for write/edit
-const ICON_PENCIL: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/></svg>"#;
+const ICON_PENCIL: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 .73 2.73l-.22.38a2 2 0 0 0-.73 2.73l.22.39a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V4a2 2 0 0 0-2-2z"/><path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/></svg>"#;
 
 /// Search icon - for glob/grep/search
 const ICON_SEARCH: &str = r#"<svg class="lucide-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>"#;
@@ -690,7 +690,17 @@ fn render_message_group(
     let mut content_chars = 0; // Calculated lazily
     let should_collapse =
         options.collapse_threshold > 0 && content_bytes > options.collapse_threshold && {
-            content_chars = group.primary.content.chars().count();
+            let mut chars = group.primary.content.chars();
+            let mut count = 0;
+            while count <= options.collapse_threshold && chars.next().is_some() {
+                count += 1;
+            }
+            content_chars = if count > options.collapse_threshold {
+                // We know it exceeds, but we need the full count for display
+                count + chars.count()
+            } else {
+                count
+            };
             content_chars > options.collapse_threshold
         };
 
@@ -964,7 +974,17 @@ pub fn render_message(message: &Message, options: &RenderOptions) -> Result<Stri
     let mut content_chars = 0; // Calculated lazily
     let should_collapse =
         options.collapse_threshold > 0 && content_bytes > options.collapse_threshold && {
-            content_chars = message.content.chars().count();
+            let mut chars = message.content.chars();
+            let mut count = 0;
+            while count <= options.collapse_threshold && chars.next().is_some() {
+                count += 1;
+            }
+            content_chars = if count > options.collapse_threshold {
+                // We know it exceeds, but we need the full count for display
+                count + chars.count()
+            } else {
+                count
+            };
             content_chars > options.collapse_threshold
         };
 
@@ -1131,15 +1151,28 @@ fn render_content(content: &str, _options: &RenderOptions) -> String {
 }
 
 fn sanitize_markdown_dest_url(dest_url: CowStr<'_>) -> CowStr<'_> {
-    let lower = dest_url
-        .trim()
+    let trimmed = dest_url.trim();
+    // Quick check: if it doesn't contain ':', it can't be a dangerous scheme.
+    // This avoids allocation for most common URLs (http://, https://, or relative paths).
+    if !trimmed.contains(':') {
+        return dest_url;
+    }
+
+    // Schemes like javascript: are short. We only need to check the beginning.
+    let mut normalized = String::with_capacity(16);
+    for ch in trimmed
         .chars()
-        .filter(|ch| !ch.is_ascii_whitespace() && !ch.is_ascii_control())
-        .collect::<String>()
-        .to_lowercase();
-    if lower.starts_with("javascript:")
-        || lower.starts_with("vbscript:")
-        || lower.starts_with("data:")
+        .filter(|c| !c.is_ascii_whitespace() && !c.is_ascii_control())
+    {
+        normalized.push(ch.to_ascii_lowercase());
+        if normalized.len() >= 15 {
+            break;
+        }
+    }
+
+    if normalized.starts_with("javascript:")
+        || normalized.starts_with("vbscript:")
+        || normalized.starts_with("data:")
     {
         "#".into()
     } else {
@@ -1263,18 +1296,22 @@ fn format_json_or_raw(s: &str) -> String {
 
 /// Format a timestamp for display.
 fn format_timestamp(ts: &str) -> String {
-    // Simple formatting - could be enhanced with chrono
-    // For now, just return a shortened version
-    if ts.len() > 19 {
-        // Safe truncation at char boundary
-        let end = truncate_to_char_boundary(ts, 19);
-        ts[..end].replace('T', " ")
+    // Simple formatting: "2024-01-15T10:30:00Z" -> "2024-01-15 10:30:00"
+    if ts.len() >= 19
+        && ts.is_char_boundary(10)
+        && ts.is_char_boundary(11)
+        && ts.is_char_boundary(19)
+    {
+        let date_part = &ts[..10];
+        let time_part = &ts[11..19];
+        format!("{} {}", date_part, time_part)
     } else {
         ts.to_string()
     }
 }
 
 /// Find the largest byte index <= `max_bytes` that is on a UTF-8 char boundary.
+#[cfg(test)]
 fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> usize {
     if max_bytes >= s.len() {
         return s.len();

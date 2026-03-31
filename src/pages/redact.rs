@@ -153,9 +153,9 @@ impl RedactionEngine {
 
         if self.config.redact_home_paths
             && let Some(home_str) = &self.home_str
-            && output.contains(home_str)
+            && let Some(redacted) = replace_home_path_prefixes(&output, home_str)
         {
-            output = output.replace(home_str, "~");
+            output = redacted;
             changes.push(RedactionChange {
                 kind: RedactionKind::HomePath,
                 original: home_str.clone(),
@@ -322,16 +322,11 @@ impl RedactionReport {
 }
 
 fn truncate_for_report(input: &str, max: usize) -> String {
-    if input.chars().count() <= max {
-        return input.to_string();
-    }
-    let mut out = String::new();
-    for (idx, ch) in input.chars().enumerate() {
-        if idx + 1 >= max {
-            out.push('…');
-            break;
-        }
-        out.push(ch);
+    let mut chars = input.chars();
+    let mut out: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() && !out.is_empty() {
+        out.pop(); // remove the last character to make room for the ellipsis
+        out.push('…');
     }
     out
 }
@@ -389,6 +384,36 @@ where
     Some(format!("{}{}", &path[..idx + sep.len_utf8()], replacement))
 }
 
+fn replace_home_path_prefixes(input: &str, home_str: &str) -> Option<String> {
+    if home_str.is_empty() {
+        return None;
+    }
+
+    let mut output = String::with_capacity(input.len());
+    let mut cursor = 0usize;
+    let mut changed = false;
+
+    for (idx, matched) in input.match_indices(home_str) {
+        let after_idx = idx + matched.len();
+        let next_char = input[after_idx..].chars().next();
+        if !matches!(next_char, None | Some('/' | '\\')) {
+            continue;
+        }
+
+        changed = true;
+        output.push_str(&input[cursor..idx]);
+        output.push('~');
+        cursor = after_idx;
+    }
+
+    if !changed {
+        return None;
+    }
+
+    output.push_str(&input[cursor..]);
+    Some(output)
+}
+
 fn find_last_separator(path: &str) -> Option<(char, usize)> {
     let slash_idx = path.rfind('/');
     let backslash_idx = path.rfind('\\');
@@ -435,6 +460,15 @@ mod tests {
         let engine = engine_with_context("/home/alice");
         let result = engine.redact_text("/home/alice/projects/cass/src/main.rs");
         assert!(result.output.contains("~/projects"));
+    }
+
+    #[test]
+    fn test_home_path_redaction_respects_segment_boundaries() {
+        let engine = engine_with_context("/home/alice");
+        let input = "/home/alice2/projects/cass/src/main.rs";
+        let result = engine.redact_text(input);
+        assert_eq!(result.output, input);
+        assert!(result.changes.is_empty());
     }
 
     #[test]
