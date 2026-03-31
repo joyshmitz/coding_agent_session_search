@@ -18,6 +18,10 @@ use super::types::*;
 
 /// Check whether a table exists in the database.
 pub fn table_exists(conn: &Connection, name: &str) -> bool {
+    // Basic validation to prevent SQL injection in table name.
+    if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return false;
+    }
     let rows =
         match conn.query_map_collect(&format!("PRAGMA table_info({})", name), &[], |row: &Row| {
             row.get_typed::<String>(1)
@@ -29,6 +33,12 @@ pub fn table_exists(conn: &Connection, name: &str) -> bool {
 }
 
 fn table_has_column(conn: &Connection, table: &str, column: &str) -> bool {
+    // Basic validation to prevent SQL injection.
+    if !table.chars().all(|c| c.is_alphanumeric() || c == '_')
+        || !column.chars().all(|c| c.is_alphanumeric() || c == '_')
+    {
+        return false;
+    }
     let rows =
         match conn.query_map_collect(&format!("PRAGMA table_info({table})"), &[], |row: &Row| {
             row.get_typed::<String>(1)
@@ -231,6 +241,8 @@ pub fn query_status(conn: &Connection, _filter: &AnalyticsFilter) -> AnalyticsRe
     };
 
     let mm_coverage_pct = if total_messages > 0 {
+        // total_messages is from messages table, mm.row_count is from message_metrics.
+        // message_metrics has message_id as PK, so row_count == unique messages covered.
         (mm.row_count as f64 / total_messages as f64) * 100.0
     } else {
         0.0

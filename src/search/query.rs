@@ -1134,11 +1134,14 @@ fn stable_hit_hash(
     line_number: Option<usize>,
     created_at: Option<i64>,
 ) -> u64 {
-    if !content.is_empty() {
-        return stable_content_hash(content);
-    }
     const FNV_OFFSET: u64 = 14695981039346656037;
-    let mut hash = FNV_OFFSET;
+    let mut hash = if !content.is_empty() {
+        stable_content_hash(content)
+    } else {
+        FNV_OFFSET
+    };
+
+    hash = hash_bytes(hash, b"|");
     hash = hash_bytes(hash, source_path.as_bytes());
     hash = hash_bytes(hash, b"|");
     if let Some(line) = line_number {
@@ -2271,6 +2274,15 @@ impl SearchClient {
         let tantivy = fs_cass_open_search_reader(index_path, ReloadPolicy::Manual).ok();
 
         let sqlite_path = db_path.map(Path::to_path_buf).filter(|path| path.exists());
+
+        if tantivy.is_none() && sqlite_path.is_some() {
+            tracing::warn!(
+                index_path = %index_path.display(),
+                "Tantivy search index not found or incompatible. \
+                 Search results will be degraded. \
+                 Run `cass index --full` to rebuild the index."
+            );
+        }
 
         if tantivy.is_none() && sqlite_path.is_none() {
             return Ok(None);
@@ -4892,6 +4904,11 @@ impl SearchClient {
             .as_ref()
             .map(|(reader, _)| reader.searcher().num_docs() as usize)
             .unwrap_or(0)
+    }
+
+    /// Returns `true` if the Tantivy search index is available.
+    pub fn has_tantivy(&self) -> bool {
+        self.reader.is_some()
     }
 
     fn maybe_reload_reader(&self, reader: &IndexReader) -> Result<()> {

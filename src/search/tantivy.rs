@@ -222,7 +222,7 @@ mod tests {
     fn index_dir_creates_versioned_path() {
         let dir = TempDir::new().expect("temp dir");
         let result = index_dir(dir.path()).expect("index dir");
-        assert!(result.ends_with("index/v6"));
+        assert!(result.ends_with("index/v7"));
     }
 
     #[test]

@@ -6013,6 +6013,15 @@ fn run_cli_search(
         retryable: true,
     })?;
 
+    if !client.has_tantivy() {
+        eprintln!(
+            "Warning: Tantivy search index not found at {}. \
+             Results will be severely limited. \
+             Run `cass index --full` to rebuild the index.",
+            index_path.display()
+        );
+    }
+
     // Determine effective search mode (default to Lexical)
     let effective_mode = mode.unwrap_or(SearchMode::Lexical);
     let approximate = if semantic_opts.approximate && matches!(effective_mode, SearchMode::Lexical)
