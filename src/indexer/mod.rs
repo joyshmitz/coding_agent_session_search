@@ -1834,6 +1834,7 @@ fn run_batch_index(
     needs_rebuild: bool,
     additional_scan_roots: Vec<ScanRoot>,
 ) -> Result<()> {
+    let scan_start = std::time::Instant::now();
     let connector_factories = get_connector_factories();
 
     // First pass: Scan all to get counts if we have progress tracker
@@ -1950,26 +1951,48 @@ fn run_batch_index(
 
     // Post-parallel phase: collect discovered agent names with single mutex lock
     // This eliminates O(connectors) mutex acquisitions during parallel execution
-    if let Some(p) = &opts.progress {
-        let discovered_names: Vec<&str> = pending_batches
-            .iter()
-            .filter(|(_, _, discovered)| *discovered)
-            .map(|(name, _, _)| *name)
-            .collect();
+    let scan_ms = scan_start.elapsed().as_millis() as u64;
 
+    let discovered_names: Vec<String> = pending_batches
+        .iter()
+        .filter(|(_, _, discovered)| *discovered)
+        .map(|(name, _, _)| (*name).to_string())
+        .collect();
+
+    let total_conversations: usize = pending_batches
+        .iter()
+        .map(|(_, convs, _)| convs.len())
+        .sum();
+    let total_messages: usize = pending_batches
+        .iter()
+        .map(|(_, convs, _)| convs.iter().map(|c| c.messages.len()).sum::<usize>())
+        .sum();
+    let connector_stats: Vec<ConnectorStats> = pending_batches
+        .iter()
+        .filter(|(_, convs, _)| !convs.is_empty())
+        .map(|(name, convs, _)| {
+            let msgs: usize = convs.iter().map(|c| c.messages.len()).sum();
+            ConnectorStats {
+                name: (*name).to_string(),
+                conversations: convs.len(),
+                messages: msgs,
+                scan_ms,
+                error: None,
+            }
+        })
+        .collect();
+
+    if let Some(p) = &opts.progress {
         if let Ok(mut names) = p.discovered_agent_names.lock() {
-            names.extend(discovered_names.into_iter().map(String::from));
+            names.extend(discovered_names.clone());
         }
 
-        let total_conversations: usize = pending_batches
-            .iter()
-            .map(|(_, convs, _)| convs.len())
-            .sum();
         p.phase.store(2, Ordering::Relaxed); // Indexing
         p.total.store(total_conversations, Ordering::Relaxed);
         p.current.store(0, Ordering::Relaxed);
     }
 
+    let index_start = std::time::Instant::now();
     for (name, convs, _discovered) in pending_batches {
         ingest_batch(
             storage,
@@ -1984,6 +2007,19 @@ fn run_batch_index(
             conversations = convs.len(),
             "batch_ingest"
         );
+    }
+    let index_ms = index_start.elapsed().as_millis() as u64;
+
+    // Populate structured stats for JSON output (T7.4)
+    if let Some(p) = &opts.progress
+        && let Ok(mut stats) = p.stats.lock()
+    {
+        stats.scan_ms = scan_ms;
+        stats.index_ms = index_ms;
+        stats.connectors = connector_stats;
+        stats.agents_discovered = discovered_names;
+        stats.total_conversations = total_conversations;
+        stats.total_messages = total_messages;
     }
 
     Ok(())
@@ -2130,12 +2166,19 @@ pub fn run_index(
             db_path = %opts.db_path.display(),
             "resuming incomplete lexical rebuild from canonical database checkpoint"
         );
-        rebuild_tantivy_from_db(
+        let rebuild_docs = rebuild_tantivy_from_db(
             &opts.db_path,
             &opts.data_dir,
             initial_canonical_sessions_before_salvage,
             opts.progress.clone(),
         )?;
+        // Populate stats for resumed lexical rebuild path
+        if let Some(p) = &opts.progress
+            && let Ok(mut stats) = p.stats.lock()
+        {
+            stats.total_conversations = initial_canonical_sessions_before_salvage;
+            stats.total_messages = rebuild_docs;
+        }
         TantivyIndex::open_or_create(&index_path)?
     } else {
         let mut t_index = TantivyIndex::open_or_create(&index_path)?;
@@ -2251,12 +2294,21 @@ pub fn run_index(
 
         if rebuild_from_canonical_only {
             drop(t_index);
-            rebuild_tantivy_from_db(
+            let rebuild_convs =
+                count_total_conversations_exact(&storage)?;
+            let rebuild_docs = rebuild_tantivy_from_db(
                 &opts.db_path,
                 &opts.data_dir,
-                count_total_conversations_exact(&storage)?,
+                rebuild_convs,
                 opts.progress.clone(),
             )?;
+            // Populate stats for canonical-only rebuild path (no scan occurs)
+            if let Some(p) = &opts.progress
+                && let Ok(mut stats) = p.stats.lock()
+            {
+                stats.total_conversations = rebuild_convs;
+                stats.total_messages = rebuild_docs;
+            }
             t_index = TantivyIndex::open_or_create(&index_path)?;
         } else {
             if targeted_watch_once_only {
@@ -2313,12 +2365,24 @@ pub fn run_index(
 
                 if opts.full || historical_salvage.messages_imported > 0 {
                     drop(t_index);
-                    rebuild_tantivy_from_db(
+                    let rebuild_convs =
+                        count_total_conversations_exact(&storage)?;
+                    let rebuild_docs = rebuild_tantivy_from_db(
                         &opts.db_path,
                         &opts.data_dir,
-                        count_total_conversations_exact(&storage)?,
+                        rebuild_convs,
                         opts.progress.clone(),
                     )?;
+                    // Update stats to reflect the authoritative rebuild
+                    // totals. The scan-phase stats tracked only what the
+                    // connectors discovered; the DB rebuild is the source of
+                    // truth for full-index runs.
+                    if let Some(p) = &opts.progress
+                        && let Ok(mut stats) = p.stats.lock()
+                    {
+                        stats.total_conversations = rebuild_convs;
+                        stats.total_messages = rebuild_docs;
+                    }
                     t_index = TantivyIndex::open_or_create(&index_path)?;
                 }
             }
