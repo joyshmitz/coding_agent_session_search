@@ -1553,6 +1553,7 @@ fn run_streaming_consumer(
     flow_limiter: Arc<StreamingByteLimiter>,
     progress: &Option<Arc<IndexingProgress>>,
     needs_rebuild: bool,
+    scan_start_ts: Option<i64>,
 ) -> Result<Vec<String>> {
     use std::collections::HashMap;
 
@@ -1628,6 +1629,14 @@ fn run_streaming_consumer(
                         tracing::warn!("incremental commit failed: {}", e);
                     } else {
                         tracing::debug!("incremental commit completed");
+                    }
+                    // Persist scan_start_ts so that if the process is killed,
+                    // the next run does a delta scan from this point instead of
+                    // a full rescan that may OOM again (infinite-OOM-loop fix).
+                    if let Some(ts) = scan_start_ts {
+                        if let Err(e) = storage.set_last_scan_ts(ts) {
+                            tracing::warn!("incremental last_scan_ts save failed: {}", e);
+                        }
                     }
                     last_commit = std::time::Instant::now();
                 }
@@ -1754,6 +1763,7 @@ fn run_streaming_index(
     since_ts: Option<i64>,
     needs_rebuild: bool,
     additional_scan_roots: Vec<ScanRoot>,
+    scan_start_ts: i64,
 ) -> Result<()> {
     run_streaming_index_with_connector_factories(
         storage,
@@ -1763,6 +1773,7 @@ fn run_streaming_index(
         needs_rebuild,
         additional_scan_roots,
         get_connector_factories(),
+        scan_start_ts,
     )
 }
 
@@ -1776,6 +1787,7 @@ fn run_streaming_index_with_connector_factories(
     needs_rebuild: bool,
     additional_scan_roots: Vec<ScanRoot>,
     connector_factories: Vec<(&'static str, ConnectorFactory)>,
+    scan_start_ts: i64,
 ) -> Result<()> {
     let buffered_connectors: Vec<&'static str> = connector_factories
         .iter()
@@ -1837,6 +1849,7 @@ fn run_streaming_index_with_connector_factories(
         producer_config.flow_limiter.clone(),
         &opts.progress,
         needs_rebuild,
+        Some(scan_start_ts),
     );
 
     if consumer_result.is_err() {
@@ -1901,6 +1914,7 @@ fn run_batch_index(
     since_ts: Option<i64>,
     needs_rebuild: bool,
     additional_scan_roots: Vec<ScanRoot>,
+    scan_start_ts: i64,
 ) -> Result<()> {
     let scan_start = std::time::Instant::now();
     let connector_factories = get_connector_factories();
@@ -2061,6 +2075,7 @@ fn run_batch_index(
     }
 
     let index_start = std::time::Instant::now();
+    let mut last_scan_ts_save = std::time::Instant::now();
     for (name, convs, _discovered) in pending_batches {
         ingest_batch(
             storage,
@@ -2070,6 +2085,14 @@ fn run_batch_index(
             needs_rebuild,
             !opts.watch,
         )?;
+        // Periodically persist scan_start_ts so that if the process is killed,
+        // the next run does a delta scan instead of a full rescan (infinite-OOM-loop fix).
+        if last_scan_ts_save.elapsed() >= Duration::from_secs(10) {
+            if let Err(e) = storage.set_last_scan_ts(scan_start_ts) {
+                tracing::warn!("batch incremental last_scan_ts save failed: {}", e);
+            }
+            last_scan_ts_save = std::time::Instant::now();
+        }
         tracing::info!(
             connector = name,
             conversations = convs.len(),
@@ -2416,6 +2439,7 @@ pub fn run_index(
                         since_ts,
                         needs_rebuild,
                         additional_scan_roots.clone(),
+                        scan_start_ts,
                     )?;
                 } else {
                     tracing::info!(
@@ -2428,6 +2452,7 @@ pub fn run_index(
                         since_ts,
                         needs_rebuild,
                         additional_scan_roots.clone(),
+                        scan_start_ts,
                     )?;
                 }
                 performed_scan = true;
@@ -6297,6 +6322,7 @@ mod tests {
             Arc::new(StreamingByteLimiter::new(STREAMING_MAX_BYTES_IN_FLIGHT)),
             &Some(progress.clone()),
             false,
+            None,
         )
         .unwrap();
 
@@ -6361,6 +6387,7 @@ mod tests {
             flow_limiter,
             &Some(progress.clone()),
             false,
+            None,
         )
         .expect("large mixed startup ingest should not violate foreign keys");
 
@@ -6488,6 +6515,7 @@ mod tests {
             flow_limiter,
             &Some(progress.clone()),
             false,
+            None,
         )
         .unwrap();
         handle.join().unwrap();
@@ -6539,6 +6567,7 @@ mod tests {
             false,
             Vec::new(),
             vec![("claude", panic_connector_factory)],
+            FrankenStorage::now_millis(),
         )
         .expect_err("producer panic should abort streaming indexing");
         let message = error.to_string();

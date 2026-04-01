@@ -441,6 +441,9 @@ pub enum Commands {
     View {
         /// Path to the source file
         path: PathBuf,
+        /// Exact source_id from search output (e.g. 'local', 'work-laptop')
+        #[arg(long, alias = "source-id")]
+        source: Option<String>,
         /// Line number to show (1-indexed)
         #[arg(long, short = 'n')]
         line: Option<usize>,
@@ -514,6 +517,9 @@ pub enum Commands {
     Export {
         /// Path to session file
         path: PathBuf,
+        /// Exact source_id from search output (e.g. 'local', 'work-laptop')
+        #[arg(long, alias = "source-id")]
+        source: Option<String>,
         /// Output format
         #[arg(long, value_enum, default_value_t = ConvExportFormat::Markdown)]
         format: ConvExportFormat,
@@ -532,6 +538,10 @@ pub enum Commands {
     ExportHtml {
         /// Path to session file
         session: PathBuf,
+
+        /// Exact source_id from search output (e.g. 'local', 'work-laptop')
+        #[arg(long, alias = "source-id")]
+        source: Option<String>,
 
         /// Output directory (default: current directory)
         #[arg(long)]
@@ -595,6 +605,9 @@ pub enum Commands {
     Expand {
         /// Path to session file
         path: PathBuf,
+        /// Exact source_id from search output (e.g. 'local', 'work-laptop')
+        #[arg(long, alias = "source-id")]
+        source: Option<String>,
         /// Line number to show context around
         #[arg(long, short = 'n')]
         line: usize,
@@ -2956,11 +2969,12 @@ async fn execute_cli(
                 }
                 Commands::View {
                     path,
+                    source,
                     line,
                     context,
                 } => {
                     let structured_format = cli.robot_format.or_else(robot_format_from_env);
-                    run_view(&path, line, context, structured_format)?;
+                    run_view(&path, cli.db.clone(), source.as_deref(), line, context, structured_format)?;
                 }
                 Commands::Pages {
                     export_only,
@@ -3602,6 +3616,7 @@ async fn execute_cli(
                 }
                 Commands::Export {
                     path,
+                    source,
                     format,
                     output,
                     include_tools,
@@ -3609,6 +3624,8 @@ async fn execute_cli(
                 } => {
                     run_export(
                         &path,
+                        cli.db.clone(),
+                        source.as_deref(),
                         format,
                         output.as_deref(),
                         include_tools,
@@ -3617,6 +3634,7 @@ async fn execute_cli(
                 }
                 Commands::ExportHtml {
                     session,
+                    source,
                     output_dir,
                     filename,
                     encrypt,
@@ -3635,6 +3653,8 @@ async fn execute_cli(
                     let structured_format = cli.robot_format.or_else(robot_format_from_env);
                     run_export_html(
                         &session,
+                        cli.db.clone(),
+                        source.as_deref(),
                         output_dir.as_deref(),
                         filename.as_deref(),
                         encrypt,
@@ -3653,11 +3673,12 @@ async fn execute_cli(
                 }
                 Commands::Expand {
                     path,
+                    source,
                     line,
                     context,
                 } => {
                     let structured_format = cli.robot_format.or_else(robot_format_from_env);
-                    run_expand(&path, line, context, structured_format)?;
+                    run_expand(&path, cli.db.clone(), source.as_deref(), line, context, structured_format)?;
                 }
                 Commands::Timeline {
                     since,
@@ -12298,20 +12319,75 @@ fn conversation_view_to_raw_messages(
         .collect()
 }
 
-fn try_load_indexed_conversation_from_db(
+fn validate_followup_source_id(source_id: &str, command: &str) -> CliResult<()> {
+    if source_id.trim().is_empty() || matches!(source_id, "all" | "remote") {
+        return Err(CliError {
+            code: 2,
+            kind: "ambiguous-source",
+            message: format!(
+                "{command} requires an exact source_id, not '{source_id}'"
+            ),
+            hint: Some(
+                "Use the source_id field from search results, e.g. --source local or --source work-laptop"
+                    .to_string(),
+            ),
+            retryable: false,
+        });
+    }
+    Ok(())
+}
+
+fn try_load_indexed_conversation_from_db_with_source(
     source_path: &Path,
     db_path: &Path,
+    source_id: Option<&str>,
 ) -> Option<crate::ui::data::ConversationView> {
     if !db_path.exists() {
         return None;
     }
     let storage = crate::storage::sqlite::FrankenStorage::open(db_path).ok()?;
-    crate::ui::data::load_conversation_for_source(
+    let source_path = source_path.to_string_lossy();
+    if let Some(source_id) = source_id {
+        return crate::ui::data::load_conversation_for_source(&storage, source_id, &source_path)
+            .ok()?;
+    }
+    if let Some(local_view) = crate::ui::data::load_conversation_for_source(
         &storage,
         crate::sources::provenance::LOCAL_SOURCE_ID,
-        &source_path.to_string_lossy(),
+        &source_path,
     )
     .ok()?
+    {
+        return Some(local_view);
+    }
+    crate::ui::data::load_conversation(&storage, &source_path).ok()?
+}
+
+fn serialize_indexed_view_lines(
+    view: &crate::ui::data::ConversationView,
+) -> CliResult<Vec<String>> {
+    conversation_view_to_raw_messages(view)
+        .into_iter()
+        .map(|msg| {
+            serde_json::to_string(&msg).map_err(|e| CliError {
+                code: 9,
+                kind: "serialize-message",
+                message: format!("Failed to serialize indexed message: {e}"),
+                hint: Some(
+                    "The indexed conversation contains unexpected data that could not be re-rendered as JSON."
+                        .into(),
+                ),
+                retryable: false,
+            })
+        })
+        .collect::<CliResult<Vec<_>>>()
+}
+
+fn try_load_indexed_conversation_from_db(
+    source_path: &Path,
+    db_path: &Path,
+) -> Option<crate::ui::data::ConversationView> {
+    try_load_indexed_conversation_from_db_with_source(source_path, db_path, None)
 }
 
 fn try_load_indexed_conversation(source_path: &Path) -> Option<crate::ui::data::ConversationView> {
@@ -12321,6 +12397,8 @@ fn try_load_indexed_conversation(source_path: &Path) -> Option<crate::ui::data::
 
 fn run_view(
     path: &PathBuf,
+    db_override: Option<PathBuf>,
+    source_id: Option<&str>,
     line: Option<usize>,
     context: usize,
     output_format: Option<RobotFormat>,
@@ -12328,7 +12406,16 @@ fn run_view(
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 
-    let lines: Vec<String> = if path.exists() {
+    if let Some(source_id) = source_id {
+        validate_followup_source_id(source_id, "cass view")?;
+    }
+
+    let db_path = db_override.unwrap_or_else(default_db_path);
+    let indexed_view = try_load_indexed_conversation_from_db_with_source(path, &db_path, source_id);
+    let allow_direct_file = source_id.is_none()
+        || source_id == Some(crate::sources::provenance::LOCAL_SOURCE_ID);
+
+    let lines: Vec<String> = if source_id.is_none() && path.exists() {
         let file = File::open(path).map_err(|e| CliError {
             code: 9,
             kind: "file-open",
@@ -12347,31 +12434,49 @@ fn run_view(
                 hint: Some("The session file may be truncated or contain invalid UTF-8".into()),
                 retryable: false,
             })?
-    } else if let Some(view) = try_load_indexed_conversation(path) {
-        conversation_view_to_raw_messages(&view)
-            .into_iter()
-            .map(|msg| {
-                serde_json::to_string(&msg).map_err(|e| CliError {
-                    code: 9,
-                    kind: "serialize-message",
-                    message: format!("Failed to serialize indexed message: {e}"),
-                    hint: Some(
-                        "The indexed conversation contains unexpected data that could not be re-rendered as JSON."
-                            .into(),
-                    ),
-                    retryable: false,
-                })
-            })
-            .collect::<CliResult<Vec<_>>>()?
+    } else if let Some(view) = indexed_view {
+        serialize_indexed_view_lines(&view)?
+    } else if allow_direct_file && path.exists() {
+        let file = File::open(path).map_err(|e| CliError {
+            code: 9,
+            kind: "file-open",
+            message: format!("Failed to open file: {e}"),
+            hint: None,
+            retryable: false,
+        })?;
+        let reader = BufReader::new(file);
+        reader
+            .lines()
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(|e| CliError {
+                code: 9,
+                kind: "file-read",
+                message: format!("Failed to read file: {e}"),
+                hint: Some("The session file may be truncated or contain invalid UTF-8".into()),
+                retryable: false,
+            })?
     } else {
         return Err(CliError {
             code: 3,
             kind: "file-not-found",
-            message: format!("File not found: {}", path.display()),
-            hint: Some(
-                "Path may be virtual (e.g. Cursor composer). Re-run index, then use the exact source_path from search output."
-                    .to_string(),
-            ),
+            message: match source_id {
+                Some(source_id) => format!(
+                    "No indexed session found for source '{}' at {}",
+                    source_id,
+                    path.display()
+                ),
+                None => format!("File not found: {}", path.display()),
+            },
+            hint: Some(match source_id {
+                Some(_) => {
+                    "Use the exact source_id from search output or omit --source to prefer the local file/path."
+                        .to_string()
+                }
+                None => {
+                    "Path may be virtual (e.g. Cursor composer). Re-run index, then use the exact source_path from search output."
+                        .to_string()
+                }
+            }),
             retryable: false,
         });
     };
@@ -12388,7 +12493,6 @@ fn run_view(
 
     let target_line = line.unwrap_or(1);
 
-    // Validate target line is within bounds
     if target_line == 0 {
         return Err(CliError {
             code: 2,
@@ -12415,8 +12519,6 @@ fn run_view(
 
     let start = target_line.saturating_sub(context + 1);
     let end = (target_line + context).min(lines.len());
-
-    // Only highlight a specific line if -n was explicitly provided
     let highlight_line = line.is_some();
 
     let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
@@ -13275,6 +13377,8 @@ fn load_opencode_session_for_export(
 /// Export a conversation to markdown or other formats
 fn run_export(
     path: &Path,
+    db_override: Option<PathBuf>,
+    source_id: Option<&str>,
     format: ConvExportFormat,
     output: Option<&Path>,
     include_tools: bool,
@@ -13283,13 +13387,16 @@ fn run_export(
     use std::fs::File;
     use std::io::{BufRead, BufReader, Write};
 
-    let indexed_view = if path.exists() {
-        None
-    } else {
-        try_load_indexed_conversation(path)
-    };
+    if let Some(source_id) = source_id {
+        validate_followup_source_id(source_id, "cass export")?;
+    }
 
-    if !path.exists() && indexed_view.is_none() {
+    let db_path = db_override.unwrap_or_else(default_db_path);
+    let indexed_view = try_load_indexed_conversation_from_db_with_source(path, &db_path, source_id);
+    let allow_direct_file = source_id.is_none()
+        || source_id == Some(crate::sources::provenance::LOCAL_SOURCE_ID);
+
+    if source_id.is_none() && !path.exists() && indexed_view.is_none() {
         return Err(CliError {
             code: 3,
             kind: "file-not-found",
@@ -13309,8 +13416,7 @@ fn run_export(
         session_start = view.convo.started_at;
         _session_end = view.convo.ended_at;
         messages = conversation_view_to_raw_messages(&view);
-    } else if detect_opencode_session(path) {
-        // Load OpenCode session using split storage format
+    } else if allow_direct_file && detect_opencode_session(path) {
         match load_opencode_session_for_export(path) {
             Ok((title, start, end, msgs)) => {
                 session_title = title;
@@ -13331,8 +13437,7 @@ fn run_export(
                 });
             }
         }
-    } else {
-        // Standard JSONL format
+    } else if allow_direct_file && path.exists() {
         let file = File::open(path).map_err(|e| CliError {
             code: 9,
             kind: "file-open",
@@ -13366,9 +13471,29 @@ fn run_export(
                 messages.push(msg);
             }
         }
+    } else {
+        return Err(CliError {
+            code: 3,
+            kind: "file-not-found",
+            message: match source_id {
+                Some(source_id) => format!(
+                    "No indexed session found for source '{}' at {}",
+                    source_id,
+                    path.display()
+                ),
+                None => format!("Session file not found: {}", path.display()),
+            },
+            hint: Some(match source_id {
+                Some(_) => {
+                    "Use the exact source_id from search output or omit --source to prefer the local file/path."
+                        .to_string()
+                }
+                None => "Use 'cass search' to find session paths".to_string(),
+            }),
+            retryable: false,
+        });
     }
 
-    // Drop entire messages that are skill injections (unless opted in)
     if !include_skills {
         messages.retain(|msg| {
             let content = extract_text_content(msg);
@@ -13396,7 +13521,7 @@ fn run_export(
             code: 9,
             kind: "empty-session",
             message: format!("No messages found in: {}", path.display()),
-            hint: if detect_opencode_session(path) {
+            hint: if allow_direct_file && detect_opencode_session(path) {
                 Some("Check that storage/message/{sessionID}/ contains message files".into())
             } else {
                 None
@@ -13405,7 +13530,6 @@ fn run_export(
         });
     }
 
-    // Find title from first user message (only if no title already set)
     if session_title.is_none() {
         for msg in &messages {
             let role = extract_role(msg);
@@ -13460,6 +13584,8 @@ fn run_export(
 #[allow(clippy::too_many_arguments)]
 fn run_export_html(
     session_path: &Path,
+    db_override: Option<PathBuf>,
+    source_id: Option<&str>,
     output_dir: Option<&Path>,
     filename: Option<&str>,
     encrypt: bool,
@@ -13483,19 +13609,36 @@ fn run_export_html(
     use std::fs::File;
     use std::io::{self, BufRead, BufReader, Write};
 
-    let indexed_view = if session_path.exists() {
-        None
-    } else {
-        try_load_indexed_conversation(session_path)
-    };
+    if let Some(source_id) = source_id {
+        validate_followup_source_id(source_id, "cass export-html")?;
+    }
+
+    let db_path = db_override.unwrap_or_else(default_db_path);
+    let indexed_view = try_load_indexed_conversation_from_db_with_source(
+        session_path,
+        &db_path,
+        source_id,
+    );
+    let allow_direct_file = source_id.is_none()
+        || source_id == Some(crate::sources::provenance::LOCAL_SOURCE_ID);
 
     // --- Validate session exists ---
-    if !session_path.exists() && indexed_view.is_none() {
+    if indexed_view.is_none() && !(allow_direct_file && session_path.exists()) {
         let err = CliError {
             code: 3,
             kind: "session_not_found",
-            message: format!("Session file not found: {}", session_path.display()),
-            hint: Some("Use 'cass search' to find session paths".to_string()),
+            message: match source_id {
+                Some(source_id) => format!(
+                    "No indexed session found for source '{}' at {}",
+                    source_id,
+                    session_path.display()
+                ),
+                None => format!("Session file not found: {}", session_path.display()),
+            },
+            hint: Some(match source_id {
+                Some(_) => "Use the exact source_id from search output or omit --source to prefer the local file/path.".to_string(),
+                None => "Use 'cass search' to find session paths".to_string(),
+            }),
             retryable: false,
         };
         let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
@@ -13616,7 +13759,7 @@ fn run_export_html(
             workspace = Some(parent.display().to_string());
         }
 
-        if detect_opencode_session(session_path) {
+        if allow_direct_file && detect_opencode_session(session_path) {
             match load_opencode_session_for_export(session_path) {
                 Ok((title, start, end, msgs)) => {
                     session_title = title;
@@ -14692,6 +14835,8 @@ mod export_timestamp_tests {
 
         let err = run_export_html(
             &session_path,
+            None,
+            None,
             Some(temp.path()),
             Some("out.html"),
             false,
@@ -14867,6 +15012,150 @@ mod indexed_conversation_fallback_tests {
         assert_eq!(loaded.convo.source_id, crate::sources::provenance::LOCAL_SOURCE_ID);
         assert_eq!(loaded.convo.external_id.as_deref(), Some("local-123"));
         assert_eq!(loaded.messages[0].content, "local body");
+    }
+
+    #[test]
+    fn try_load_indexed_conversation_from_db_falls_back_to_remote_when_local_missing() {
+        use crate::storage::sqlite::FrankenStorage;
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let db_path = tmp.path().join("cass.db");
+        let storage = FrankenStorage::open(&db_path).expect("open db");
+        let agent = Agent {
+            id: None,
+            slug: "codex".to_string(),
+            name: "Codex".to_string(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+        let synthetic_path = PathBuf::from("/same/path/remote-only.jsonl");
+
+        let remote = Conversation {
+            id: None,
+            agent_slug: "codex".to_string(),
+            workspace: None,
+            external_id: Some("remote-only".to_string()),
+            title: Some("Remote Only".to_string()),
+            source_path: synthetic_path.clone(),
+            started_at: Some(1_700_000_000_000),
+            ended_at: None,
+            approx_tokens: Some(10),
+            metadata_json: serde_json::json!({}),
+            messages: vec![Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: Some("remote".to_string()),
+                created_at: Some(1_700_000_000_001),
+                content: "remote-only body".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            }],
+            source_id: "work-laptop".to_string(),
+            origin_host: Some("work-laptop".to_string()),
+        };
+        storage
+            .insert_conversation_tree(agent_id, None, &remote)
+            .expect("insert remote conversation");
+
+        let loaded = try_load_indexed_conversation_from_db(&synthetic_path, &db_path)
+            .expect("conversation should load via db fallback");
+        assert_eq!(loaded.convo.source_id, "work-laptop");
+        assert_eq!(loaded.convo.external_id.as_deref(), Some("remote-only"));
+        assert_eq!(loaded.messages[0].content, "remote-only body");
+    }
+
+    #[test]
+    fn run_export_uses_exact_source_id_for_shared_indexed_path() {
+        use crate::storage::sqlite::FrankenStorage;
+        use tempfile::tempdir;
+
+        let tmp = tempdir().expect("tempdir");
+        let db_path = tmp.path().join("cass.db");
+        let storage = FrankenStorage::open(&db_path).expect("open db");
+        let agent = Agent {
+            id: None,
+            slug: "codex".to_string(),
+            name: "Codex".to_string(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+        let synthetic_path = PathBuf::from("/same/path/export.jsonl");
+
+        let local = Conversation {
+            id: None,
+            agent_slug: "codex".to_string(),
+            workspace: None,
+            external_id: Some("local-export".to_string()),
+            title: Some("Local Export".to_string()),
+            source_path: synthetic_path.clone(),
+            started_at: Some(1_700_000_100_000),
+            ended_at: None,
+            approx_tokens: Some(10),
+            metadata_json: serde_json::json!({}),
+            messages: vec![Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: Some("local".to_string()),
+                created_at: Some(1_700_000_100_001),
+                content: "local export body".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            }],
+            source_id: crate::sources::provenance::LOCAL_SOURCE_ID.to_string(),
+            origin_host: None,
+        };
+        storage
+            .insert_conversation_tree(agent_id, None, &local)
+            .expect("insert local conversation");
+
+        let remote = Conversation {
+            id: None,
+            agent_slug: "codex".to_string(),
+            workspace: None,
+            external_id: Some("remote-export".to_string()),
+            title: Some("Remote Export".to_string()),
+            source_path: synthetic_path.clone(),
+            started_at: Some(1_700_000_000_000),
+            ended_at: None,
+            approx_tokens: Some(10),
+            metadata_json: serde_json::json!({}),
+            messages: vec![Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: Some("remote".to_string()),
+                created_at: Some(1_700_000_000_001),
+                content: "remote export body".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            }],
+            source_id: "work-laptop".to_string(),
+            origin_host: Some("work-laptop".to_string()),
+        };
+        storage
+            .insert_conversation_tree(agent_id, None, &remote)
+            .expect("insert remote conversation");
+
+        let output_path = tmp.path().join("export.md");
+        run_export(
+            &synthetic_path,
+            Some(db_path.clone()),
+            Some("work-laptop"),
+            ConvExportFormat::Markdown,
+            Some(output_path.as_path()),
+            false,
+            true,
+        )
+        .expect("run export");
+
+        let markdown = std::fs::read_to_string(&output_path).expect("read markdown");
+        assert!(markdown.contains("remote export body"));
+        assert!(!markdown.contains("local export body"));
     }
 }
 
@@ -15636,6 +15925,8 @@ fn html_escape(s: &str) -> String {
 /// Show messages around a specific line in a session file
 fn run_expand(
     path: &Path,
+    db_override: Option<PathBuf>,
+    source_id: Option<&str>,
     line: usize,
     context: usize,
     output_format: Option<RobotFormat>,
@@ -15643,37 +15934,80 @@ fn run_expand(
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 
-    if !path.exists() {
+    if let Some(source_id) = source_id {
+        validate_followup_source_id(source_id, "cass expand")?;
+    }
+
+    let db_path = db_override.unwrap_or_else(default_db_path);
+    let indexed_view = try_load_indexed_conversation_from_db_with_source(path, &db_path, source_id);
+    let allow_direct_file = source_id.is_none()
+        || source_id == Some(crate::sources::provenance::LOCAL_SOURCE_ID);
+
+    let raw_lines: Vec<String> = if source_id.is_none() && path.exists() {
+        let file = File::open(path).map_err(|e| CliError {
+            code: 9,
+            kind: "file-open",
+            message: format!("Failed to open file: {e}"),
+            hint: None,
+            retryable: false,
+        })?;
+        let reader = BufReader::new(file);
+        reader
+            .lines()
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(|e| CliError {
+                code: 9,
+                kind: "file-read",
+                message: format!("Failed to read file: {e}"),
+                hint: Some("The session file may be truncated or contain invalid UTF-8".into()),
+                retryable: false,
+            })?
+    } else if let Some(view) = indexed_view {
+        serialize_indexed_view_lines(&view)?
+    } else if allow_direct_file && path.exists() {
+        let file = File::open(path).map_err(|e| CliError {
+            code: 9,
+            kind: "file-open",
+            message: format!("Failed to open file: {e}"),
+            hint: None,
+            retryable: false,
+        })?;
+        let reader = BufReader::new(file);
+        reader
+            .lines()
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(|e| CliError {
+                code: 9,
+                kind: "file-read",
+                message: format!("Failed to read file: {e}"),
+                hint: Some("The session file may be truncated or contain invalid UTF-8".into()),
+                retryable: false,
+            })?
+    } else {
         return Err(CliError {
             code: 3,
             kind: "file-not-found",
-            message: format!("Session file not found: {}", path.display()),
-            hint: Some("Use 'cass search' to find session paths".to_string()),
+            message: match source_id {
+                Some(source_id) => format!(
+                    "No indexed session found for source '{}' at {}",
+                    source_id,
+                    path.display()
+                ),
+                None => format!("Session file not found: {}", path.display()),
+            },
+            hint: Some(match source_id {
+                Some(_) => "Use the exact source_id from search output or omit --source to prefer the local file/path.".to_string(),
+                None => "Use 'cass search' to find session paths".to_string(),
+            }),
             retryable: false,
         });
-    }
+    };
 
-    let file = File::open(path).map_err(|e| CliError {
-        code: 9,
-        kind: "file-open",
-        message: format!("Failed to open file: {e}"),
-        hint: None,
-        retryable: false,
-    })?;
-
-    let reader = BufReader::new(file);
     let mut messages: Vec<(usize, serde_json::Value)> = Vec::new();
     let mut target_msg_idx: Option<usize> = None;
     let mut current_line: usize = 0;
 
-    for line_result in reader.lines() {
-        let raw_line = line_result.map_err(|e| CliError {
-            code: 9,
-            kind: "file-read",
-            message: format!("Failed to read file: {e}"),
-            hint: Some("The session file may be truncated or contain invalid UTF-8".into()),
-            retryable: false,
-        })?;
+    for raw_line in raw_lines {
         current_line += 1;
         if raw_line.trim().is_empty() {
             continue;
