@@ -787,6 +787,18 @@ fn count_total_conversations_exact(storage: &FrankenStorage) -> Result<usize> {
     Ok(usize::try_from(total_conversations.max(0)).unwrap_or(usize::MAX))
 }
 
+fn count_total_messages_exact(storage: &FrankenStorage) -> Result<usize> {
+    let total_messages: i64 = storage
+        .raw()
+        .query_row_map(
+            "SELECT COUNT(*) FROM messages",
+            &[] as &[ParamValue],
+            |row| row.get_typed(0),
+        )
+        .context("counting canonical messages for lexical rebuild state")?;
+    Ok(usize::try_from(total_messages.max(0)).unwrap_or(usize::MAX))
+}
+
 fn should_salvage_historical_databases(
     storage_rebuilt: bool,
     canonical_sessions_before_salvage: usize,
@@ -922,6 +934,38 @@ pub(crate) fn load_lexical_rebuild_checkpoint(
 
 pub(crate) fn lexical_storage_fingerprint_for_db(db_path: &Path) -> Result<String> {
     lexical_rebuild_storage_fingerprint(db_path)
+}
+
+fn refresh_completed_lexical_rebuild_checkpoint(
+    storage: &FrankenStorage,
+    db_path: &Path,
+    data_dir: &Path,
+) -> Result<()> {
+    let index_path = index_dir(data_dir)?;
+    let Some(mut state) = load_lexical_rebuild_state(&index_path)? else {
+        return Ok(());
+    };
+
+    if !state.completed
+        || state.version != LEXICAL_REBUILD_STATE_VERSION
+        || state.schema_hash != crate::search::tantivy::SCHEMA_HASH
+        || state.page_size != LEXICAL_REBUILD_PAGE_SIZE
+        || state.db.db_path != db_path.to_string_lossy()
+    {
+        return Ok(());
+    }
+
+    let total_conversations = count_total_conversations_exact(storage)?;
+    state.db.total_conversations = total_conversations;
+    state.db.storage_fingerprint = lexical_rebuild_storage_fingerprint(db_path)?;
+    state.committed_offset = i64::try_from(total_conversations).unwrap_or(i64::MAX);
+    state.processed_conversations = total_conversations;
+    state.indexed_docs = count_total_messages_exact(storage)?;
+    state.pending = None;
+    state.completed = true;
+    state.committed_meta_fingerprint = index_meta_fingerprint(&index_path)?;
+    state.updated_at_ms = FrankenStorage::now_millis();
+    persist_lexical_rebuild_state(&index_path, &state)
 }
 
 #[cfg(test)]
@@ -2560,6 +2604,13 @@ pub fn run_index(
         )
     })?;
     tracing::info!(now_ms, "updated last_indexed_at for status display");
+    refresh_completed_lexical_rebuild_checkpoint(&storage, &opts.db_path, &opts.data_dir)
+        .with_context(|| {
+            format!(
+                "refreshing completed lexical checkpoint after index run for {}",
+                opts.db_path.display()
+            )
+        })?;
 
     if opts.full {
         tracing::info!(
@@ -8485,6 +8536,100 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn refresh_completed_lexical_rebuild_checkpoint_updates_fingerprint_and_totals() {
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        let db_path = data_dir.join("agent_search.db");
+        let storage = FrankenStorage::open(&db_path).unwrap();
+        ensure_fts_schema(&storage);
+
+        let agent = crate::model::types::Agent {
+            id: None,
+            slug: "tester".into(),
+            name: "Tester".into(),
+            version: None,
+            kind: crate::model::types::AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).unwrap();
+        let conv = norm_conv(
+            Some("checkpoint-refresh"),
+            vec![norm_msg(0, 1_700_000_000_000)],
+        );
+        storage
+            .insert_conversation_tree(
+                agent_id,
+                None,
+                &crate::model::types::Conversation {
+                    id: None,
+                    agent_slug: conv.agent_slug.clone(),
+                    workspace: conv.workspace.clone(),
+                    external_id: conv.external_id.clone(),
+                    title: conv.title.clone(),
+                    source_path: conv.source_path.clone(),
+                    started_at: conv.started_at,
+                    ended_at: conv.ended_at,
+                    approx_tokens: None,
+                    metadata_json: conv.metadata.clone(),
+                    messages: conv
+                        .messages
+                        .iter()
+                        .map(|m| crate::model::types::Message {
+                            id: None,
+                            idx: m.idx,
+                            role: crate::model::types::MessageRole::User,
+                            author: m.author.clone(),
+                            created_at: m.created_at,
+                            content: m.content.clone(),
+                            extra_json: m.extra.clone(),
+                            snippets: Vec::new(),
+                        })
+                        .collect(),
+                    source_id: "local".to_string(),
+                    origin_host: None,
+                },
+            )
+            .unwrap();
+
+        let index_path = index_dir(&data_dir).unwrap();
+        fs::create_dir_all(&index_path).unwrap();
+        fs::write(index_path.join("meta.json"), b"stable-meta").unwrap();
+
+        let total_conversations = count_total_conversations_exact(&storage).unwrap();
+        let total_messages = count_total_messages_exact(&storage).unwrap();
+        let original_fingerprint = lexical_rebuild_storage_fingerprint(&db_path).unwrap();
+
+        let mut state = LexicalRebuildState::new(
+            lexical_rebuild_db_state(&storage, &db_path).unwrap(),
+            LEXICAL_REBUILD_PAGE_SIZE,
+        );
+        state.mark_completed(index_meta_fingerprint(&index_path).unwrap());
+        persist_lexical_rebuild_state(&index_path, &state).unwrap();
+
+        std::thread::sleep(Duration::from_millis(5));
+        storage
+            .set_last_indexed_at(FrankenStorage::now_millis())
+            .unwrap();
+        let changed_fingerprint = lexical_rebuild_storage_fingerprint(&db_path).unwrap();
+        assert_ne!(original_fingerprint, changed_fingerprint);
+
+        refresh_completed_lexical_rebuild_checkpoint(&storage, &db_path, &data_dir).unwrap();
+
+        let checkpoint = load_lexical_rebuild_checkpoint(&index_path)
+            .unwrap()
+            .expect("refreshed checkpoint");
+        assert!(checkpoint.completed);
+        assert_eq!(checkpoint.storage_fingerprint, changed_fingerprint);
+        assert_eq!(checkpoint.total_conversations, total_conversations);
+        assert_eq!(checkpoint.processed_conversations, total_conversations);
+        assert_eq!(
+            checkpoint.committed_offset,
+            i64::try_from(total_conversations).unwrap_or(i64::MAX)
+        );
+        assert_eq!(checkpoint.indexed_docs, total_messages);
     }
 
     #[test]

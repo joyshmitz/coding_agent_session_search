@@ -8908,58 +8908,15 @@ impl CassApp {
                         ftui::text::Span::styled(format!("  {first_line}{ellipsis}"), subtle_style),
                     ]));
                 } else {
-                    // Expanded: render full message content
+                    // Expanded: render full message content through the GFM renderer so
+                    // preview and modal surfaces stay visually consistent.
                     let content = msg.content.trim();
                     if !content.is_empty() {
-                        // In the drill-in detail modal we always render through the
-                        // GFM renderer for a consistently rich session view.
-                        let force_markdown = self.show_detail_modal;
-                        if force_markdown || is_likely_markdown(content).is_likely() {
-                            let rendered = md_renderer.render(content);
-                            for line in rendered.into_iter() {
-                                let mut spans =
-                                    vec![ftui::text::Span::styled("\u{258c} ", gutter_s)];
-                                spans.extend(line.spans().iter().cloned());
-                                lines.push(ftui::text::Line::from_spans(spans));
-                            }
-                        } else {
-                            // Plain text — wrap if enabled
-                            for text_line in content.lines() {
-                                if self.detail_wrap && !text_line.is_empty() {
-                                    let w = inner_width.saturating_sub(4) as usize;
-                                    // Char-boundary-aware chunking to avoid splitting
-                                    // multi-byte UTF-8 characters.
-                                    let max_w = w.max(20);
-                                    let mut cstart = 0usize;
-                                    while cstart < text_line.len() {
-                                        let mut cend = (cstart + max_w).min(text_line.len());
-                                        while cend > cstart && !text_line.is_char_boundary(cend) {
-                                            cend -= 1;
-                                        }
-                                        if cend == cstart {
-                                            // Single char wider than max_w; take it whole.
-                                            cend = cstart + 1;
-                                            while cend < text_line.len()
-                                                && !text_line.is_char_boundary(cend)
-                                            {
-                                                cend += 1;
-                                            }
-                                        }
-                                        lines.push(ftui::text::Line::from_spans(vec![
-                                            ftui::text::Span::styled("\u{258c} ", gutter_s),
-                                            ftui::text::Span::raw(
-                                                text_line[cstart..cend].to_string(),
-                                            ),
-                                        ]));
-                                        cstart = cend;
-                                    }
-                                } else {
-                                    lines.push(ftui::text::Line::from_spans(vec![
-                                        ftui::text::Span::styled("\u{258c} ", gutter_s),
-                                        ftui::text::Span::raw(text_line.to_string()),
-                                    ]));
-                                }
-                            }
+                        let rendered = md_renderer.render(content);
+                        for line in rendered.into_iter() {
+                            let mut spans = vec![ftui::text::Span::styled("\u{258c} ", gutter_s)];
+                            spans.extend(line.spans().iter().cloned());
+                            lines.push(ftui::text::Line::from_spans(spans));
                         }
                     }
                 }
@@ -8991,20 +8948,14 @@ impl CassApp {
             } else {
                 &hit.content
             };
-            if self.show_detail_modal || is_likely_markdown(content).is_likely() {
-                let md_w = inner_width.saturating_sub(4);
-                let md_renderer = MarkdownRenderer::new(styles.markdown_theme())
-                    .with_syntax_theme(styles.syntax_highlight_theme())
-                    .rule_width(md_w)
-                    .table_max_width(md_w);
-                let rendered = md_renderer.render(content);
-                for line in rendered.into_iter() {
-                    lines.push(line);
-                }
-            } else {
-                for text_line in content.lines() {
-                    lines.push(ftui::text::Line::from(text_line.to_string()));
-                }
+            let md_w = inner_width.saturating_sub(4);
+            let md_renderer = MarkdownRenderer::new(styles.markdown_theme())
+                .with_syntax_theme(styles.syntax_highlight_theme())
+                .rule_width(md_w)
+                .table_max_width(md_w);
+            let rendered = md_renderer.render(content);
+            for line in rendered.into_iter() {
+                lines.push(line);
             }
         }
 
@@ -29194,6 +29145,46 @@ mod tests {
             dark_fg, toggled_fg,
             "theme toggle should immediately change cached markdown heading color"
         );
+    }
+
+    #[test]
+    fn detail_cached_messages_render_inline_code_even_when_detection_is_not_likely() {
+        let mut app = CassApp::default();
+        let mut cv = make_test_conversation_view();
+        cv.messages = vec![Message {
+            id: Some(1),
+            idx: 0,
+            role: MessageRole::Agent,
+            author: Some("cass".to_string()),
+            created_at: Some(1_700_000_000),
+            content: "Use `cargo check --all-targets` before commit.".to_string(),
+            extra_json: serde_json::json!({}),
+            snippets: vec![],
+        }];
+        app.cached_detail = Some(("/test/session.jsonl".to_string(), cv));
+
+        let hit = make_test_hit();
+        let styles = app.resolved_style_context();
+        let lines = app.build_messages_lines(&hit, 96, &styles);
+        let code_fg = markdown_span_fg_for_text(&lines, "cargo check --all-targets")
+            .expect("inline code should be rendered through the markdown renderer");
+        assert_eq!(Some(code_fg), styles.markdown_theme().code_inline.fg);
+    }
+
+    #[test]
+    fn detail_modal_fallback_renders_inline_code_markdown() {
+        let mut app = CassApp::default();
+        app.cached_detail = None;
+        app.show_detail_modal = true;
+
+        let mut hit = make_test_hit();
+        hit.content = "Use `cass search` before opening the modal.".to_string();
+
+        let styles = app.resolved_style_context();
+        let lines = app.build_messages_lines(&hit, 96, &styles);
+        let code_fg = markdown_span_fg_for_text(&lines, "cass search")
+            .expect("detail modal fallback should render inline code markdown");
+        assert_eq!(Some(code_fg), styles.markdown_theme().code_inline.fg);
     }
 
     #[test]

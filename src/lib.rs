@@ -1867,7 +1867,10 @@ fn format_missing_subcommand_error(args: &[String]) -> String {
                 "cass models verify --json",
             ],
         ),
-        "import" => (&["chatgpt"], &["cass import chatgpt /path/to/conversations.json"]),
+        "import" => (
+            &["chatgpt"],
+            &["cass import chatgpt /path/to/conversations.json"],
+        ),
         _ => (&[], &["cass --help"]),
     };
 
@@ -8129,15 +8132,13 @@ fn run_stats(
         Vec::new()
     };
 
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(fmt) = structured_format {
         let mut payload = serde_json::json!({
@@ -8298,15 +8299,13 @@ fn run_diag(
     let platform = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
 
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(fmt) = structured_format {
         let payload = serde_json::json!({
@@ -8853,15 +8852,13 @@ fn run_health(
 
     let latency_ms = start.elapsed().as_millis() as u64;
 
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(fmt) = structured_format {
         // Always emit valid JSON — even on WAL corruption or other DB errors.
@@ -9547,12 +9544,12 @@ mod cli_read_db_tests {
             state["rebuild"]["processed_conversations"],
             serde_json::Value::Null
         );
-        assert_eq!(state["rebuild"]["total_conversations"], serde_json::Value::Null);
-        assert_eq!(state["rebuild"]["indexed_docs"], serde_json::Value::Null);
         assert_eq!(
-            state["semantic"]["fallback_mode"].as_str(),
-            Some("lexical")
+            state["rebuild"]["total_conversations"],
+            serde_json::Value::Null
         );
+        assert_eq!(state["rebuild"]["indexed_docs"], serde_json::Value::Null);
+        assert_eq!(state["semantic"]["fallback_mode"].as_str(), Some("lexical"));
     }
 
     #[test]
@@ -10327,15 +10324,13 @@ fn run_doctor(
     let all_pass = checks.iter().all(|c| c.status == "pass");
 
     // Output
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(fmt) = structured_format {
         let payload = serde_json::json!({
@@ -10637,15 +10632,13 @@ fn run_sessions(
         })
         .collect();
 
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(fmt) = structured_format {
         let payload = serde_json::json!({ "sessions": entries });
@@ -10825,15 +10818,13 @@ fn run_context(
         .map_err(|e| CliError::unknown(format!("query: {e}")))?
     };
 
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(fmt) = structured_format {
         let format_ts = |ts: Option<i64>| -> Option<String> {
@@ -11203,16 +11194,14 @@ fn run_capabilities(output_format: Option<RobotFormat>) -> CliResult<()> {
         },
     };
 
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            // sessions is search-only; for other commands treat it as compact JSON.
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        // sessions is search-only; for other commands treat it as compact JSON.
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(fmt) = structured_format {
         let payload = serde_json::to_value(&response).unwrap_or_default();
@@ -11264,15 +11253,13 @@ fn run_introspect(output_format: Option<RobotFormat>) -> CliResult<()> {
         response_schemas,
     };
 
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(fmt) = structured_format {
         let payload = serde_json::to_value(&response).unwrap_or_default();
@@ -11530,15 +11517,13 @@ fn run_config_based_export(
     };
 
     // Output results
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(_fmt) = structured_format {
         let result = serde_json::json!({
@@ -11599,15 +11584,13 @@ fn run_api_version(output_format: Option<RobotFormat>) -> CliResult<()> {
         "contract_version": CONTRACT_VERSION,
     });
 
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(fmt) = structured_format {
         return output_structured_value(payload, fmt);
@@ -12319,7 +12302,12 @@ fn try_load_indexed_conversation(source_path: &Path) -> Option<crate::ui::data::
     try_load_indexed_conversation_from_db(source_path, &db_path)
 }
 
-fn run_view(path: &PathBuf, line: Option<usize>, context: usize, output_format: Option<RobotFormat>) -> CliResult<()> {
+fn run_view(
+    path: &PathBuf,
+    line: Option<usize>,
+    context: usize,
+    output_format: Option<RobotFormat>,
+) -> CliResult<()> {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 
@@ -12414,15 +12402,13 @@ fn run_view(path: &PathBuf, line: Option<usize>, context: usize, output_format: 
     // Only highlight a specific line if -n was explicitly provided
     let highlight_line = line.is_some();
 
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(fmt) = structured_format {
         let content_lines: Vec<serde_json::Value> = lines
@@ -12493,15 +12479,13 @@ fn run_index_with_data(
     let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
     let db_path = db_override.unwrap_or_else(|| data_dir.join("agent_search.db"));
 
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
     let structured_output = structured_format.is_some();
 
     // Generate params hash for idempotency validation
@@ -13497,9 +13481,7 @@ fn run_export_html(
             hint: Some("Use 'cass search' to find session paths".to_string()),
             retryable: false,
         };
-        let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
+        let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
             if matches!(fmt, RobotFormat::Sessions) {
                 RobotFormat::Compact
             } else {
@@ -13507,7 +13489,7 @@ fn run_export_html(
             }
         });
 
-    if let Some(_fmt) = structured_format {
+        if let Some(_fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::json!({
@@ -13548,17 +13530,15 @@ fn run_export_html(
                 hint: Some("Use --password <pwd> or --password-stdin".to_string()),
                 retryable: false,
             };
-            let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+            let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+                if matches!(fmt, RobotFormat::Sessions) {
+                    RobotFormat::Compact
+                } else {
+                    fmt
+                }
+            });
 
-    if let Some(_fmt) = structured_format {
+            if let Some(_fmt) = structured_format {
                 println!(
                     "{}",
                     serde_json::json!({
@@ -14038,15 +14018,13 @@ fn run_export_html(
     }
 
     // --- Output result ---
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(_fmt) = structured_format {
         let result = serde_json::json!({
@@ -15557,7 +15535,12 @@ fn html_escape(s: &str) -> String {
 }
 
 /// Show messages around a specific line in a session file
-fn run_expand(path: &Path, line: usize, context: usize, output_format: Option<RobotFormat>) -> CliResult<()> {
+fn run_expand(
+    path: &Path,
+    line: usize,
+    context: usize,
+    output_format: Option<RobotFormat>,
+) -> CliResult<()> {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
 
@@ -15636,15 +15619,13 @@ fn run_expand(path: &Path, line: usize, context: usize, output_format: Option<Ro
         })
         .collect();
 
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(fmt) = structured_format {
         let output: Vec<serde_json::Value> = context_messages
@@ -15967,15 +15948,13 @@ fn run_timeline(
     )> = rows;
     close_franken_cli_read_db(conn, &db_path, "timeline")?;
 
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(fmt) = structured_format {
         let output = match group_by {
@@ -16178,12 +16157,8 @@ fn run_sources_command(cmd: SourcesCommand, cli: &Cli) -> CliResult<()> {
             preset,
             paths,
             no_test,
-        } => {
-            run_sources_add(&url, name, preset, paths, no_test)
-        }
-        SourcesCommand::Remove { name, purge, yes } => {
-            run_sources_remove(&name, purge, yes)
-        }
+        } => run_sources_add(&url, name, preset, paths, no_test),
+        SourcesCommand::Remove { name, purge, yes } => run_sources_remove(&name, purge, yes),
         SourcesCommand::Doctor { source } => {
             let structured_format = cli.robot_format.or_else(robot_format_from_env);
             run_sources_doctor(source.as_deref(), structured_format)
@@ -16197,9 +16172,7 @@ fn run_sources_command(cmd: SourcesCommand, cli: &Cli) -> CliResult<()> {
             let structured_format = cli.robot_format.or_else(robot_format_from_env);
             run_sources_sync(source, no_index, verbose, dry_run, structured_format)
         }
-        SourcesCommand::Mappings(action) => {
-            run_mappings_command(action, cli)
-        }
+        SourcesCommand::Mappings(action) => run_mappings_command(action, cli),
         SourcesCommand::Discover {
             preset,
             skip_existing,
@@ -16255,15 +16228,13 @@ fn run_sources_list(verbose: bool, output_format: Option<RobotFormat>) -> CliRes
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "unknown".into());
 
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(fmt) = structured_format {
         let sources_json: Vec<serde_json::Value> = config
@@ -16704,7 +16675,10 @@ struct SourceDiagnostics {
 }
 
 /// Diagnose source connectivity and configuration issues (P5.6)
-fn run_sources_doctor(source_filter: Option<&str>, output_format: Option<RobotFormat>) -> CliResult<()> {
+fn run_sources_doctor(
+    source_filter: Option<&str>,
+    output_format: Option<RobotFormat>,
+) -> CliResult<()> {
     use crate::sources::config::{SourcesConfig, source_names_equal};
     use colored::Colorize;
 
@@ -16717,9 +16691,7 @@ fn run_sources_doctor(source_filter: Option<&str>, output_format: Option<RobotFo
     })?;
 
     if config.sources.is_empty() {
-        let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
+        let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
             if matches!(fmt, RobotFormat::Sessions) {
                 RobotFormat::Compact
             } else {
@@ -16727,7 +16699,7 @@ fn run_sources_doctor(source_filter: Option<&str>, output_format: Option<RobotFo
             }
         });
 
-    if let Some(_fmt) = structured_format {
+        if let Some(_fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::json!({
@@ -16798,15 +16770,13 @@ fn run_sources_doctor(source_filter: Option<&str>, output_format: Option<RobotFo
     }
 
     // Output results
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(_fmt) = structured_format {
         println!(
@@ -17081,9 +17051,7 @@ fn run_sources_sync(
     let remote_sources: Vec<_> = config.remote_sources().collect();
 
     if remote_sources.is_empty() {
-        let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
+        let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
             if matches!(fmt, RobotFormat::Sessions) {
                 RobotFormat::Compact
             } else {
@@ -17091,7 +17059,7 @@ fn run_sources_sync(
             }
         });
 
-    if let Some(_fmt) = structured_format {
+        if let Some(_fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::json!({
@@ -17119,9 +17087,7 @@ fn run_sources_sync(
     };
 
     if sources_to_sync.is_empty() {
-        let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
+        let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
             if matches!(fmt, RobotFormat::Sessions) {
                 RobotFormat::Compact
             } else {
@@ -17129,7 +17095,7 @@ fn run_sources_sync(
             }
         });
 
-    if let Some(_fmt) = structured_format {
+        if let Some(_fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::json!({
@@ -17190,17 +17156,15 @@ fn run_sources_sync(
                 let failed_report = SyncReport::failed(source.name.clone(), e);
                 status.update(&source.name, &failed_report);
 
-                let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+                let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+                    if matches!(fmt, RobotFormat::Sessions) {
+                        RobotFormat::Compact
+                    } else {
+                        fmt
+                    }
+                });
 
-    if let Some(_fmt) = structured_format {
+                if let Some(_fmt) = structured_format {
                     all_reports.push(serde_json::json!({
                         "source": source.name,
                         "status": "error",
@@ -17237,9 +17201,7 @@ fn run_sources_sync(
         status.update(&source.name, &report);
 
         // Print results
-        let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
+        let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
             if matches!(fmt, RobotFormat::Sessions) {
                 RobotFormat::Compact
             } else {
@@ -17247,7 +17209,7 @@ fn run_sources_sync(
             }
         });
 
-    if let Some(_fmt) = structured_format {
+        if let Some(_fmt) = structured_format {
             all_reports.push(serde_json::json!({
                 "source": source.name,
                 "status": if report.all_succeeded { "success" } else { "partial" },
@@ -17319,15 +17281,13 @@ fn run_sources_sync(
     }
 
     // Output summary
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(_fmt) = structured_format {
         println!(
@@ -17384,7 +17344,11 @@ fn run_sources_sync(
 }
 
 /// Auto-discover SSH hosts from ~/.ssh/config (P5.6)
-fn run_sources_discover(preset: &str, skip_existing: bool, output_format: Option<RobotFormat>) -> CliResult<()> {
+fn run_sources_discover(
+    preset: &str,
+    skip_existing: bool,
+    output_format: Option<RobotFormat>,
+) -> CliResult<()> {
     use crate::sources::config::{SourcesConfig, discover_ssh_hosts, get_preset_paths};
     use colored::Colorize;
 
@@ -17401,9 +17365,7 @@ fn run_sources_discover(preset: &str, skip_existing: bool, output_format: Option
     let discovered = discover_ssh_hosts();
 
     if discovered.is_empty() {
-        let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
+        let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
             if matches!(fmt, RobotFormat::Sessions) {
                 RobotFormat::Compact
             } else {
@@ -17411,7 +17373,7 @@ fn run_sources_discover(preset: &str, skip_existing: bool, output_format: Option
             }
         });
 
-    if let Some(_fmt) = structured_format {
+        if let Some(_fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::json!({
@@ -17443,9 +17405,7 @@ fn run_sources_discover(preset: &str, skip_existing: bool, output_format: Option
     };
 
     if hosts_to_add.is_empty() {
-        let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
+        let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
             if matches!(fmt, RobotFormat::Sessions) {
                 RobotFormat::Compact
             } else {
@@ -17453,7 +17413,7 @@ fn run_sources_discover(preset: &str, skip_existing: bool, output_format: Option
             }
         });
 
-    if let Some(_fmt) = structured_format {
+        if let Some(_fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::json!({
@@ -17471,15 +17431,13 @@ fn run_sources_discover(preset: &str, skip_existing: bool, output_format: Option
     }
 
     // Output discovered hosts
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(_fmt) = structured_format {
         let hosts_json: Vec<_> = hosts_to_add
@@ -17685,15 +17643,13 @@ fn run_models_status(output_format: Option<RobotFormat>) -> CliResult<()> {
         }));
     }
 
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(_fmt) = structured_format {
         let output = serde_json::json!({
@@ -18095,9 +18051,7 @@ fn run_models_verify(
     let manifest = ModelManifest::minilm_v2();
 
     if !model_dir.is_dir() {
-        let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
+        let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
             if matches!(fmt, RobotFormat::Sessions) {
                 RobotFormat::Compact
             } else {
@@ -18105,7 +18059,7 @@ fn run_models_verify(
             }
         });
 
-    if let Some(_fmt) = structured_format {
+        if let Some(_fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -18186,15 +18140,13 @@ fn run_models_verify(
         }
     }
 
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(_fmt) = structured_format {
         println!(
@@ -18319,7 +18271,10 @@ fn run_models_remove(
 }
 
 /// Check for model updates
-fn run_models_check_update(output_format: Option<RobotFormat>, data_dir_override: Option<PathBuf>) -> CliResult<()> {
+fn run_models_check_update(
+    output_format: Option<RobotFormat>,
+    data_dir_override: Option<PathBuf>,
+) -> CliResult<()> {
     use crate::search::fastembed_embedder::FastEmbedder;
     use crate::search::model_download::{
         ModelManifest, ModelState, check_model_installed, check_version_mismatch,
@@ -18333,9 +18288,7 @@ fn run_models_check_update(output_format: Option<RobotFormat>, data_dir_override
     let state = check_model_installed(&model_dir);
 
     if !state.is_ready() {
-        let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
+        let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
             if matches!(fmt, RobotFormat::Sessions) {
                 RobotFormat::Compact
             } else {
@@ -18343,7 +18296,7 @@ fn run_models_check_update(output_format: Option<RobotFormat>, data_dir_override
             }
         });
 
-    if let Some(_fmt) = structured_format {
+        if let Some(_fmt) = structured_format {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
@@ -18370,15 +18323,13 @@ fn run_models_check_update(output_format: Option<RobotFormat>, data_dir_override
     // Check for version mismatch
     let update_info = check_version_mismatch(&model_dir, &manifest);
 
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(ModelState::UpdateAvailable {
         current_revision,
@@ -18479,15 +18430,13 @@ fn run_mappings_list(source_name: &str, output_format: Option<RobotFormat>) -> C
         retryable: false,
     })?;
 
-    let structured_format = output_format
-        .or_else(robot_format_from_env)
-        .map(|fmt| {
-            if matches!(fmt, RobotFormat::Sessions) {
-                RobotFormat::Compact
-            } else {
-                fmt
-            }
-        });
+    let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
 
     if let Some(_fmt) = structured_format {
         println!(

@@ -1873,7 +1873,10 @@ fn status_json_reports_open_error_for_unopenable_db_path() {
     assert_eq!(json["status"], Value::String("degraded".to_string()));
     assert_eq!(json["database"]["exists"], Value::Bool(true));
     assert_eq!(json["database"]["opened"], Value::Bool(false));
-    assert_ne!(json["semantic"]["availability"], Value::String("load_failed".to_string()));
+    assert_ne!(
+        json["semantic"]["availability"],
+        Value::String("load_failed".to_string())
+    );
     assert!(
         !json["semantic"]["summary"]
             .as_str()
