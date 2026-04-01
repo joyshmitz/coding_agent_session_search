@@ -460,7 +460,7 @@ pub enum Commands {
         #[arg(long, default_value_t = false)]
         robot_meta: bool,
         /// Staleness threshold in seconds (default: 300)
-        #[arg(long, default = "300")]
+        #[arg(long, default_value_t = 300)]
         stale_threshold: u64,
     },
     /// Diagnose and repair cass installation issues. Safe by default - never deletes user data.
@@ -4623,6 +4623,7 @@ fn state_meta_json(
         now_secs,
         index_run.clone(),
         crate::search::asset_state::SemanticPreference::DefaultModel,
+        db_opened,
     )
     .unwrap_or_else(|err| {
         let summary = err.to_string();

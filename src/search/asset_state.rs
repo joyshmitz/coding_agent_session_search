@@ -191,6 +191,7 @@ pub(crate) fn inspect_search_assets(
     now_secs: u64,
     maintenance: SearchMaintenanceSnapshot,
     semantic_preference: SemanticPreference,
+    db_available: bool,
 ) -> Result<SearchAssetSnapshot> {
     Ok(SearchAssetSnapshot {
         lexical: inspect_lexical_assets(
@@ -200,6 +201,7 @@ pub(crate) fn inspect_search_assets(
             last_indexed_at_ms,
             now_secs,
             maintenance,
+            db_available,
         )?,
         semantic: inspect_semantic_assets(data_dir, db_path, semantic_preference),
     })
@@ -268,11 +270,12 @@ fn inspect_lexical_assets(
     last_indexed_at_ms: Option<i64>,
     now_secs: u64,
     maintenance: SearchMaintenanceSnapshot,
+    db_available: bool,
 ) -> Result<LexicalAssetState> {
     let index_path = index_dir(data_dir).unwrap_or_else(|_| data_dir.join("index").join("v4"));
     let checkpoint = load_lexical_rebuild_checkpoint(&index_path)
         .with_context(|| format!("loading lexical checkpoint from {}", index_path.display()))?;
-    let current_db_fingerprint = if db_path.exists() {
+    let current_db_fingerprint = if db_available {
         Some(
             lexical_storage_fingerprint_for_db(db_path).with_context(|| {
                 format!(
@@ -606,6 +609,40 @@ mod tests {
         assert_eq!(state.processed_conversations, None);
         assert_eq!(state.total_conversations, None);
         assert_eq!(state.indexed_docs, None);
+    }
+
+    #[test]
+    fn inspect_search_assets_preserves_semantic_database_unavailable_signal() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let index_path = temp.path().join("index").join("v4");
+        std::fs::create_dir_all(&index_path).expect("create index dir");
+        std::fs::write(index_path.join("meta.json"), b"{}").expect("write meta.json");
+
+        let db_path = temp.path().join("agent_search.db");
+        std::fs::create_dir_all(&db_path).expect("create unopenable db path");
+
+        let vector_path = vector_index_path(temp.path(), HashEmbedder::default().id());
+        std::fs::create_dir_all(vector_path.parent().expect("vector parent"))
+            .expect("create vector dir");
+        std::fs::write(&vector_path, b"index").expect("write vector index");
+
+        let snapshot = inspect_search_assets(
+            temp.path(),
+            &db_path,
+            60,
+            Some(1_733_000_000_000),
+            1_733_000_001,
+            SearchMaintenanceSnapshot::default(),
+            SemanticPreference::HashFallback,
+            false,
+        )
+        .expect("asset inspection should not fail when db availability is already known");
+
+        assert_ne!(snapshot.lexical.status, "error");
+        assert_eq!(snapshot.semantic.status, "error");
+        assert_eq!(snapshot.semantic.availability, "database_unavailable");
+        assert_eq!(snapshot.semantic.fallback_mode, Some("lexical"));
+        assert!(snapshot.semantic.summary.contains("db unavailable"));
     }
 
     #[test]

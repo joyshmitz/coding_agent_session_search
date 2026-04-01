@@ -1873,6 +1873,14 @@ fn status_json_reports_open_error_for_unopenable_db_path() {
     assert_eq!(json["status"], Value::String("degraded".to_string()));
     assert_eq!(json["database"]["exists"], Value::Bool(true));
     assert_eq!(json["database"]["opened"], Value::Bool(false));
+    assert_ne!(json["semantic"]["availability"], Value::String("load_failed".to_string()));
+    assert!(
+        !json["semantic"]["summary"]
+            .as_str()
+            .unwrap_or("")
+            .contains("asset inspection failed"),
+        "status should preserve the semantic root cause instead of collapsing to a generic asset failure: {json}"
+    );
     assert!(
         json["database"]["open_error"]
             .as_str()
@@ -1920,6 +1928,17 @@ fn health_json_reports_open_error_for_unopenable_db_path() {
                 .unwrap_or("")
                 .contains("open"),
         "health should surface the open failure: {json}"
+    );
+    assert_ne!(
+        json["state"]["semantic"]["availability"],
+        Value::String("load_failed".to_string())
+    );
+    assert!(
+        !json["state"]["semantic"]["summary"]
+            .as_str()
+            .unwrap_or("")
+            .contains("asset inspection failed"),
+        "health should preserve the semantic root cause instead of collapsing to a generic asset failure: {json}"
     );
 }
 
