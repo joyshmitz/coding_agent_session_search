@@ -14,7 +14,7 @@ anyhow = "*"
 thiserror = "*"
 tracing = "*"
 tracing-subscriber = { version = "*", features = ["env-filter", "fmt", "ansi"] }
-asupersync = { path = "../asupersync", features = ["test-internals", "tls-native-roots"] }
+asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", rev = "08dd31df", features = ["test-internals", "tls-native-roots"] }
 clap = { version = "*", features = ["derive", "cargo", "env", "unicode", "wrap_help"] }
 clap_complete = "*"
 clap_mangen = "*"
@@ -32,7 +32,7 @@ which = "*"
 shell-words = "*"
 dotenvy = "*"
 notify = "*"
-frankensqlite = { path = "../frankensqlite/crates/fsqlite", package = "fsqlite", features = ["fts5"] }
+frankensqlite = { git = "https://github.com/Dicklesworthstone/frankensqlite", rev = "e3f57c9a", package = "fsqlite", features = ["fts5"] }
 rayon = "*"
 crossbeam-channel = "*"
 parking_lot = "*"
@@ -69,8 +69,8 @@ half = { version = "*", features = ["bytemuck"] }
 memmap2 = "*"
 bytemuck = "*"
 fastembed = { version = "*", default-features = false, features = ["ort-download-binaries-rustls-tls"] }
-frankensearch = { git = "https://github.com/Dicklesworthstone/frankensearch", rev = "3eec663", default-features = false, features = ["hash", "lexical", "ann", "fastembed-reranker"] }
-franken-agent-detection = { path = "../franken_agent_detection", features = ["connectors", "cursor", "chatgpt", "opencode", "crush"] }
+frankensearch = { git = "https://github.com/Dicklesworthstone/frankensearch", rev = "9961c0e7", default-features = false, features = ["hash", "lexical", "ann", "fastembed-reranker"] }
+franken-agent-detection = { git = "https://github.com/Dicklesworthstone/franken_agent_detection", rev = "ba9c598", features = ["connectors", "cursor", "chatgpt", "opencode", "crush"] }
 wide = "*"  # Portable SIMD for P0 Opt 2: SIMD dot product
 arrayvec = "*"  # Stack-based arrays for P1 Opt 1.4: Edge N-gram optimization
 bloomfilter = "*"  # Probabilistic membership testing for P2 Opt 3.3: Workspace Cache
@@ -133,7 +133,7 @@ rand = "0.10"
 rand_chacha = "0.10"
 # frankensqlite compat gate tests (bead 3vvqa) — fsqlite-types needed for SqliteValue
 # enum variants in test assertions. The main fsqlite dep is available as `frankensqlite`.
-fsqlite-types = { path = "../frankensqlite/crates/fsqlite-types" }
+fsqlite-types = { git = "https://github.com/Dicklesworthstone/frankensqlite", rev = "e3f57c9a", package = "fsqlite-types" }
 
 [[bin]]
 name = "cass"
@@ -153,11 +153,20 @@ inherits = "release"
 debug = true
 strip = false
 
-[patch."https://github.com/Dicklesworthstone/asupersync"]
-asupersync = { path = "../asupersync" }
-franken-decision = { path = "../asupersync/franken_decision" }
-franken-evidence = { path = "../asupersync/franken_evidence" }
-franken-kernel = { path = "../asupersync/franken_kernel" }
+# For local development with sibling checkouts, add to a non-committed Cargo.toml section:
+# [patch."https://github.com/Dicklesworthstone/asupersync"]
+# asupersync = { path = "../asupersync" }
+# franken-decision = { path = "../asupersync/franken_decision" }
+# franken-evidence = { path = "../asupersync/franken_evidence" }
+# franken-kernel = { path = "../asupersync/franken_kernel" }
+# [patch."https://github.com/Dicklesworthstone/frankensqlite"]
+# fsqlite = { path = "../frankensqlite/crates/fsqlite" }
+# fsqlite-types = { path = "../frankensqlite/crates/fsqlite-types" }
+# [patch."https://github.com/Dicklesworthstone/franken_agent_detection"]
+# franken-agent-detection = { path = "../franken_agent_detection" }
+
+# [patch."https://github.com/Dicklesworthstone/frankensearch"]
+# frankensearch = { path = "../frankensearch/frankensearch" }
 
 [workspace.metadata.dist]
 targets = ["x86_64-unknown-linux-gnu"]
