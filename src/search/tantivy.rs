@@ -13,6 +13,58 @@ use crate::connectors::NormalizedConversation;
 use crate::connectors::NormalizedMessage;
 use crate::sources::provenance::LOCAL_SOURCE_ID;
 
+fn normalized_index_source_id(
+    source_id: Option<&str>,
+    origin_kind: Option<&str>,
+    origin_host: Option<&str>,
+) -> String {
+    let trimmed_source_id = source_id.unwrap_or_default().trim();
+    if !trimmed_source_id.is_empty() {
+        if trimmed_source_id.eq_ignore_ascii_case(LOCAL_SOURCE_ID) {
+            return LOCAL_SOURCE_ID.to_string();
+        }
+        return trimmed_source_id.to_string();
+    }
+
+    let trimmed_origin_kind = origin_kind.unwrap_or_default().trim();
+    if trimmed_origin_kind.eq_ignore_ascii_case("ssh")
+        || trimmed_origin_kind.eq_ignore_ascii_case("remote")
+    {
+        return origin_host
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("remote")
+            .to_string();
+    }
+
+    LOCAL_SOURCE_ID.to_string()
+}
+
+fn normalized_index_origin_kind(source_id: &str, origin_kind: Option<&str>) -> String {
+    if let Some(kind) = origin_kind.map(str::trim).filter(|value| !value.is_empty()) {
+        if kind.eq_ignore_ascii_case("local") {
+            return LOCAL_SOURCE_ID.to_string();
+        }
+        if kind.eq_ignore_ascii_case("ssh") || kind.eq_ignore_ascii_case("remote") {
+            return "remote".to_string();
+        }
+        return kind.to_ascii_lowercase();
+    }
+
+    if source_id == LOCAL_SOURCE_ID {
+        LOCAL_SOURCE_ID.to_string()
+    } else {
+        "remote".to_string()
+    }
+}
+
+fn normalized_index_origin_host(origin_host: Option<&str>) -> Option<String> {
+    origin_host
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 pub const SCHEMA_HASH: &str = CASS_SCHEMA_HASH;
 const TANTIVY_ADD_BATCH_MAX_MESSAGES: usize = 512;
 const TANTIVY_ADD_BATCH_MAX_CHARS: usize = 1024 * 1024;
@@ -43,6 +95,14 @@ impl TantivyIndex {
 
     pub fn add_conversation(&mut self, conv: &NormalizedConversation) -> Result<()> {
         self.add_messages(conv, &conv.messages)
+    }
+
+    pub fn add_conversation_with_id(
+        &mut self,
+        conv: &NormalizedConversation,
+        conversation_id: Option<i64>,
+    ) -> Result<()> {
+        self.add_messages_with_conversation_id(conv, &conv.messages, conversation_id)
     }
 
     pub fn delete_all(&mut self) -> Result<()> {
@@ -82,20 +142,31 @@ impl TantivyIndex {
         conv: &NormalizedConversation,
         messages: &[NormalizedMessage],
     ) -> Result<()> {
+        self.add_messages_with_conversation_id(conv, messages, None)
+    }
+
+    pub fn add_messages_with_conversation_id(
+        &mut self,
+        conv: &NormalizedConversation,
+        messages: &[NormalizedMessage],
+        conversation_id: Option<i64>,
+    ) -> Result<()> {
         // Provenance fields (P3.x): default to local, but honor metadata injected by indexer.
         let cass_origin = conv.metadata.get("cass").and_then(|c| c.get("origin"));
-        let source_id = cass_origin
+        let raw_source_id = cass_origin
             .and_then(|o| o.get("source_id"))
-            .and_then(|v| v.as_str())
-            .unwrap_or(LOCAL_SOURCE_ID);
-        let origin_kind = cass_origin
+            .and_then(|v| v.as_str());
+        let raw_origin_kind = cass_origin
             .and_then(|o| o.get("kind"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("local");
-        let origin_host = cass_origin
-            .and_then(|o| o.get("host"))
-            .and_then(|v| v.as_str())
-            .map(ToOwned::to_owned);
+            .and_then(|v| v.as_str());
+        let origin_host = normalized_index_origin_host(
+            cass_origin
+                .and_then(|o| o.get("host"))
+                .and_then(|v| v.as_str()),
+        );
+        let source_id =
+            normalized_index_source_id(raw_source_id, raw_origin_kind, origin_host.as_deref());
+        let origin_kind = normalized_index_origin_kind(&source_id, raw_origin_kind);
 
         let source_path = conv.source_path.to_string_lossy().to_string();
         let workspace = conv
@@ -123,8 +194,9 @@ impl TantivyIndex {
                 created_at: msg.created_at.or(started_at_fallback),
                 title: title.clone(),
                 content: msg.content.clone(),
-                source_id: source_id.to_string(),
-                origin_kind: origin_kind.to_string(),
+                conversation_id,
+                source_id: source_id.clone(),
+                origin_kind: origin_kind.clone(),
                 origin_host: origin_host.clone(),
             });
             pending_chars = pending_chars.saturating_add(msg.content.len());

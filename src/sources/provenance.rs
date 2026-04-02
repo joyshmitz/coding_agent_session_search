@@ -145,11 +145,12 @@ impl SourceFilter {
     /// - "remote" → Remote
     /// - anything else → SourceId
     pub fn parse(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "all" | "*" => Self::All,
+        let trimmed = s.trim();
+        match trimmed.to_ascii_lowercase().as_str() {
+            "" | "all" | "*" => Self::All,
             "local" => Self::Local,
             "remote" => Self::Remote,
-            _ => Self::SourceId(s.to_string()),
+            _ => Self::SourceId(trimmed.to_string()),
         }
     }
 
@@ -159,7 +160,10 @@ impl SourceFilter {
             Self::All => true,
             Self::Local => origin.is_local(),
             Self::Remote => origin.is_remote(),
-            Self::SourceId(id) => origin.source_id == *id,
+            Self::SourceId(id) => {
+                let filter_id = id.trim();
+                !filter_id.is_empty() && origin.source_id.trim() == filter_id
+            }
         }
     }
 
@@ -370,9 +374,22 @@ mod tests {
     }
 
     #[test]
+    fn test_source_filter_parse_trims_whitespace() {
+        assert_eq!(SourceFilter::parse("   local   "), SourceFilter::Local);
+        assert_eq!(SourceFilter::parse("   REMOTE	"), SourceFilter::Remote);
+        assert_eq!(
+            SourceFilter::parse("   laptop-01   "),
+            SourceFilter::SourceId("laptop-01".to_string())
+        );
+        assert_eq!(SourceFilter::parse("   	  "), SourceFilter::All);
+    }
+
+    #[test]
     fn test_source_filter_matches() {
         let local = Origin::local();
         let remote = Origin::remote("laptop");
+        let mut whitespace_remote = Origin::remote("laptop");
+        whitespace_remote.source_id = "  laptop  ".to_string();
 
         assert!(SourceFilter::All.matches(&local));
         assert!(SourceFilter::All.matches(&remote));
@@ -384,8 +401,10 @@ mod tests {
         assert!(SourceFilter::Remote.matches(&remote));
 
         assert!(SourceFilter::SourceId("laptop".to_string()).matches(&remote));
+        assert!(SourceFilter::SourceId("  laptop  ".to_string()).matches(&whitespace_remote));
         assert!(!SourceFilter::SourceId("laptop".to_string()).matches(&local));
         assert!(!SourceFilter::SourceId("other".to_string()).matches(&remote));
+        assert!(!SourceFilter::SourceId("   ".to_string()).matches(&remote));
     }
 
     #[test]

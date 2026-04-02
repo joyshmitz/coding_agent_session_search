@@ -487,6 +487,9 @@ pub enum Commands {
     Context {
         /// Path to the source session file
         path: PathBuf,
+        /// Exact source_id from search output (e.g. 'local', 'work-laptop')
+        #[arg(long, alias = "source-id")]
+        source: Option<String>,
         /// Override data dir
         #[arg(long)]
         data_dir: Option<PathBuf>,
@@ -632,6 +635,10 @@ pub enum Commands {
         /// Override data dir
         #[arg(long)]
         data_dir: Option<PathBuf>,
+
+        /// Output as JSON (--robot also works). Equivalent to --robot-format json
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
 
         /// Group by: hour, day, or none
         #[arg(long, value_enum, default_value_t = TimelineGrouping::Hour)]
@@ -2781,9 +2788,9 @@ async fn execute_cli(
                     build_hnsw,
                     embedder,
                     idempotency_key,
-                    json: _,
+                    json,
                 } => {
-                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    let structured_format = resolve_subcommand_structured_format(cli, json);
                     run_index_with_data(
                         cli.db.clone(),
                         full,
@@ -2974,7 +2981,14 @@ async fn execute_cli(
                     context,
                 } => {
                     let structured_format = cli.robot_format.or_else(robot_format_from_env);
-                    run_view(&path, cli.db.clone(), source.as_deref(), line, context, structured_format)?;
+                    run_view(
+                        &path,
+                        cli.db.clone(),
+                        source.as_deref(),
+                        line,
+                        context,
+                        structured_format,
+                    )?;
                 }
                 Commands::Pages {
                     export_only,
@@ -3004,9 +3018,9 @@ async fn execute_cli(
                     config,
                     validate_config,
                     example_config,
-                    json: _,
+                    json,
                 } => {
-                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    let structured_format = resolve_subcommand_structured_format(cli, json);
                     let robot_mode_here = structured_format.is_some() || robot_mode;
                     // Handle --example-config (show example config and exit)
                     if example_config {
@@ -3559,9 +3573,9 @@ async fn execute_cli(
                     data_dir,
                     robot_meta,
                     stale_threshold,
-                    json: _,
+                    json,
                 } => {
-                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    let structured_format = resolve_subcommand_structured_format(cli, json);
                     run_health(
                         &data_dir,
                         cli.db.clone(),
@@ -3588,11 +3602,19 @@ async fn execute_cli(
                 }
                 Commands::Context {
                     path,
+                    source,
                     data_dir,
                     limit,
                 } => {
                     let structured_format = cli.robot_format.or_else(robot_format_from_env);
-                    run_context(&path, &data_dir, cli.db.clone(), structured_format, limit)?;
+                    run_context(
+                        &path,
+                        source.as_deref(),
+                        &data_dir,
+                        cli.db.clone(),
+                        structured_format,
+                        limit,
+                    )?;
                 }
                 Commands::Sessions {
                     workspace,
@@ -3601,10 +3623,7 @@ async fn execute_cli(
                     json,
                     data_dir,
                 } => {
-                    let structured_format = cli
-                        .robot_format
-                        .or(if json { Some(RobotFormat::Json) } else { None })
-                        .or_else(robot_format_from_env);
+                    let structured_format = resolve_subcommand_structured_format(cli, json);
                     run_sessions(
                         workspace.as_ref(),
                         current,
@@ -3648,9 +3667,9 @@ async fn execute_cli(
                     dry_run,
                     explain,
                     open,
-                    json: _,
+                    json,
                 } => {
-                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    let structured_format = resolve_subcommand_structured_format(cli, json);
                     run_export_html(
                         &session,
                         cli.db.clone(),
@@ -3678,7 +3697,14 @@ async fn execute_cli(
                     context,
                 } => {
                     let structured_format = cli.robot_format.or_else(robot_format_from_env);
-                    run_expand(&path, cli.db.clone(), source.as_deref(), line, context, structured_format)?;
+                    run_expand(
+                        &path,
+                        cli.db.clone(),
+                        source.as_deref(),
+                        line,
+                        context,
+                        structured_format,
+                    )?;
                 }
                 Commands::Timeline {
                     since,
@@ -3686,10 +3712,11 @@ async fn execute_cli(
                     today,
                     agent,
                     data_dir,
+                    json,
                     group_by,
                     source,
                 } => {
-                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    let structured_format = resolve_subcommand_structured_format(&cli, json);
                     run_timeline(
                         since.as_deref(),
                         until.as_deref(),
@@ -3792,14 +3819,7 @@ fn run_analytics(cmd: AnalyticsCommand, db_path: Option<PathBuf>, cli: &Cli) -> 
 
     let elapsed_ms = start.elapsed().as_millis() as u64;
 
-    let structured_format = cli
-        .robot_format
-        .or(if common.json {
-            Some(RobotFormat::Json)
-        } else {
-            None
-        })
-        .or_else(robot_format_from_env);
+    let structured_format = resolve_subcommand_structured_format(cli, common.json);
 
     let envelope = serde_json::json!({
         "command": format!("analytics/{label}"),
@@ -5022,6 +5042,25 @@ fn describe_command(cli: &Cli) -> String {
     }
 }
 
+fn resolve_subcommand_structured_format(cli: &Cli, json: bool) -> Option<RobotFormat> {
+    cli.robot_format
+        .or(if json { Some(RobotFormat::Json) } else { None })
+        .or_else(robot_format_from_env)
+}
+
+fn analytics_requests_structured_output(cmd: &AnalyticsCommand, cli: &Cli) -> bool {
+    let json = match cmd {
+        AnalyticsCommand::Status { common }
+        | AnalyticsCommand::Tokens { common, .. }
+        | AnalyticsCommand::Tools { common, .. }
+        | AnalyticsCommand::AnalyticsModels { common, .. }
+        | AnalyticsCommand::Rebuild { common, .. }
+        | AnalyticsCommand::Validate { common, .. } => common.json,
+    };
+
+    resolve_subcommand_structured_format(cli, json).is_some()
+}
+
 /// Returns true if the command is using robot/JSON output mode.
 /// Used to auto-suppress INFO logs for clean machine-parseable output.
 fn is_robot_mode(command: &Commands, cli: &Cli) -> bool {
@@ -5029,14 +5068,21 @@ fn is_robot_mode(command: &Commands, cli: &Cli) -> bool {
     let env_robot_mode = robot_format_from_env().is_some();
 
     match command {
-        Commands::Search { robot_meta, .. } => {
-            cli.robot_format.is_some() || *robot_meta || env_robot_mode
+        Commands::Search {
+            json, robot_meta, ..
+        } => resolve_subcommand_structured_format(cli, *json).is_some() || *robot_meta,
+        Commands::Index { json, .. } => resolve_subcommand_structured_format(cli, *json).is_some(),
+        Commands::Health { json, .. } => resolve_subcommand_structured_format(cli, *json).is_some(),
+        Commands::Pages { json, .. } => resolve_subcommand_structured_format(cli, *json).is_some(),
+        Commands::Sessions { json, .. } => {
+            resolve_subcommand_structured_format(cli, *json).is_some()
         }
-        Commands::Index { .. }
-        | Commands::Stats { .. }
+        Commands::ExportHtml { json, .. } => {
+            resolve_subcommand_structured_format(cli, *json).is_some()
+        }
+        Commands::Stats { .. }
         | Commands::Diag { .. }
         | Commands::Status { .. }
-        | Commands::Health { .. }
         | Commands::Doctor { .. }
         | Commands::ApiVersion { .. }
         | Commands::State { .. }
@@ -5044,25 +5090,24 @@ fn is_robot_mode(command: &Commands, cli: &Cli) -> bool {
         | Commands::Capabilities { .. }
         | Commands::Introspect { .. }
         | Commands::Context { .. }
-        | Commands::Sessions { .. }
-        | Commands::Expand { .. }
-        | Commands::ExportHtml { .. }
-        | Commands::Timeline { .. } => cli.robot_format.is_some() || env_robot_mode,
+        | Commands::Expand { .. } => cli.robot_format.is_some() || env_robot_mode,
+        Commands::Timeline { json, .. } => {
+            resolve_subcommand_structured_format(cli, *json).is_some()
+        }
         Commands::Sources(
             SourcesCommand::List { .. }
             | SourcesCommand::Doctor { .. }
             | SourcesCommand::Sync { .. }
-            | SourcesCommand::Discover { .. }
-            | SourcesCommand::Setup { .. },
+            | SourcesCommand::Discover { .. },
         ) => cli.robot_format.is_some() || env_robot_mode,
+        Commands::Sources(SourcesCommand::Setup { json, .. }) => {
+            resolve_subcommand_structured_format(cli, *json).is_some()
+        }
         Commands::Sources(_) => false,
         Commands::Import(cmd) => match cmd {
             ImportCommand::Chatgpt { .. } => cli.robot_format.is_some() || env_robot_mode,
         },
-        Commands::Analytics(_) => {
-            // Analytics subcommands now rely on the global robot_format or environment.
-            cli.robot_format.is_some() || env_robot_mode
-        }
+        Commands::Analytics(cmd) => analytics_requests_structured_output(cmd, cli),
         _ => false,
     }
 }
@@ -6911,6 +6956,48 @@ fn safe_robot_score_value(score: f32) -> serde_json::Value {
     serde_json::Value::from(if score.is_finite() { score as f64 } else { 0.0 })
 }
 
+fn normalized_robot_hit_source_id(hit: &crate::search::query::SearchHit) -> String {
+    if let Some(source_id) = canonical_followup_source_id(Some(hit.source_id.as_str())) {
+        return source_id;
+    }
+    if hit.origin_kind.trim().eq_ignore_ascii_case("local") {
+        return crate::sources::provenance::LOCAL_SOURCE_ID.to_string();
+    }
+    hit.source_id.trim().to_string()
+}
+
+fn normalized_robot_hit_origin_kind(hit: &crate::search::query::SearchHit) -> String {
+    let trimmed = hit.origin_kind.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    if normalized_robot_hit_source_id(hit) == crate::sources::provenance::LOCAL_SOURCE_ID {
+        return crate::sources::provenance::LOCAL_SOURCE_ID.to_string();
+    }
+    String::new()
+}
+
+fn normalized_robot_hit_origin_host(hit: &crate::search::query::SearchHit) -> Option<String> {
+    hit.origin_host
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn normalized_robot_hit_for_output(
+    hit: &crate::search::query::SearchHit,
+) -> crate::search::query::SearchHit {
+    let mut normalized = hit.clone();
+    normalized.source_id = normalized_robot_hit_source_id(hit);
+    normalized.origin_kind = normalized_robot_hit_origin_kind(hit);
+    normalized.origin_host = normalized_robot_hit_origin_host(hit);
+    if !normalized.score.is_finite() {
+        normalized.score = 0.0;
+    }
+    normalized
+}
+
 fn projected_hit_field_value(
     hit: &crate::search::query::SearchHit,
     field: &str,
@@ -6927,14 +7014,15 @@ fn projected_hit_field_value(
         "line_number" => serde_json::to_value(hit.line_number).ok(),
         "match_type" => serde_json::to_value(hit.match_type).ok(),
         // Provenance fields (P3.4)
-        "source_id" => Some(serde_json::Value::String(hit.source_id.clone())),
-        "origin_kind" => Some(serde_json::Value::String(hit.origin_kind.clone())),
+        "source_id" => Some(serde_json::Value::String(normalized_robot_hit_source_id(
+            hit,
+        ))),
+        "origin_kind" => Some(serde_json::Value::String(normalized_robot_hit_origin_kind(
+            hit,
+        ))),
         // Preserve SearchHit serialization semantics:
         // origin_host/workspace_original are omitted entirely when None.
-        "origin_host" => hit
-            .origin_host
-            .as_ref()
-            .map(|value| serde_json::Value::String(value.clone())),
+        "origin_host" => normalized_robot_hit_origin_host(hit).map(serde_json::Value::String),
         "workspace_original" => hit
             .workspace_original
             .as_ref()
@@ -6949,11 +7037,7 @@ fn filter_hit_fields(
 ) -> serde_json::Value {
     // Sanitize NaN/Infinity score before serialization — serde_json rejects non-finite floats.
     let sanitize = |h: &crate::search::query::SearchHit| -> serde_json::Value {
-        let mut h = h.clone();
-        if !h.score.is_finite() {
-            h.score = 0.0;
-        }
-        serde_json::to_value(&h).unwrap_or_default()
+        serde_json::to_value(normalized_robot_hit_for_output(h)).unwrap_or_default()
     };
     match fields {
         None => sanitize(hit),
@@ -7358,11 +7442,13 @@ fn output_robot_results(
                 S: Serializer,
             {
                 let hit = self.0;
+                let normalized_source_id = normalized_robot_hit_source_id(hit);
+                let normalized_origin_host = normalized_robot_hit_origin_host(hit);
                 let mut fields = 12usize;
                 if hit.workspace_original.is_some() {
                     fields += 1;
                 }
-                if hit.origin_host.is_some() {
+                if normalized_origin_host.is_some() {
                     fields += 1;
                 }
                 let mut map = serializer.serialize_map(Some(fields))?;
@@ -7380,9 +7466,10 @@ fn output_robot_results(
                 map.serialize_entry("created_at", &hit.created_at)?;
                 map.serialize_entry("line_number", &hit.line_number)?;
                 map.serialize_entry("match_type", &hit.match_type)?;
-                map.serialize_entry("source_id", &hit.source_id)?;
-                map.serialize_entry("origin_kind", &hit.origin_kind)?;
-                if let Some(ref origin_host) = hit.origin_host {
+                let normalized_origin_kind = normalized_robot_hit_origin_kind(hit);
+                map.serialize_entry("source_id", &normalized_source_id)?;
+                map.serialize_entry("origin_kind", &normalized_origin_kind)?;
+                if let Some(ref origin_host) = normalized_origin_host {
                     map.serialize_entry("origin_host", origin_host)?;
                 }
                 map.end()
@@ -7500,13 +7587,7 @@ fn output_robot_results(
         let sanitized: Vec<_> = result
             .hits
             .iter()
-            .map(|hit| {
-                let mut h = hit.clone();
-                if !h.score.is_finite() {
-                    h.score = 0.0;
-                }
-                h
-            })
+            .map(normalized_robot_hit_for_output)
             .collect();
         match serde_json::to_value(&sanitized).unwrap_or_default() {
             serde_json::Value::Array(values) => values,
@@ -8047,6 +8128,70 @@ fn output_robot_results(
     Ok(())
 }
 
+fn source_filter_where_clause(
+    source_filter: Option<&crate::sources::provenance::SourceFilter>,
+) -> (String, Option<String>) {
+    let normalized_source_sql = normalized_source_identity_sql_expr("c.source_id", "c.origin_host");
+    match source_filter {
+        None | Some(crate::sources::provenance::SourceFilter::All) => (String::new(), None),
+        Some(crate::sources::provenance::SourceFilter::Local) => (
+            format!(
+                " WHERE {normalized_source_sql} = '{local}'",
+                local = crate::sources::provenance::LOCAL_SOURCE_ID,
+            ),
+            None,
+        ),
+        Some(crate::sources::provenance::SourceFilter::Remote) => (
+            format!(
+                " WHERE {normalized_source_sql} != '{local}'",
+                local = crate::sources::provenance::LOCAL_SOURCE_ID,
+            ),
+            None,
+        ),
+        Some(crate::sources::provenance::SourceFilter::SourceId(id)) => (
+            format!(" WHERE {normalized_source_sql} = ?"),
+            Some(
+                canonical_followup_source_id(Some(id.as_str()))
+                    .unwrap_or_else(|| id.trim().to_string()),
+            ),
+        ),
+    }
+}
+
+fn append_source_filter_condition(
+    sql: &mut String,
+    params: &mut Vec<frankensqlite::compat::ParamValue>,
+    source_filter: &crate::sources::provenance::SourceFilter,
+) {
+    let normalized_source_sql = normalized_source_identity_sql_expr("c.source_id", "c.origin_host");
+    match source_filter {
+        crate::sources::provenance::SourceFilter::All => {}
+        crate::sources::provenance::SourceFilter::Local => {
+            sql.push_str(&format!(
+                " AND {normalized_source_sql} = '{local}'",
+                local = crate::sources::provenance::LOCAL_SOURCE_ID,
+            ));
+        }
+        crate::sources::provenance::SourceFilter::Remote => {
+            sql.push_str(&format!(
+                " AND {normalized_source_sql} != '{local}'",
+                local = crate::sources::provenance::LOCAL_SOURCE_ID,
+            ));
+        }
+        crate::sources::provenance::SourceFilter::SourceId(id) => {
+            sql.push_str(&format!(
+                " AND {normalized_source_sql} = ?{}",
+                params.len() + 1
+            ));
+            params.push(
+                canonical_followup_source_id(Some(id.as_str()))
+                    .unwrap_or_else(|| id.trim().to_string())
+                    .into(),
+            );
+        }
+    }
+}
+
 fn run_stats(
     data_dir_override: &Option<PathBuf>,
     db_override: Option<PathBuf>,
@@ -8069,14 +8214,8 @@ fn run_stats(
     let source_filter = source.map(SourceFilter::parse);
 
     // Build WHERE clause for source filtering
-    let (source_where, source_param): (String, Option<String>) = match &source_filter {
-        None | Some(SourceFilter::All) => (String::new(), None),
-        Some(SourceFilter::Local) => (" WHERE c.source_id = 'local'".to_string(), None),
-        Some(SourceFilter::Remote) => (" WHERE c.source_id != 'local'".to_string(), None),
-        Some(SourceFilter::SourceId(id)) => {
-            (" WHERE c.source_id = ?".to_string(), Some(id.clone()))
-        }
-    };
+    let (source_where, source_param): (String, Option<String>) =
+        source_filter_where_clause(source_filter.as_ref());
 
     // Helper: build params slice from optional source param
     let make_params = |param: &Option<String>| -> Vec<ParamValue> {
@@ -8145,12 +8284,14 @@ fn run_stats(
 
     // Get per-source breakdown if requested (P3.7)
     let source_rows: Vec<(String, i64, i64)> = if by_source {
+        let normalized_source_sql =
+            normalized_source_identity_sql_expr("c.source_id", "c.origin_host");
         let source_sql = format!(
-            "SELECT c.source_id, COUNT(DISTINCT c.id) as convs, COUNT(m.id) as msgs
+            "SELECT {normalized_source_sql} as source_id, COUNT(DISTINCT c.id) as convs, COUNT(m.id) as msgs
              FROM conversations c
              LEFT JOIN messages m ON m.conversation_id = c.id
              {source_where}
-             GROUP BY c.source_id
+             GROUP BY {normalized_source_sql}
              ORDER BY convs DESC"
         );
         conn.query_map_collect(&source_sql, &params, |r| {
@@ -10474,6 +10615,8 @@ struct SessionSummaryRecord {
     workspace_match_distance: Option<usize>,
     title: Option<String>,
     source_path: PathBuf,
+    source_id: String,
+    origin_host: Option<String>,
     started_at: Option<i64>,
     modified_at: Option<i64>,
     size_bytes: Option<u64>,
@@ -10487,6 +10630,8 @@ struct SessionSummaryEntry {
     workspace: Option<String>,
     agent: String,
     title: Option<String>,
+    source_id: String,
+    origin_host: Option<String>,
     modified: Option<String>,
     size_bytes: Option<u64>,
     message_count: i64,
@@ -10560,6 +10705,9 @@ fn run_sessions(
         Option<String>,
         Option<String>,
         String,
+        String,
+        Option<String>,
+        Option<String>,
         Option<i64>,
         i64,
         i64,
@@ -10569,14 +10717,18 @@ fn run_sessions(
                     w.path,
                     c.title,
                     c.source_path,
+                    COALESCE(c.source_id, 'local'),
+                    c.origin_host,
+                    s.kind,
                     c.started_at,
                     COUNT(m.id) AS message_count,
                     COALESCE(SUM(CASE WHEN m.role = 'user' THEN 1 ELSE 0 END), 0) AS human_turns
              FROM conversations c
              JOIN agents a ON c.agent_id = a.id
              LEFT JOIN workspaces w ON c.workspace_id = w.id
+             LEFT JOIN sources s ON c.source_id = s.id
              LEFT JOIN messages m ON m.conversation_id = c.id
-             GROUP BY c.id, a.slug, w.path, c.title, c.source_path, c.started_at
+             GROUP BY c.id, a.slug, w.path, c.title, c.source_path, COALESCE(c.source_id, 'local'), c.origin_host, s.kind, c.started_at
              ORDER BY c.started_at IS NULL, c.started_at DESC, c.id DESC",
             params,
             |row: &frankensqlite::Row| {
@@ -10588,6 +10740,9 @@ fn run_sessions(
                     row.get_typed(4)?,
                     row.get_typed(5)?,
                     row.get_typed(6)?,
+                    row.get_typed(7)?,
+                    row.get_typed(8)?,
+                    row.get_typed(9)?,
                 ))
             },
         )
@@ -10602,9 +10757,30 @@ fn run_sessions(
     let mut sessions: Vec<SessionSummaryRecord> = rows
         .into_iter()
         .map(
-            |(agent, workspace, title, source_path, started_at, message_count, human_turns)| {
+            |(
+                agent,
+                workspace,
+                title,
+                source_path,
+                source_id,
+                origin_host,
+                origin_kind,
+                started_at,
+                message_count,
+                human_turns,
+            )| {
                 let source_path_buf = PathBuf::from(&source_path);
-                let metadata = std::fs::metadata(&source_path_buf).ok();
+                let origin_host = normalized_provenance_origin_host(origin_host.as_deref());
+                let source_id = normalized_provenance_source_id(
+                    source_id.as_str(),
+                    origin_kind.as_deref(),
+                    origin_host.as_deref(),
+                );
+                let metadata = if source_id == crate::sources::provenance::LOCAL_SOURCE_ID {
+                    std::fs::metadata(&source_path_buf).ok()
+                } else {
+                    None
+                };
                 let modified_at = metadata
                     .as_ref()
                     .and_then(|m| m.modified().ok())
@@ -10616,6 +10792,8 @@ fn run_sessions(
                     workspace_match_distance: None,
                     title,
                     source_path: source_path_buf,
+                    source_id,
+                    origin_host,
                     started_at,
                     modified_at,
                     size_bytes: metadata.as_ref().map(std::fs::Metadata::len),
@@ -10656,6 +10834,8 @@ fn run_sessions(
                 .map(|path| path.to_string_lossy().into_owned()),
             agent: session.agent,
             title: session.title,
+            source_id: session.source_id,
+            origin_host: session.origin_host,
             modified: session.modified_at.and_then(|ts| {
                 chrono::DateTime::<Utc>::from_timestamp_millis(ts).map(|dt| dt.to_rfc3339())
             }),
@@ -10693,6 +10873,10 @@ fn run_sessions(
     for (idx, session) in entries.iter().enumerate() {
         let modified = session.modified.as_deref().unwrap_or("-");
         let workspace = session.workspace.as_deref().unwrap_or("-");
+        let source_label = session
+            .origin_host
+            .as_deref()
+            .unwrap_or(session.source_id.as_str());
         println!(
             "{:>2}. [{}] {}  {} msgs / {} human",
             idx + 1,
@@ -10702,6 +10886,7 @@ fn run_sessions(
             session.human_turns
         );
         println!("    workspace: {}", workspace);
+        println!("    source: {}", source_label);
         println!("    path: {}", session.path);
     }
 
@@ -10710,8 +10895,74 @@ fn run_sessions(
 
 /// Find related sessions for a given source path.
 /// Returns sessions that share the same workspace, same day, or same agent.
+#[allow(clippy::type_complexity)]
+fn find_context_source_conversation(
+    conn: &frankensqlite::Connection,
+    path_str: &str,
+    source_id: Option<&str>,
+) -> Option<(i64, i64, Option<i64>, Option<i64>, String, String, String)> {
+    use frankensqlite::compat::{ConnectionExt, ParamValue, RowExt};
+
+    let normalized_source_sql = normalized_source_identity_sql_expr("c.source_id", "c.origin_host");
+    let source_id = canonical_followup_source_id(source_id);
+    if let Some(source_id) = source_id.as_deref() {
+        let query = format!(
+            "SELECT c.id, c.agent_id, c.workspace_id, c.started_at, c.title, a.slug, {normalized_source_sql}
+             FROM conversations c
+             JOIN agents a ON c.agent_id = a.id
+             WHERE c.source_path = ? AND {normalized_source_sql} = ?
+             ORDER BY c.started_at DESC
+             LIMIT 1"
+        );
+        return conn
+            .query_row_map(
+                &query,
+                &[ParamValue::from(path_str), ParamValue::from(source_id)],
+                |r: &frankensqlite::Row| {
+                    Ok((
+                        r.get_typed(0)?,
+                        r.get_typed(1)?,
+                        r.get_typed(2)?,
+                        r.get_typed(3)?,
+                        r.get_typed::<Option<String>>(4)?.unwrap_or_default(),
+                        r.get_typed(5)?,
+                        r.get_typed(6)?,
+                    ))
+                },
+            )
+            .ok();
+    }
+
+    let query = format!(
+        "SELECT c.id, c.agent_id, c.workspace_id, c.started_at, c.title, a.slug, {normalized_source_sql}
+         FROM conversations c
+         JOIN agents a ON c.agent_id = a.id
+         WHERE c.source_path = ?
+         ORDER BY CASE WHEN {normalized_source_sql} = '{local}' THEN 0 ELSE 1 END, c.started_at DESC
+         LIMIT 1",
+        local = crate::sources::provenance::LOCAL_SOURCE_ID,
+    );
+    conn.query_row_map(
+        &query,
+        &[ParamValue::from(path_str)],
+        |r: &frankensqlite::Row| {
+            Ok((
+                r.get_typed(0)?,
+                r.get_typed(1)?,
+                r.get_typed(2)?,
+                r.get_typed(3)?,
+                r.get_typed::<Option<String>>(4)?.unwrap_or_default(),
+                r.get_typed(5)?,
+                r.get_typed(6)?,
+            ))
+        },
+    )
+    .ok()
+}
+
 fn run_context(
     path: &Path,
+    source_id: Option<&str>,
     data_dir_override: &Option<PathBuf>,
     db_override: Option<PathBuf>,
     output_format: Option<RobotFormat>,
@@ -10721,38 +10972,28 @@ fn run_context(
 
     let conn = open_franken_analytics_db(data_dir_override, db_override.as_ref())?;
 
+    if let Some(source_id) = source_id {
+        validate_followup_source_id(source_id, "cass context")?;
+    }
+
     // Find the source conversation by path (normalized to string)
     let path_str = path.to_string_lossy().to_string();
-    #[allow(clippy::type_complexity)]
-    let source_conv: Option<(i64, i64, Option<i64>, Option<i64>, String, String)> = conn
-        .query_row_map(
-            "SELECT c.id, c.agent_id, c.workspace_id, c.started_at, c.title, a.slug
-             FROM conversations c
-             JOIN agents a ON c.agent_id = a.id
-             WHERE c.source_path = ?",
-            &[ParamValue::from(path_str.as_str())],
-            |r: &frankensqlite::Row| {
-                Ok((
-                    r.get_typed(0)?,
-                    r.get_typed(1)?,
-                    r.get_typed(2)?,
-                    r.get_typed(3)?,
-                    r.get_typed::<Option<String>>(4)?.unwrap_or_default(),
-                    r.get_typed(5)?,
-                ))
-            },
-        )
-        .ok();
+    let source_conv = find_context_source_conversation(&conn, &path_str, source_id);
 
-    let Some((conv_id, agent_id, workspace_id, started_at, title, agent_slug)) = source_conv else {
+    let Some((conv_id, agent_id, workspace_id, started_at, title, agent_slug, selected_source_id)) =
+        source_conv
+    else {
         return Err(CliError {
             code: 4,
             kind: "not_found",
-            message: format!("No session found at path: {path_str}"),
-            hint: Some(
-                "Use 'cass search' to find sessions, then use the source_path from results."
-                    .to_string(),
-            ),
+            message: match source_id {
+                Some(source_id) => format!("No session found at path: {path_str} for source '{source_id}'"),
+                None => format!("No session found at path: {path_str}"),
+            },
+            hint: Some(match source_id {
+                Some(_) => "Use the exact source_id from search output or omit --source to prefer the local session.".to_string(),
+                None => "Use 'cass search' to find sessions, then use the source_path from results.".to_string(),
+            }),
             retryable: false,
         });
     };
@@ -10767,16 +11008,21 @@ fn run_context(
         .ok()
     });
 
+    let normalized_source_sql = normalized_source_identity_sql_expr("c.source_id", "c.origin_host");
+
     // Find related sessions: same workspace (excluding self)
-    let same_workspace: Vec<(String, String, String, Option<i64>)> =
+    let same_workspace: Vec<(String, String, String, Option<i64>, String)> =
         if let Some(ws_id) = workspace_id {
-            conn.query_map_collect(
-                "SELECT c.source_path, c.title, a.slug, c.started_at
+            let query = format!(
+                "SELECT c.source_path, c.title, a.slug, c.started_at, {normalized_source_sql}
                  FROM conversations c
                  JOIN agents a ON c.agent_id = a.id
                  WHERE c.workspace_id = ? AND c.id != ?
                  ORDER BY c.started_at DESC
-                 LIMIT ?",
+                 LIMIT ?"
+            );
+            conn.query_map_collect(
+                &query,
                 &[
                     ParamValue::from(ws_id),
                     ParamValue::from(conv_id),
@@ -10788,6 +11034,7 @@ fn run_context(
                         r.get_typed::<Option<String>>(1)?.unwrap_or_default(),
                         r.get_typed(2)?,
                         r.get_typed(3)?,
+                        r.get_typed(4)?,
                     ))
                 },
             )
@@ -10797,16 +11044,20 @@ fn run_context(
         };
 
     // Find related sessions: same day (within 24 hours of started_at)
-    let same_day: Vec<(String, String, String, Option<i64>)> = if let Some(ts) = started_at {
+    let same_day: Vec<(String, String, String, Option<i64>, String)> = if let Some(ts) = started_at
+    {
         let day_start = ts - (ts % 86_400_000); // Start of day in milliseconds
         let day_end = day_start + 86_400_000;
-        conn.query_map_collect(
-            "SELECT c.source_path, c.title, a.slug, c.started_at
+        let query = format!(
+            "SELECT c.source_path, c.title, a.slug, c.started_at, {normalized_source_sql}
                  FROM conversations c
                  JOIN agents a ON c.agent_id = a.id
                  WHERE c.started_at >= ? AND c.started_at < ? AND c.id != ?
                  ORDER BY c.started_at DESC
-                 LIMIT ?",
+                 LIMIT ?"
+        );
+        conn.query_map_collect(
+            &query,
             &[
                 ParamValue::from(day_start),
                 ParamValue::from(day_end),
@@ -10819,6 +11070,7 @@ fn run_context(
                     r.get_typed::<Option<String>>(1)?.unwrap_or_default(),
                     r.get_typed(2)?,
                     r.get_typed(3)?,
+                    r.get_typed(4)?,
                 ))
             },
         )
@@ -10828,13 +11080,16 @@ fn run_context(
     };
 
     // Find related sessions: same agent (excluding self)
-    let same_agent: Vec<(String, String, Option<i64>)> = {
-        conn.query_map_collect(
-            "SELECT c.source_path, c.title, c.started_at
+    let same_agent: Vec<(String, String, Option<i64>, String)> = {
+        let query = format!(
+            "SELECT c.source_path, c.title, c.started_at, {normalized_source_sql}
                  FROM conversations c
                  WHERE c.agent_id = ? AND c.id != ?
                  ORDER BY c.started_at DESC
-                 LIMIT ?",
+                 LIMIT ?"
+        );
+        conn.query_map_collect(
+            &query,
             &[
                 ParamValue::from(agent_id),
                 ParamValue::from(conv_id),
@@ -10845,6 +11100,7 @@ fn run_context(
                     r.get_typed(0)?,
                     r.get_typed::<Option<String>>(1)?.unwrap_or_default(),
                     r.get_typed(2)?,
+                    r.get_typed(3)?,
                 ))
             },
         )
@@ -10867,31 +11123,35 @@ fn run_context(
         let payload = serde_json::json!({
             "source": {
                 "path": path_str,
+                "source_id": selected_source_id,
                 "title": title,
                 "agent": agent_slug,
                 "workspace": workspace_path,
                 "started_at": format_ts(started_at),
             },
             "related": {
-                "same_workspace": same_workspace.iter().map(|(p, t, a, ts)| {
+                "same_workspace": same_workspace.iter().map(|(p, t, a, ts, source_id)| {
                     serde_json::json!({
                         "path": p,
+                        "source_id": source_id,
                         "title": t,
                         "agent": a,
                         "started_at": format_ts(*ts),
                     })
                 }).collect::<Vec<_>>(),
-                "same_day": same_day.iter().map(|(p, t, a, ts)| {
+                "same_day": same_day.iter().map(|(p, t, a, ts, source_id)| {
                     serde_json::json!({
                         "path": p,
+                        "source_id": source_id,
                         "title": t,
                         "agent": a,
                         "started_at": format_ts(*ts),
                     })
                 }).collect::<Vec<_>>(),
-                "same_agent": same_agent.iter().map(|(p, t, ts)| {
+                "same_agent": same_agent.iter().map(|(p, t, ts, source_id)| {
                     serde_json::json!({
                         "path": p,
+                        "source_id": source_id,
                         "title": t,
                         "started_at": format_ts(*ts),
                     })
@@ -10912,6 +11172,7 @@ fn run_context(
     println!("{}", "===============".cyan());
     println!();
     println!("{}: {}", "Source".bold(), path_str);
+    println!("  Source ID: {}", selected_source_id.as_str().magenta());
     println!("  Title: {}", title.as_str().yellow());
     println!("  Agent: {}", agent_slug.as_str().green());
     if let Some(ws) = &workspace_path {
@@ -10930,15 +11191,16 @@ fn run_context(
             "Same Workspace".bold().blue(),
             same_workspace.len()
         );
-        for (path, title_str, agent, timestamp) in &same_workspace {
+        for (path, title_str, agent, timestamp, source_id) in &same_workspace {
             let ts_str = timestamp
                 .and_then(chrono::DateTime::from_timestamp_millis)
                 .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
                 .unwrap_or_default();
             println!(
-                "  • {} [{}] {}",
+                "  • {} [{} @ {}] {}",
                 title_str.as_str().yellow(),
                 agent.as_str().green(),
+                source_id.as_str().magenta(),
                 ts_str.dimmed()
             );
             println!("    {}", path.as_str().dimmed());
@@ -10948,15 +11210,16 @@ fn run_context(
 
     if !same_day.is_empty() {
         println!("{} ({}):", "Same Day".bold().magenta(), same_day.len());
-        for (path, title_str, agent, timestamp) in &same_day {
+        for (path, title_str, agent, timestamp, source_id) in &same_day {
             let ts_str = timestamp
                 .and_then(chrono::DateTime::from_timestamp_millis)
                 .map(|d| d.format("%H:%M").to_string())
                 .unwrap_or_default();
             println!(
-                "  • {} [{}] {}",
+                "  • {} [{} @ {}] {}",
                 title_str.as_str().yellow(),
                 agent.as_str().green(),
+                source_id.as_str().magenta(),
                 ts_str.dimmed()
             );
             println!("    {}", path.as_str().dimmed());
@@ -10966,12 +11229,17 @@ fn run_context(
 
     if !same_agent.is_empty() {
         println!("{} ({}):", "Same Agent".bold().green(), same_agent.len());
-        for (path, title_str, timestamp) in &same_agent {
+        for (path, title_str, timestamp, source_id) in &same_agent {
             let ts_str = timestamp
                 .and_then(chrono::DateTime::from_timestamp_millis)
                 .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
                 .unwrap_or_default();
-            println!("  • {} {}", title_str.as_str().yellow(), ts_str.dimmed());
+            println!(
+                "  • {} [{}] {}",
+                title_str.as_str().yellow(),
+                source_id.as_str().magenta(),
+                ts_str.dimmed()
+            );
             println!("    {}", path.as_str().dimmed());
         }
         println!();
@@ -11949,12 +12217,14 @@ fn build_response_schemas() -> std::collections::HashMap<String, serde_json::Val
                             "workspace": { "type": ["string", "null"] },
                             "agent": { "type": "string" },
                             "title": { "type": ["string", "null"] },
+                            "source_id": { "type": "string" },
+                            "origin_host": { "type": ["string", "null"] },
                             "modified": { "type": ["string", "null"] },
                             "size_bytes": { "type": ["integer", "null"] },
                             "message_count": { "type": "integer" },
                             "human_turns": { "type": "integer" }
                         },
-                        "required": ["path", "agent", "message_count", "human_turns"]
+                        "required": ["path", "agent", "source_id", "message_count", "human_turns"]
                     }
                 }
             },
@@ -12319,8 +12589,92 @@ fn conversation_view_to_raw_messages(
         .collect()
 }
 
+fn canonical_followup_source_id(source_id: Option<&str>) -> Option<String> {
+    let trimmed = source_id?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.eq_ignore_ascii_case(crate::sources::provenance::LOCAL_SOURCE_ID) {
+        Some(crate::sources::provenance::LOCAL_SOURCE_ID.to_string())
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn followup_source_is_local(source_id: Option<&str>) -> bool {
+    canonical_followup_source_id(source_id).as_deref()
+        == Some(crate::sources::provenance::LOCAL_SOURCE_ID)
+}
+
+fn normalized_provenance_origin_host(origin_host: Option<&str>) -> Option<String> {
+    origin_host
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn normalized_provenance_source_id(
+    source_id: &str,
+    origin_kind: Option<&str>,
+    origin_host: Option<&str>,
+) -> String {
+    if let Some(source_id) = canonical_followup_source_id(Some(source_id)) {
+        return source_id;
+    }
+
+    if let Some(host) = normalized_provenance_origin_host(origin_host) {
+        return host;
+    }
+
+    if let Some(kind) = origin_kind.map(str::trim).filter(|value| !value.is_empty()) {
+        if kind.eq_ignore_ascii_case("ssh") || kind.eq_ignore_ascii_case("remote") {
+            return "remote".to_string();
+        }
+    }
+
+    crate::sources::provenance::LOCAL_SOURCE_ID.to_string()
+}
+
+fn normalized_provenance_origin_kind(
+    normalized_source_id: &str,
+    origin_kind: Option<&str>,
+) -> String {
+    if let Some(kind) = origin_kind.map(str::trim).filter(|value| !value.is_empty()) {
+        if kind.eq_ignore_ascii_case("local") {
+            return crate::sources::provenance::LOCAL_SOURCE_ID.to_string();
+        }
+        if kind.eq_ignore_ascii_case("ssh") || kind.eq_ignore_ascii_case("remote") {
+            return "remote".to_string();
+        }
+        return kind.to_ascii_lowercase();
+    }
+
+    if followup_source_is_local(Some(normalized_source_id)) {
+        crate::sources::provenance::LOCAL_SOURCE_ID.to_string()
+    } else {
+        "remote".to_string()
+    }
+}
+
+fn normalized_source_identity_sql_expr(source_id_column: &str, origin_host_column: &str) -> String {
+    format!(
+        "CASE WHEN TRIM(COALESCE({source_id_column}, '')) = '' THEN CASE WHEN TRIM(COALESCE({origin_host_column}, '')) = '' THEN '{local}' ELSE TRIM(COALESCE({origin_host_column}, '')) END          WHEN LOWER(TRIM(COALESCE({source_id_column}, ''))) = '{local}' THEN '{local}'          ELSE TRIM(COALESCE({source_id_column}, '')) END",
+        local = crate::sources::provenance::LOCAL_SOURCE_ID,
+    )
+}
+
+#[cfg(test)]
+fn normalized_source_id_sql_expr(column: &str) -> String {
+    format!(
+        "CASE WHEN TRIM(COALESCE({column}, '')) = '' THEN '{local}'          WHEN LOWER(TRIM(COALESCE({column}, ''))) = '{local}' THEN '{local}'          ELSE TRIM(COALESCE({column}, '')) END",
+        local = crate::sources::provenance::LOCAL_SOURCE_ID,
+    )
+}
+
 fn validate_followup_source_id(source_id: &str, command: &str) -> CliResult<()> {
-    if source_id.trim().is_empty() || matches!(source_id, "all" | "remote") {
+    let trimmed = source_id.trim();
+    let keyword = trimmed.to_ascii_lowercase();
+    if trimmed.is_empty() || matches!(keyword.as_str(), "all" | "remote") {
         return Err(CliError {
             code: 2,
             kind: "ambiguous-source",
@@ -12337,6 +12691,34 @@ fn validate_followup_source_id(source_id: &str, command: &str) -> CliResult<()> 
     Ok(())
 }
 
+fn prefers_direct_view_file(path: &Path, source_id: Option<&str>) -> bool {
+    if (!followup_source_is_local(source_id) && source_id.is_some()) || !path.exists() {
+        return false;
+    }
+
+    matches!(
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+            .as_deref(),
+        Some("jsonl" | "md" | "markdown" | "txt")
+    )
+}
+
+fn prefers_direct_jsonl_file(path: &Path, source_id: Option<&str>) -> bool {
+    if (!followup_source_is_local(source_id) && source_id.is_some()) || !path.exists() {
+        return false;
+    }
+
+    matches!(
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+            .as_deref(),
+        Some("jsonl")
+    )
+}
+
 fn try_load_indexed_conversation_from_db_with_source(
     source_path: &Path,
     db_path: &Path,
@@ -12347,7 +12729,8 @@ fn try_load_indexed_conversation_from_db_with_source(
     }
     let storage = crate::storage::sqlite::FrankenStorage::open(db_path).ok()?;
     let source_path = source_path.to_string_lossy();
-    if let Some(source_id) = source_id {
+    let source_id = canonical_followup_source_id(source_id);
+    if let Some(source_id) = source_id.as_deref() {
         return crate::ui::data::load_conversation_for_source(&storage, source_id, &source_path)
             .ok()?;
     }
@@ -12383,16 +12766,103 @@ fn serialize_indexed_view_lines(
         .collect::<CliResult<Vec<_>>>()
 }
 
+fn read_followup_file_lines(path: &Path) -> CliResult<Vec<String>> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+
+    let file = File::open(path).map_err(|e| CliError {
+        code: 9,
+        kind: "file-open",
+        message: format!("Failed to open file: {e}"),
+        hint: None,
+        retryable: false,
+    })?;
+    let reader = BufReader::new(file);
+    reader
+        .lines()
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|e| CliError {
+            code: 9,
+            kind: "file-read",
+            message: format!("Failed to read file: {e}"),
+            hint: Some("The session file may be truncated or contain invalid UTF-8".into()),
+            retryable: false,
+        })
+}
+
+fn parse_followup_jsonl_messages(
+    path: &Path,
+) -> CliResult<(Vec<serde_json::Value>, Option<i64>, Option<i64>)> {
+    let lines = read_followup_file_lines(path)?;
+    let mut messages = Vec::new();
+    let mut session_start = None;
+    let mut session_end = None;
+
+    for (line_number, line) in lines.into_iter().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let msg = serde_json::from_str::<serde_json::Value>(&line).map_err(|e| CliError {
+            code: 9,
+            kind: "session-parse",
+            message: format!("Failed to parse session JSONL at line {}: {e}", line_number + 1),
+            hint: Some(
+                "The local JSONL session is malformed; use the indexed copy or repair the session file."
+                    .into(),
+            ),
+            retryable: false,
+        })?;
+        if let Some(ts) = extract_message_timestamp(&msg) {
+            if session_start.is_none_or(|start| ts < start) {
+                session_start = Some(ts);
+            }
+            if session_end.is_none_or(|end| ts > end) {
+                session_end = Some(ts);
+            }
+        }
+        messages.push(msg);
+    }
+
+    Ok((messages, session_start, session_end))
+}
+
+fn infer_followup_agent_and_workspace(path: &Path) -> (Option<String>, Option<String>) {
+    let path_str = path.to_string_lossy();
+    let path_lower = path_str.to_ascii_lowercase();
+
+    let agent_name = [
+        (".local/share/opencode", "opencode"),
+        ("sourcegraph.amp", "amp"),
+        (".local/share/amp", "amp"),
+        (".config/gh-copilot", "copilot"),
+        (".config/gh/copilot", "copilot"),
+        ("github-copilot", "copilot"),
+        (".copilot", "copilot"),
+        (".pi/agent", "pi_agent"),
+        (".openclaw", "openclaw"),
+        ("clawdbot", "clawdbot"),
+        ("cline", "cline"),
+        (".aider", "aider"),
+        (".claude", "claude_code"),
+        (".codex", "codex"),
+        ("cursor", "cursor"),
+        (".config/gemini", "gemini"),
+        (".gemini", "gemini"),
+        (".vibe", "vibe"),
+    ]
+    .into_iter()
+    .find_map(|(marker, slug)| path_lower.contains(marker).then(|| slug.to_string()));
+
+    let workspace = path.parent().map(|parent| parent.display().to_string());
+    (agent_name, workspace)
+}
+
+#[cfg(test)]
 fn try_load_indexed_conversation_from_db(
     source_path: &Path,
     db_path: &Path,
 ) -> Option<crate::ui::data::ConversationView> {
     try_load_indexed_conversation_from_db_with_source(source_path, db_path, None)
-}
-
-fn try_load_indexed_conversation(source_path: &Path) -> Option<crate::ui::data::ConversationView> {
-    let db_path = default_db_path();
-    try_load_indexed_conversation_from_db(source_path, &db_path)
 }
 
 fn run_view(
@@ -12403,58 +12873,33 @@ fn run_view(
     context: usize,
     output_format: Option<RobotFormat>,
 ) -> CliResult<()> {
-    use std::fs::File;
-    use std::io::{BufRead, BufReader};
-
     if let Some(source_id) = source_id {
         validate_followup_source_id(source_id, "cass view")?;
     }
+    let normalized_source_id = canonical_followup_source_id(source_id);
+    let source_id = normalized_source_id.as_deref();
 
     let db_path = db_override.unwrap_or_else(default_db_path);
     let indexed_view = try_load_indexed_conversation_from_db_with_source(path, &db_path, source_id);
-    let allow_direct_file = source_id.is_none()
-        || source_id == Some(crate::sources::provenance::LOCAL_SOURCE_ID);
+    let allow_direct_file = followup_source_is_local(source_id) || source_id.is_none();
 
-    let lines: Vec<String> = if source_id.is_none() && path.exists() {
-        let file = File::open(path).map_err(|e| CliError {
-            code: 9,
-            kind: "file-open",
-            message: format!("Failed to open file: {e}"),
-            hint: None,
-            retryable: false,
-        })?;
-        let reader = BufReader::new(file);
-        reader
-            .lines()
-            .collect::<std::io::Result<Vec<_>>>()
-            .map_err(|e| CliError {
-                code: 9,
-                kind: "file-read",
-                message: format!("Failed to read file: {e}"),
-                hint: Some("The session file may be truncated or contain invalid UTF-8".into()),
-                retryable: false,
-            })?
-    } else if let Some(view) = indexed_view {
-        serialize_indexed_view_lines(&view)?
+    let prefer_direct_file = prefers_direct_view_file(path, source_id);
+
+    let lines: Vec<String> = if prefer_direct_file {
+        match read_followup_file_lines(path) {
+            Ok(lines) => lines,
+            Err(err) => {
+                if let Some(view) = indexed_view.as_ref() {
+                    serialize_indexed_view_lines(view)?
+                } else {
+                    return Err(err);
+                }
+            }
+        }
+    } else if let Some(view) = indexed_view.as_ref() {
+        serialize_indexed_view_lines(view)?
     } else if allow_direct_file && path.exists() {
-        let file = File::open(path).map_err(|e| CliError {
-            code: 9,
-            kind: "file-open",
-            message: format!("Failed to open file: {e}"),
-            hint: None,
-            retryable: false,
-        })?;
-        let reader = BufReader::new(file);
-        reader
-            .lines()
-            .collect::<std::io::Result<Vec<_>>>()
-            .map_err(|e| CliError {
-                code: 9,
-                kind: "file-read",
-                message: format!("Failed to read file: {e}"),
-                hint: Some("The session file may be truncated or contain invalid UTF-8".into()),
-                retryable: false,
-            })?
+        read_followup_file_lines(path)?
     } else {
         return Err(CliError {
             code: 3,
@@ -13385,16 +13830,17 @@ fn run_export(
     include_skills: bool,
 ) -> CliResult<()> {
     use std::fs::File;
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::Write;
 
     if let Some(source_id) = source_id {
         validate_followup_source_id(source_id, "cass export")?;
     }
+    let normalized_source_id = canonical_followup_source_id(source_id);
+    let source_id = normalized_source_id.as_deref();
 
     let db_path = db_override.unwrap_or_else(default_db_path);
     let indexed_view = try_load_indexed_conversation_from_db_with_source(path, &db_path, source_id);
-    let allow_direct_file = source_id.is_none()
-        || source_id == Some(crate::sources::provenance::LOCAL_SOURCE_ID);
+    let allow_direct_file = followup_source_is_local(source_id) || source_id.is_none();
 
     if source_id.is_none() && !path.exists() && indexed_view.is_none() {
         return Err(CliError {
@@ -13406,16 +13852,38 @@ fn run_export(
         });
     }
 
-    let mut messages: Vec<serde_json::Value> = Vec::new();
-    let mut session_title: Option<String> = None;
-    let mut session_start: Option<i64> = None;
-    let mut _session_end: Option<i64> = None;
+    let mut messages: Vec<serde_json::Value>;
+    let indexed_title = indexed_view
+        .as_ref()
+        .and_then(|view| view.convo.title.clone());
+    let mut session_title: Option<String> = indexed_title;
+    let session_start: Option<i64>;
+    let mut _session_end: Option<i64>;
+    let prefer_direct_file = prefers_direct_jsonl_file(path, source_id);
 
-    if let Some(view) = indexed_view {
+    if prefer_direct_file {
+        match parse_followup_jsonl_messages(path) {
+            Ok((parsed_messages, parsed_start, parsed_end)) => {
+                messages = parsed_messages;
+                session_start = parsed_start;
+                _session_end = parsed_end;
+            }
+            Err(err) => {
+                if let Some(view) = indexed_view.as_ref() {
+                    session_title = view.convo.title.clone();
+                    session_start = view.convo.started_at;
+                    _session_end = view.convo.ended_at;
+                    messages = conversation_view_to_raw_messages(view);
+                } else {
+                    return Err(err);
+                }
+            }
+        }
+    } else if let Some(view) = indexed_view.as_ref() {
         session_title = view.convo.title.clone();
         session_start = view.convo.started_at;
         _session_end = view.convo.ended_at;
-        messages = conversation_view_to_raw_messages(&view);
+        messages = conversation_view_to_raw_messages(view);
     } else if allow_direct_file && detect_opencode_session(path) {
         match load_opencode_session_for_export(path) {
             Ok((title, start, end, msgs)) => {
@@ -13438,38 +13906,25 @@ fn run_export(
             }
         }
     } else if allow_direct_file && path.exists() {
-        let file = File::open(path).map_err(|e| CliError {
-            code: 9,
-            kind: "file-open",
-            message: format!("Failed to open file: {e}"),
-            hint: None,
-            retryable: false,
-        })?;
-
-        let reader = BufReader::new(file);
-
-        for line_result in reader.lines() {
-            let line = line_result.map_err(|e| CliError {
+        if prefers_direct_jsonl_file(path, source_id) {
+            let (parsed_messages, parsed_start, parsed_end) = parse_followup_jsonl_messages(path)?;
+            messages = parsed_messages;
+            session_start = parsed_start;
+            _session_end = parsed_end;
+        } else {
+            return Err(CliError {
                 code: 9,
-                kind: "file-read",
-                message: format!("Failed to read file: {e}"),
-                hint: Some("The session file may be truncated or contain invalid UTF-8".into()),
+                kind: "indexed-session-required",
+                message: format!(
+                    "Local export for '{}' requires an indexed conversation or a JSONL/OpenCode session",
+                    path.display()
+                ),
+                hint: Some(
+                    "Run 'cass index --full' first, or export directly from a JSONL/OpenCode session."
+                        .to_string(),
+                ),
                 retryable: false,
-            })?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
-                if let Some(ts) = extract_message_timestamp(&msg) {
-                    if session_start.is_none_or(|start| ts < start) {
-                        session_start = Some(ts);
-                    }
-                    if _session_end.is_none_or(|end| ts > end) {
-                        _session_end = Some(ts);
-                    }
-                }
-                messages.push(msg);
-            }
+            });
         }
     } else {
         return Err(CliError {
@@ -13607,20 +14062,18 @@ fn run_export_html(
         generate_full_filename, get_downloads_dir, is_valid_filename,
     };
     use std::fs::File;
-    use std::io::{self, BufRead, BufReader, Write};
+    use std::io::{self, Write};
 
     if let Some(source_id) = source_id {
         validate_followup_source_id(source_id, "cass export-html")?;
     }
+    let normalized_source_id = canonical_followup_source_id(source_id);
+    let source_id = normalized_source_id.as_deref();
 
     let db_path = db_override.unwrap_or_else(default_db_path);
-    let indexed_view = try_load_indexed_conversation_from_db_with_source(
-        session_path,
-        &db_path,
-        source_id,
-    );
-    let allow_direct_file = source_id.is_none()
-        || source_id == Some(crate::sources::provenance::LOCAL_SOURCE_ID);
+    let indexed_view =
+        try_load_indexed_conversation_from_db_with_source(session_path, &db_path, source_id);
+    let allow_direct_file = followup_source_is_local(source_id) || source_id.is_none();
 
     // --- Validate session exists ---
     if indexed_view.is_none() && !(allow_direct_file && session_path.exists()) {
@@ -13720,14 +14173,52 @@ fn run_export_html(
     };
 
     // --- Load session messages ---
-    let mut raw_messages: Vec<serde_json::Value> = Vec::new();
-    let mut session_title: Option<String> = None;
-    let mut session_start: Option<i64> = None;
-    let mut session_end: Option<i64> = None;
-    let mut agent_name: Option<String> = None;
-    let mut workspace: Option<String> = None;
+    let raw_messages: Vec<serde_json::Value>;
+    let indexed_title = indexed_view
+        .as_ref()
+        .and_then(|view| view.convo.title.clone());
+    let indexed_agent_name = indexed_view
+        .as_ref()
+        .map(|view| view.convo.agent_slug.clone());
+    let indexed_workspace = indexed_view.as_ref().and_then(|view| {
+        view.convo
+            .workspace
+            .as_ref()
+            .map(|path| path.display().to_string())
+    });
+    let (path_agent_name, path_workspace) = infer_followup_agent_and_workspace(session_path);
+    let mut session_title: Option<String> = indexed_title;
+    let session_start: Option<i64>;
+    let session_end: Option<i64>;
+    let mut agent_name: Option<String> = indexed_agent_name.or(path_agent_name);
+    let mut workspace: Option<String> = indexed_workspace.or(path_workspace);
+    let prefer_direct_file = prefers_direct_jsonl_file(session_path, source_id);
 
-    if let Some(view) = indexed_view {
+    if prefer_direct_file {
+        match parse_followup_jsonl_messages(session_path) {
+            Ok((parsed_messages, parsed_start, parsed_end)) => {
+                raw_messages = parsed_messages;
+                session_start = parsed_start;
+                session_end = parsed_end;
+            }
+            Err(err) => {
+                if let Some(view) = indexed_view.as_ref() {
+                    session_title = view.convo.title.clone();
+                    session_start = view.convo.started_at;
+                    session_end = view.convo.ended_at;
+                    agent_name = Some(view.convo.agent_slug.clone());
+                    workspace = view
+                        .convo
+                        .workspace
+                        .as_ref()
+                        .map(|p| p.display().to_string());
+                    raw_messages = conversation_view_to_raw_messages(view);
+                } else {
+                    return Err(err);
+                }
+            }
+        }
+    } else if let Some(view) = indexed_view.as_ref() {
         session_title = view.convo.title.clone();
         session_start = view.convo.started_at;
         session_end = view.convo.ended_at;
@@ -13778,39 +14269,26 @@ fn run_export_html(
                     });
                 }
             }
+        } else if prefers_direct_jsonl_file(session_path, source_id) {
+            let (parsed_messages, parsed_start, parsed_end) =
+                parse_followup_jsonl_messages(session_path)?;
+            raw_messages = parsed_messages;
+            session_start = parsed_start;
+            session_end = parsed_end;
         } else {
-            let file = File::open(session_path).map_err(|e| CliError {
+            return Err(CliError {
                 code: 9,
-                kind: "file_open",
-                message: format!("Failed to open file: {e}"),
-                hint: None,
+                kind: "indexed-session-required",
+                message: format!(
+                    "Local export for '{}' requires an indexed conversation or a JSONL/OpenCode session",
+                    session_path.display()
+                ),
+                hint: Some(
+                    "Run 'cass index --full' first, or export directly from a JSONL/OpenCode session."
+                        .to_string(),
+                ),
                 retryable: false,
-            })?;
-
-            let reader = BufReader::new(file);
-            for line_result in reader.lines() {
-                let line = line_result.map_err(|e| CliError {
-                    code: 9,
-                    kind: "file_read",
-                    message: format!("Failed to read session file: {e}"),
-                    hint: Some("The session file may be truncated or contain invalid UTF-8".into()),
-                    retryable: false,
-                })?;
-                if line.trim().is_empty() {
-                    continue;
-                }
-                if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) {
-                    if let Some(ts) = extract_message_timestamp(&msg) {
-                        if session_start.is_none_or(|start| ts < start) {
-                            session_start = Some(ts);
-                        }
-                        if session_end.is_none_or(|end| ts > end) {
-                            session_end = Some(ts);
-                        }
-                    }
-                    raw_messages.push(msg);
-                }
-            }
+            });
         }
     }
 
@@ -14864,12 +15342,445 @@ mod export_timestamp_tests {
 }
 
 #[cfg(test)]
+mod legacy_source_filter_tests {
+    use super::*;
+    use crate::sources::provenance::SourceFilter;
+    use frankensqlite::compat::{ConnectionExt, RowExt};
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    fn make_legacy_local_db() -> (TempDir, PathBuf, PathBuf) {
+        let tmp = TempDir::new().expect("temp dir");
+        let db_path = tmp.path().join("agent_search.db");
+        let shared_path = PathBuf::from("/legacy/shared/session.jsonl");
+
+        with_frankensqlite_connection(&db_path, "legacy source test", |conn| {
+            conn.execute("PRAGMA journal_mode = WAL;")?;
+            conn.execute("CREATE TABLE agents (id INTEGER PRIMARY KEY, slug TEXT NOT NULL);")?;
+            conn.execute(
+                "CREATE TABLE workspaces (id INTEGER PRIMARY KEY, path TEXT, display_name TEXT);",
+            )?;
+            conn.execute(
+                "CREATE TABLE sources (id TEXT PRIMARY KEY, kind TEXT, host_label TEXT);",
+            )?;
+            conn.execute(
+                "CREATE TABLE conversations (
+                    id INTEGER PRIMARY KEY,
+                    agent_id INTEGER NOT NULL,
+                    workspace_id INTEGER,
+                    source_id TEXT,
+                    origin_host TEXT,
+                    title TEXT,
+                    source_path TEXT NOT NULL,
+                    started_at INTEGER,
+                    ended_at INTEGER,
+                    approx_tokens INTEGER,
+                    external_id TEXT,
+                    metadata_json TEXT,
+                    metadata_bin BLOB
+                );",
+            )?;
+            conn.execute(
+                "CREATE TABLE messages (
+                    id INTEGER PRIMARY KEY,
+                    conversation_id INTEGER NOT NULL,
+                    idx INTEGER,
+                    role TEXT,
+                    created_at INTEGER,
+                    content TEXT
+                );",
+            )?;
+            conn.execute("INSERT INTO agents(id, slug) VALUES (1, 'codex')")?;
+            conn.execute(
+                "INSERT INTO sources(id, kind, host_label) VALUES ('laptop', 'ssh', 'user@laptop')",
+            )?;
+            conn.execute(
+                "INSERT INTO conversations(
+                    id, agent_id, workspace_id, source_id, origin_host, title,
+                    source_path, started_at, ended_at, approx_tokens, external_id,
+                    metadata_json, metadata_bin
+                ) VALUES (
+                    1, 1, NULL, NULL, NULL, 'Local Session',
+                    '/legacy/shared/session.jsonl', 1700000000000, NULL, 10,
+                    'legacy-local', '{}', NULL
+                )",
+            )?;
+            conn.execute(
+                "INSERT INTO conversations(
+                    id, agent_id, workspace_id, source_id, origin_host, title,
+                    source_path, started_at, ended_at, approx_tokens, external_id,
+                    metadata_json, metadata_bin
+                ) VALUES (
+                    2, 1, NULL, 'laptop', 'user@laptop', 'Remote Session',
+                    '/legacy/shared/session.jsonl', 1700000100000, NULL, 10,
+                    'remote-shared', '{}', NULL
+                )",
+            )?;
+            conn.execute(
+                "INSERT INTO messages(id, conversation_id, idx, role, created_at, content)
+                 VALUES (1, 1, 0, 'user', 1700000000100, 'local body')",
+            )?;
+            conn.execute(
+                "INSERT INTO messages(id, conversation_id, idx, role, created_at, content)
+                 VALUES (2, 2, 0, 'user', 1700000100100, 'remote body')",
+            )?;
+            Ok(())
+        })
+        .expect("create legacy db");
+
+        (tmp, db_path, shared_path)
+    }
+
+    #[test]
+    fn source_filter_helpers_use_normalized_source_sql_for_local_semantics() {
+        let normalized_source_sql =
+            normalized_source_identity_sql_expr("c.source_id", "c.origin_host");
+
+        let (where_sql, param) = source_filter_where_clause(Some(&SourceFilter::Local));
+        assert_eq!(
+            where_sql,
+            format!(
+                " WHERE {normalized_source_sql} = '{local}'",
+                local = crate::sources::provenance::LOCAL_SOURCE_ID,
+            )
+        );
+        assert!(param.is_none());
+
+        let (where_sql, param) =
+            source_filter_where_clause(Some(&SourceFilter::SourceId("  LOCAL  ".to_string())));
+        assert_eq!(where_sql, format!(" WHERE {normalized_source_sql} = ?"));
+        assert_eq!(param.as_deref(), Some("local"));
+
+        let mut sql = "SELECT 1 WHERE 1=1".to_string();
+        let mut params = Vec::new();
+        append_source_filter_condition(&mut sql, &mut params, &SourceFilter::Remote);
+        assert_eq!(
+            sql,
+            format!(
+                "SELECT 1 WHERE 1=1 AND {normalized_source_sql} != '{local}'",
+                local = crate::sources::provenance::LOCAL_SOURCE_ID,
+            )
+        );
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn source_filter_helpers_match_blank_remote_source_id_via_origin_host() {
+        let (_tmp, db_path, _shared_path) = make_legacy_local_db();
+        let conn = open_franken_analytics_db(&None, Some(&db_path)).expect("open analytics db");
+        conn.execute("UPDATE conversations SET source_id = '   ' WHERE id = 2")
+            .expect("blank remote source_id");
+
+        let (where_sql, param) =
+            source_filter_where_clause(Some(&SourceFilter::SourceId("user@laptop".to_string())));
+        let sql = format!("SELECT COUNT(*) FROM conversations c{where_sql}");
+        let params_vec = vec![param.expect("source id param").into()];
+        let count: i64 = conn
+            .query_row_map(&sql, &params_vec, |r: &frankensqlite::Row| r.get_typed(0))
+            .expect("count blank remote source rows");
+        assert_eq!(count, 1);
+
+        let (where_sql, param) = source_filter_where_clause(Some(&SourceFilter::Remote));
+        assert!(param.is_none());
+        let sql = format!("SELECT COUNT(*) FROM conversations c{where_sql}");
+        let count: i64 = conn
+            .query_row_map(&sql, &[], |r: &frankensqlite::Row| r.get_typed(0))
+            .expect("count remote source rows");
+        assert_eq!(count, 1);
+
+        close_franken_cli_read_db(conn, &db_path, "legacy source test").expect("close db");
+    }
+
+    #[test]
+    fn source_filter_helpers_match_trimmed_local_source_id_in_db() {
+        let (_tmp, db_path, _shared_path) = make_legacy_local_db();
+        let conn = open_franken_analytics_db(&None, Some(&db_path)).expect("open analytics db");
+        conn.execute("UPDATE conversations SET source_id = '  local  ' WHERE id = 1")
+            .expect("update legacy local source_id");
+
+        let (where_sql, param) =
+            source_filter_where_clause(Some(&SourceFilter::SourceId("local".to_string())));
+        let sql = format!("SELECT COUNT(*) FROM conversations c{where_sql}");
+        let params_vec = vec![param.expect("source id param").into()];
+        let count: i64 = conn
+            .query_row_map(&sql, &params_vec, |r: &frankensqlite::Row| r.get_typed(0))
+            .expect("count trimmed local source rows");
+        assert_eq!(count, 1);
+
+        let (where_sql, param) = source_filter_where_clause(Some(&SourceFilter::Local));
+        assert!(param.is_none());
+        let sql = format!("SELECT COUNT(*) FROM conversations c{where_sql}");
+        let count: i64 = conn
+            .query_row_map(&sql, &[], |r: &frankensqlite::Row| r.get_typed(0))
+            .expect("count local source rows");
+        assert_eq!(count, 1);
+
+        close_franken_cli_read_db(conn, &db_path, "legacy source test").expect("close db");
+    }
+
+    #[test]
+    fn find_context_source_conversation_treats_null_source_as_local() {
+        let (_tmp, db_path, shared_path) = make_legacy_local_db();
+        let conn = open_franken_analytics_db(&None, Some(&db_path)).expect("open analytics db");
+
+        let row =
+            find_context_source_conversation(&conn, &shared_path.to_string_lossy(), Some("local"))
+                .expect("legacy local row should resolve");
+        assert_eq!(row.4, "Local Session");
+        assert_eq!(row.6, "local");
+
+        close_franken_cli_read_db(conn, &db_path, "legacy source test").expect("close db");
+    }
+
+    #[test]
+    fn find_context_source_conversation_normalizes_trimmed_source_id() {
+        let (_tmp, db_path, shared_path) = make_legacy_local_db();
+        let conn = open_franken_analytics_db(&None, Some(&db_path)).expect("open analytics db");
+
+        let row = find_context_source_conversation(
+            &conn,
+            &shared_path.to_string_lossy(),
+            Some("  LOCAL  "),
+        )
+        .expect("trimmed local source should resolve");
+        assert_eq!(row.4, "Local Session");
+        assert_eq!(row.6, "local");
+
+        close_franken_cli_read_db(conn, &db_path, "legacy source test").expect("close db");
+    }
+
+    #[test]
+    fn find_context_source_conversation_matches_blank_remote_source_id_via_origin_host() {
+        let (_tmp, db_path, shared_path) = make_legacy_local_db();
+        let conn = open_franken_analytics_db(&None, Some(&db_path)).expect("open analytics db");
+        conn.execute("UPDATE conversations SET source_id = '   ' WHERE id = 2")
+            .expect("blank remote source_id");
+
+        let row = find_context_source_conversation(
+            &conn,
+            &shared_path.to_string_lossy(),
+            Some("user@laptop"),
+        )
+        .expect("blank remote source should resolve via origin host");
+        assert_eq!(row.4, "Remote Session");
+        assert_eq!(row.6, "user@laptop");
+
+        close_franken_cli_read_db(conn, &db_path, "legacy source test").expect("close db");
+    }
+
+    #[test]
+    fn find_context_source_conversation_matches_trimmed_local_source_id_in_db() {
+        let (_tmp, db_path, shared_path) = make_legacy_local_db();
+        let conn = open_franken_analytics_db(&None, Some(&db_path)).expect("open analytics db");
+        conn.execute("UPDATE conversations SET source_id = '  local  ' WHERE id = 1")
+            .expect("update legacy local source_id");
+
+        let row =
+            find_context_source_conversation(&conn, &shared_path.to_string_lossy(), Some("local"))
+                .expect("trimmed local source stored in db should resolve");
+        assert_eq!(row.4, "Local Session");
+        assert_eq!(row.6, "local");
+
+        let preferred =
+            find_context_source_conversation(&conn, &shared_path.to_string_lossy(), None)
+                .expect("path-only lookup should still prefer normalized local row");
+        assert_eq!(preferred.4, "Local Session");
+        assert_eq!(preferred.6, "local");
+
+        close_franken_cli_read_db(conn, &db_path, "legacy source test").expect("close db");
+    }
+
+    #[test]
+    fn context_and_stats_queries_surface_null_source_id_as_local() {
+        let (_tmp, db_path, shared_path) = make_legacy_local_db();
+        let conn = open_franken_analytics_db(&None, Some(&db_path)).expect("open analytics db");
+
+        let selected =
+            find_context_source_conversation(&conn, &shared_path.to_string_lossy(), None)
+                .expect("shared path should resolve");
+        assert_eq!(selected.4, "Local Session");
+        assert_eq!(selected.6, "local");
+
+        let normalized_source_sql = normalized_source_id_sql_expr("c.source_id");
+        let source_sql = format!(
+            "SELECT {normalized_source_sql} as source_id, COUNT(DISTINCT c.id)
+             FROM conversations c
+             GROUP BY {normalized_source_sql}
+             ORDER BY source_id"
+        );
+        let source_rows: Vec<(String, i64)> = conn
+            .query_map_collect(&source_sql, &[], |r: &frankensqlite::Row| {
+                Ok((r.get_typed(0)?, r.get_typed(1)?))
+            })
+            .expect("query source rows");
+        assert!(
+            source_rows
+                .iter()
+                .any(|(source_id, count)| source_id == "local" && *count == 1)
+        );
+        assert!(
+            source_rows
+                .iter()
+                .any(|(source_id, count)| source_id == "laptop" && *count == 1)
+        );
+
+        let timeline_rows: Vec<String> = conn
+            .query_map_collect(
+                "SELECT COALESCE(c.source_id, 'local')
+                 FROM conversations c
+                 JOIN agents a ON c.agent_id = a.id
+                 LEFT JOIN messages m ON m.conversation_id = c.id
+                 WHERE c.started_at >= ?1 AND c.started_at <= ?2
+                 GROUP BY c.id
+                 ORDER BY c.started_at DESC",
+                &[1_699_999_999_000_i64.into(), 1_700_000_200_000_i64.into()],
+                |r: &frankensqlite::Row| r.get_typed(0),
+            )
+            .expect("query timeline rows");
+        assert!(timeline_rows.iter().any(|source_id| source_id == "local"));
+
+        close_franken_cli_read_db(conn, &db_path, "legacy source test").expect("close db");
+    }
+
+    #[test]
+    fn stats_source_grouping_uses_origin_host_when_remote_source_id_blank() {
+        let (_tmp, db_path, _shared_path) = make_legacy_local_db();
+        let conn = open_franken_analytics_db(&None, Some(&db_path)).expect("open analytics db");
+        conn.execute("UPDATE conversations SET source_id = '   ' WHERE id = 2")
+            .expect("blank remote source_id");
+
+        let normalized_source_sql =
+            normalized_source_identity_sql_expr("c.source_id", "c.origin_host");
+        let source_sql = format!(
+            "SELECT {normalized_source_sql} as source_id, COUNT(DISTINCT c.id)
+             FROM conversations c
+             GROUP BY {normalized_source_sql}
+             ORDER BY source_id"
+        );
+        let source_rows: Vec<(String, i64)> = conn
+            .query_map_collect(&source_sql, &[], |r: &frankensqlite::Row| {
+                Ok((r.get_typed(0)?, r.get_typed(1)?))
+            })
+            .expect("query normalized source rows");
+
+        assert!(
+            source_rows
+                .iter()
+                .any(|(source_id, count)| source_id == "user@laptop" && *count == 1),
+            "expected blank remote source to group under origin host, got: {source_rows:?}"
+        );
+
+        close_franken_cli_read_db(conn, &db_path, "legacy source test").expect("close db");
+    }
+
+    #[test]
+    fn stats_source_grouping_normalizes_trimmed_local_source_id_in_db() {
+        let (_tmp, db_path, _shared_path) = make_legacy_local_db();
+        let conn = open_franken_analytics_db(&None, Some(&db_path)).expect("open analytics db");
+        conn.execute("UPDATE conversations SET source_id = '  local  ' WHERE id = 1")
+            .expect("update legacy local source_id");
+
+        let normalized_source_sql = normalized_source_id_sql_expr("c.source_id");
+        let source_sql = format!(
+            "SELECT {normalized_source_sql} as source_id, COUNT(DISTINCT c.id)
+             FROM conversations c
+             GROUP BY {normalized_source_sql}
+             ORDER BY source_id"
+        );
+        let source_rows: Vec<(String, i64)> = conn
+            .query_map_collect(&source_sql, &[], |r: &frankensqlite::Row| {
+                Ok((r.get_typed(0)?, r.get_typed(1)?))
+            })
+            .expect("query normalized source rows");
+
+        assert!(
+            source_rows
+                .iter()
+                .any(|(source_id, count)| source_id == "local" && *count == 1),
+            "expected trimmed local source to group under local, got: {source_rows:?}"
+        );
+        assert!(
+            !source_rows
+                .iter()
+                .any(|(source_id, _)| source_id.trim() != source_id || source_id.is_empty()),
+            "expected no raw trimmed/blank source ids, got: {source_rows:?}"
+        );
+
+        close_franken_cli_read_db(conn, &db_path, "legacy source test").expect("close db");
+    }
+}
+
+#[cfg(test)]
 mod indexed_conversation_fallback_tests {
     use super::*;
     use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
+    use crate::sources::provenance::{Source, SourceKind};
     use crate::storage::sqlite::SqliteStorage;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    #[test]
+    fn prefer_direct_helpers_allow_explicit_local_source() {
+        let tmp = TempDir::new().expect("temp dir");
+        let jsonl = tmp.path().join("session.jsonl");
+        let markdown = tmp.path().join("session.md");
+        std::fs::write(&jsonl, "{\"role\":\"user\",\"content\":\"hello\"}\n").expect("write jsonl");
+        std::fs::write(&markdown, "# heading\nbody\n").expect("write markdown");
+
+        assert!(prefers_direct_view_file(
+            &jsonl,
+            Some(crate::sources::provenance::LOCAL_SOURCE_ID)
+        ));
+        assert!(prefers_direct_view_file(
+            &markdown,
+            Some(crate::sources::provenance::LOCAL_SOURCE_ID)
+        ));
+        assert!(prefers_direct_jsonl_file(
+            &jsonl,
+            Some(crate::sources::provenance::LOCAL_SOURCE_ID)
+        ));
+    }
+
+    #[test]
+    fn prefer_direct_helpers_allow_trimmed_explicit_local_source() {
+        let tmp = TempDir::new().expect("temp dir");
+        let jsonl = tmp.path().join("session.jsonl");
+        let markdown = tmp.path().join("session.md");
+        std::fs::write(&jsonl, "{\"role\":\"user\",\"content\":\"hello\"}\n").expect("write jsonl");
+        std::fs::write(&markdown, "# heading\nbody\n").expect("write markdown");
+
+        assert!(prefers_direct_view_file(&jsonl, Some("  local  ")));
+        assert!(prefers_direct_view_file(&markdown, Some("\tlocal\n")));
+        assert!(prefers_direct_jsonl_file(&jsonl, Some("  LOCAL  ")));
+        assert!(followup_source_is_local(Some("  local  ")));
+        assert_eq!(
+            canonical_followup_source_id(Some("\tLOCAL\n")).as_deref(),
+            Some(crate::sources::provenance::LOCAL_SOURCE_ID)
+        );
+    }
+
+    #[test]
+    fn validate_followup_source_id_rejects_trimmed_ambiguous_keywords() {
+        for input in ["  ", "  all  ", "\tREMOTE\n"] {
+            let err = validate_followup_source_id(input, "cass view")
+                .expect_err("ambiguous keyword should be rejected");
+            assert_eq!(err.kind, "ambiguous-source");
+            assert!(err.message.contains(input));
+        }
+    }
+
+    #[test]
+    fn prefer_direct_helpers_reject_non_local_sources() {
+        let tmp = TempDir::new().expect("temp dir");
+        let jsonl = tmp.path().join("session.jsonl");
+        let markdown = tmp.path().join("session.md");
+        std::fs::write(&jsonl, "{\"role\":\"user\",\"content\":\"hello\"}\n").expect("write jsonl");
+        std::fs::write(&markdown, "# heading\nbody\n").expect("write markdown");
+
+        assert!(!prefers_direct_view_file(&jsonl, Some("work-laptop")));
+        assert!(!prefers_direct_view_file(&markdown, Some("work-laptop")));
+        assert!(!prefers_direct_jsonl_file(&jsonl, Some("work-laptop")));
+    }
 
     #[test]
     fn db_fallback_loads_virtual_source_path_and_converts_messages() {
@@ -14949,6 +15860,18 @@ mod indexed_conversation_fallback_tests {
             kind: AgentKind::Cli,
         };
         let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+        storage
+            .upsert_source(&Source {
+                id: "work-laptop".to_string(),
+                kind: SourceKind::Ssh,
+                host_label: Some("work-laptop".to_string()),
+                machine_id: None,
+                platform: None,
+                config_json: None,
+                created_at: None,
+                updated_at: None,
+            })
+            .expect("insert remote source");
         let synthetic_path = PathBuf::from("/same/path/session.jsonl");
 
         let remote = Conversation {
@@ -15009,7 +15932,10 @@ mod indexed_conversation_fallback_tests {
 
         let loaded = try_load_indexed_conversation_from_db(&synthetic_path, &db_path)
             .expect("conversation should load via db fallback");
-        assert_eq!(loaded.convo.source_id, crate::sources::provenance::LOCAL_SOURCE_ID);
+        assert_eq!(
+            loaded.convo.source_id,
+            crate::sources::provenance::LOCAL_SOURCE_ID
+        );
         assert_eq!(loaded.convo.external_id.as_deref(), Some("local-123"));
         assert_eq!(loaded.messages[0].content, "local body");
     }
@@ -15030,6 +15956,18 @@ mod indexed_conversation_fallback_tests {
             kind: AgentKind::Cli,
         };
         let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+        storage
+            .upsert_source(&Source {
+                id: "work-laptop".to_string(),
+                kind: SourceKind::Ssh,
+                host_label: Some("work-laptop".to_string()),
+                machine_id: None,
+                platform: None,
+                config_json: None,
+                created_at: None,
+                updated_at: None,
+            })
+            .expect("insert remote source");
         let synthetic_path = PathBuf::from("/same/path/remote-only.jsonl");
 
         let remote = Conversation {
@@ -15083,6 +16021,18 @@ mod indexed_conversation_fallback_tests {
             kind: AgentKind::Cli,
         };
         let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+        storage
+            .upsert_source(&Source {
+                id: "work-laptop".to_string(),
+                kind: SourceKind::Ssh,
+                host_label: Some("work-laptop".to_string()),
+                machine_id: None,
+                platform: None,
+                config_json: None,
+                created_at: None,
+                updated_at: None,
+            })
+            .expect("insert remote source");
         let synthetic_path = PathBuf::from("/same/path/export.jsonl");
 
         let local = Conversation {
@@ -15157,11 +16107,1086 @@ mod indexed_conversation_fallback_tests {
         assert!(markdown.contains("remote export body"));
         assert!(!markdown.contains("local export body"));
     }
+
+    #[test]
+    fn run_export_prefers_local_jsonl_file_when_no_source_is_given() {
+        let tmp = TempDir::new().expect("temp dir");
+        let db_path = tmp.path().join("agent_search.db");
+        let storage = SqliteStorage::open(&db_path).expect("open sqlite");
+
+        let agent = Agent {
+            id: None,
+            slug: "claude_code".to_string(),
+            name: "Claude Code".to_string(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+
+        let session_path = tmp.path().join("session.jsonl");
+        std::fs::write(
+            &session_path,
+            br#"{"role":"user","content":"local first"}
+{"role":"assistant","content":"local second"}
+"#,
+        )
+        .expect("write jsonl");
+
+        let conversation = Conversation {
+            id: None,
+            agent_slug: "claude_code".to_string(),
+            workspace: Some(PathBuf::from("/tmp/ws")),
+            external_id: Some("stale-index".to_string()),
+            title: Some("Indexed Session".to_string()),
+            source_path: session_path.clone(),
+            started_at: Some(1_733_000_000_000),
+            ended_at: Some(1_733_000_010_000),
+            approx_tokens: None,
+            metadata_json: serde_json::json!({}),
+            messages: vec![Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: Some("me".to_string()),
+                created_at: Some(1_733_000_000_000),
+                content: "indexed only line".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            }],
+            source_id: "local".to_string(),
+            origin_host: None,
+        };
+        storage
+            .insert_conversation_tree(agent_id, None, &conversation)
+            .expect("insert conversation");
+
+        let output_path = tmp.path().join("export.md");
+        run_export(
+            &session_path,
+            Some(db_path),
+            None,
+            ConvExportFormat::Markdown,
+            Some(output_path.as_path()),
+            false,
+            true,
+        )
+        .expect("export should prefer the local JSONL file over stale indexed content");
+
+        let markdown = std::fs::read_to_string(&output_path).expect("read markdown");
+        assert!(markdown.contains("local second"));
+        assert!(!markdown.contains("indexed only line"));
+        assert!(markdown.contains("# Indexed Session"));
+        assert!(!markdown.contains("# local first"));
+    }
+
+    #[test]
+    fn run_export_html_prefers_local_jsonl_file_when_no_source_is_given() {
+        let tmp = TempDir::new().expect("temp dir");
+        let db_path = tmp.path().join("agent_search.db");
+        let storage = SqliteStorage::open(&db_path).expect("open sqlite");
+
+        let agent = Agent {
+            id: None,
+            slug: "claude_code".to_string(),
+            name: "Claude Code".to_string(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+
+        let session_path = tmp.path().join("session.jsonl");
+        std::fs::write(
+            &session_path,
+            br#"{"role":"user","content":"local first"}
+{"role":"assistant","content":"local second"}
+"#,
+        )
+        .expect("write jsonl");
+
+        let conversation = Conversation {
+            id: None,
+            agent_slug: "claude_code".to_string(),
+            workspace: Some(PathBuf::from("/tmp/ws")),
+            external_id: Some("stale-index".to_string()),
+            title: Some("Indexed Session".to_string()),
+            source_path: session_path.clone(),
+            started_at: Some(1_733_000_000_000),
+            ended_at: Some(1_733_000_010_000),
+            approx_tokens: None,
+            metadata_json: serde_json::json!({}),
+            messages: vec![Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: Some("me".to_string()),
+                created_at: Some(1_733_000_000_000),
+                content: "indexed only line".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            }],
+            source_id: "local".to_string(),
+            origin_host: None,
+        };
+        storage
+            .insert_conversation_tree(agent_id, None, &conversation)
+            .expect("insert conversation");
+
+        let output_dir = tmp.path().join("html-out");
+        std::fs::create_dir_all(&output_dir).expect("mkdir html-out");
+        run_export_html(
+            &session_path,
+            Some(db_path),
+            None,
+            Some(output_dir.as_path()),
+            Some("export.html"),
+            false,
+            None,
+            false,
+            false,
+            true,
+            true,
+            false,
+            "system",
+            false,
+            false,
+            false,
+            Some(RobotFormat::Json),
+        )
+        .expect("html export should prefer the local JSONL file over stale indexed content");
+
+        let html_path = output_dir.join("export.html");
+        let html = std::fs::read_to_string(&html_path).expect("read html");
+        assert!(html.contains("local second"));
+        assert!(!html.contains("indexed only line"));
+        assert!(html.contains("Claude"));
+        assert!(html.contains("ws"));
+    }
+
+    #[test]
+    fn run_export_html_infers_metadata_for_local_jsonl_without_index() {
+        let tmp = TempDir::new().expect("temp dir");
+        let db_path = tmp.path().join("missing.db");
+        let session_path = tmp
+            .path()
+            .join(".claude")
+            .join("projects")
+            .join("demo")
+            .join("session.jsonl");
+        std::fs::create_dir_all(session_path.parent().expect("session parent")).expect("mkdirs");
+        std::fs::write(
+            &session_path,
+            br#"{"role":"user","content":"local first"}
+{"role":"assistant","content":"local second"}
+"#,
+        )
+        .expect("write jsonl");
+
+        let output_dir = tmp.path().join("html-out");
+        std::fs::create_dir_all(&output_dir).expect("mkdir html-out");
+        run_export_html(
+            &session_path,
+            Some(db_path),
+            None,
+            Some(output_dir.as_path()),
+            Some("export.html"),
+            false,
+            None,
+            false,
+            false,
+            true,
+            true,
+            false,
+            "system",
+            false,
+            false,
+            false,
+            Some(RobotFormat::Json),
+        )
+        .expect(
+            "html export should infer metadata from the local session path when no index exists",
+        );
+
+        let html_path = output_dir.join("export.html");
+        let html = std::fs::read_to_string(&html_path).expect("read html");
+        assert!(html.contains("Claude"));
+        assert!(html.contains("demo"));
+        assert!(html.contains("local second"));
+    }
+
+    #[test]
+    fn run_export_html_infers_copilot_metadata_for_local_jsonl_without_index() {
+        let tmp = TempDir::new().expect("temp dir");
+        let db_path = tmp.path().join("missing.db");
+        let session_path = tmp
+            .path()
+            .join(".config")
+            .join("gh-copilot")
+            .join("sessions")
+            .join("session.jsonl");
+        std::fs::create_dir_all(session_path.parent().expect("session parent")).expect("mkdirs");
+        std::fs::write(
+            &session_path,
+            br#"{"role":"user","content":"copilot first"}
+{"role":"assistant","content":"copilot second"}
+"#,
+        )
+        .expect("write jsonl");
+
+        let output_dir = tmp.path().join("html-out");
+        std::fs::create_dir_all(&output_dir).expect("mkdir html-out");
+        run_export_html(
+            &session_path,
+            Some(db_path),
+            None,
+            Some(output_dir.as_path()),
+            Some("export.html"),
+            false,
+            None,
+            false,
+            false,
+            true,
+            true,
+            false,
+            "system",
+            false,
+            false,
+            false,
+            Some(RobotFormat::Json),
+        )
+        .expect("html export should infer copilot metadata from the local session path");
+
+        let html_path = output_dir.join("export.html");
+        let html = std::fs::read_to_string(&html_path).expect("read html");
+        assert!(html.contains("GitHub Copilot"));
+        assert!(html.contains("sessions"));
+        assert!(html.contains("copilot second"));
+    }
+
+    #[test]
+    fn run_view_prefers_local_jsonl_file_when_no_source_is_given() {
+        let tmp = TempDir::new().expect("temp dir");
+        let db_path = tmp.path().join("agent_search.db");
+        let storage = SqliteStorage::open(&db_path).expect("open sqlite");
+
+        let agent = Agent {
+            id: None,
+            slug: "claude_code".to_string(),
+            name: "Claude Code".to_string(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+
+        let session_path = tmp.path().join("session.jsonl");
+        std::fs::write(
+            &session_path,
+            br#"{"role":"user","content":"local first"}
+{"role":"assistant","content":"local second"}
+"#,
+        )
+        .expect("write jsonl");
+
+        let conversation = Conversation {
+            id: None,
+            agent_slug: "claude_code".to_string(),
+            workspace: Some(PathBuf::from("/tmp/ws")),
+            external_id: Some("stale-index".to_string()),
+            title: Some("Indexed Session".to_string()),
+            source_path: session_path.clone(),
+            started_at: Some(1_733_000_000_000),
+            ended_at: Some(1_733_000_010_000),
+            approx_tokens: None,
+            metadata_json: serde_json::json!({}),
+            messages: vec![Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: Some("me".to_string()),
+                created_at: Some(1_733_000_000_000),
+                content: "indexed only line".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            }],
+            source_id: "local".to_string(),
+            origin_host: None,
+        };
+        storage
+            .insert_conversation_tree(agent_id, None, &conversation)
+            .expect("insert conversation");
+
+        run_view(
+            &session_path,
+            Some(db_path),
+            None,
+            Some(2),
+            0,
+            Some(RobotFormat::Json),
+        )
+        .expect("view should prefer the local JSONL file over stale indexed content");
+    }
+
+    #[test]
+    fn run_view_prefers_local_markdown_file_when_no_source_is_given() {
+        let tmp = TempDir::new().expect("temp dir");
+        let db_path = tmp.path().join("agent_search.db");
+        let storage = SqliteStorage::open(&db_path).expect("open sqlite");
+
+        let agent = Agent {
+            id: None,
+            slug: "aider".to_string(),
+            name: "Aider".to_string(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+
+        let session_path = tmp.path().join("session.md");
+        std::fs::write(
+            &session_path,
+            "# local heading
+local second line
+",
+        )
+        .expect("write markdown");
+
+        let conversation = Conversation {
+            id: None,
+            agent_slug: "aider".to_string(),
+            workspace: Some(PathBuf::from("/tmp/ws")),
+            external_id: Some("stale-index".to_string()),
+            title: Some("Indexed Session".to_string()),
+            source_path: session_path.clone(),
+            started_at: Some(1_733_000_000_000),
+            ended_at: Some(1_733_000_010_000),
+            approx_tokens: None,
+            metadata_json: serde_json::json!({}),
+            messages: vec![Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: Some("me".to_string()),
+                created_at: Some(1_733_000_000_000),
+                content: "indexed only line".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            }],
+            source_id: "local".to_string(),
+            origin_host: None,
+        };
+        storage
+            .insert_conversation_tree(agent_id, None, &conversation)
+            .expect("insert conversation");
+
+        run_view(
+            &session_path,
+            Some(db_path),
+            None,
+            Some(2),
+            0,
+            Some(RobotFormat::Json),
+        )
+        .expect("view should prefer the local markdown file over stale indexed content");
+    }
+
+    #[test]
+    fn run_expand_prefers_local_jsonl_file_when_no_source_is_given() {
+        let tmp = TempDir::new().expect("temp dir");
+        let db_path = tmp.path().join("agent_search.db");
+        let storage = SqliteStorage::open(&db_path).expect("open sqlite");
+
+        let agent = Agent {
+            id: None,
+            slug: "claude_code".to_string(),
+            name: "Claude Code".to_string(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+
+        let session_path = tmp.path().join("session.jsonl");
+        std::fs::write(
+            &session_path,
+            br#"{"role":"user","content":"local first"}
+{"role":"assistant","content":"local second"}
+"#,
+        )
+        .expect("write jsonl");
+
+        let conversation = Conversation {
+            id: None,
+            agent_slug: "claude_code".to_string(),
+            workspace: Some(PathBuf::from("/tmp/ws")),
+            external_id: Some("stale-index".to_string()),
+            title: Some("Indexed Session".to_string()),
+            source_path: session_path.clone(),
+            started_at: Some(1_733_000_000_000),
+            ended_at: Some(1_733_000_010_000),
+            approx_tokens: None,
+            metadata_json: serde_json::json!({}),
+            messages: vec![Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: Some("me".to_string()),
+                created_at: Some(1_733_000_000_000),
+                content: "indexed only line".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            }],
+            source_id: "local".to_string(),
+            origin_host: None,
+        };
+        storage
+            .insert_conversation_tree(agent_id, None, &conversation)
+            .expect("insert conversation");
+
+        run_expand(
+            &session_path,
+            Some(db_path),
+            None,
+            2,
+            0,
+            Some(RobotFormat::Json),
+        )
+        .expect("expand should prefer the local JSONL file over stale indexed content");
+    }
+
+    #[test]
+    fn run_expand_prefers_indexed_conversation_for_local_markdown_file() {
+        let tmp = TempDir::new().expect("temp dir");
+        let db_path = tmp.path().join("agent_search.db");
+        let storage = SqliteStorage::open(&db_path).expect("open sqlite");
+
+        let agent = Agent {
+            id: None,
+            slug: "aider".to_string(),
+            name: "Aider".to_string(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+
+        let session_path = tmp.path().join("session.md");
+        std::fs::write(
+            &session_path,
+            "# raw aider markdown
+
+This is not JSONL.
+",
+        )
+        .expect("write markdown");
+
+        let conversation = Conversation {
+            id: None,
+            agent_slug: "aider".to_string(),
+            workspace: Some(PathBuf::from("/tmp/ws")),
+            external_id: Some("indexed-md".to_string()),
+            title: Some("Indexed Session".to_string()),
+            source_path: session_path.clone(),
+            started_at: Some(1_733_000_000_000),
+            ended_at: Some(1_733_000_010_000),
+            approx_tokens: None,
+            metadata_json: serde_json::json!({}),
+            messages: vec![
+                Message {
+                    id: None,
+                    idx: 0,
+                    role: MessageRole::User,
+                    author: Some("me".to_string()),
+                    created_at: Some(1_733_000_000_000),
+                    content: "indexed first line".to_string(),
+                    extra_json: serde_json::json!({}),
+                    snippets: Vec::new(),
+                },
+                Message {
+                    id: None,
+                    idx: 1,
+                    role: MessageRole::Agent,
+                    author: Some("assistant".to_string()),
+                    created_at: Some(1_733_000_001_000),
+                    content: "indexed second line".to_string(),
+                    extra_json: serde_json::json!({}),
+                    snippets: Vec::new(),
+                },
+            ],
+            source_id: "local".to_string(),
+            origin_host: None,
+        };
+        storage
+            .insert_conversation_tree(agent_id, None, &conversation)
+            .expect("insert conversation");
+
+        run_expand(
+            &session_path,
+            Some(db_path),
+            None,
+            2,
+            0,
+            Some(RobotFormat::Json),
+        )
+        .expect("expand should use indexed conversation data for local markdown-backed sessions");
+    }
+
+    #[test]
+    fn run_expand_requires_indexed_conversation_for_local_markdown_file() {
+        let tmp = TempDir::new().expect("temp dir");
+        let db_path = tmp.path().join("missing.db");
+        let session_path = tmp.path().join("session.md");
+        std::fs::write(
+            &session_path,
+            "# raw aider markdown
+
+This is not JSONL.
+",
+        )
+        .expect("write markdown");
+
+        let err = run_expand(
+            &session_path,
+            Some(db_path),
+            None,
+            1,
+            0,
+            Some(RobotFormat::Json),
+        )
+        .expect_err(
+            "expand should require the indexed conversation for local markdown-backed sessions",
+        );
+
+        assert_eq!(err.kind, "indexed-session-required");
+    }
+
+    #[test]
+    fn run_export_falls_back_to_indexed_conversation_when_local_jsonl_is_invalid() {
+        let tmp = TempDir::new().expect("temp dir");
+        let db_path = tmp.path().join("agent_search.db");
+        let storage = SqliteStorage::open(&db_path).expect("open sqlite");
+
+        let agent = Agent {
+            id: None,
+            slug: "claude_code".to_string(),
+            name: "Claude Code".to_string(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+
+        let session_path = tmp.path().join("broken-session.jsonl");
+        std::fs::write(&session_path, b"this is not valid jsonl\n").expect("write invalid jsonl");
+
+        let conversation = Conversation {
+            id: None,
+            agent_slug: "claude_code".to_string(),
+            workspace: Some(PathBuf::from("/tmp/ws")),
+            external_id: Some("indexed-fallback".to_string()),
+            title: Some("Indexed Session".to_string()),
+            source_path: session_path.clone(),
+            started_at: Some(1_733_000_000_000),
+            ended_at: Some(1_733_000_010_000),
+            approx_tokens: None,
+            metadata_json: serde_json::json!({}),
+            messages: vec![Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: Some("me".to_string()),
+                created_at: Some(1_733_000_000_000),
+                content: "indexed markdown fallback".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            }],
+            source_id: "local".to_string(),
+            origin_host: None,
+        };
+        storage
+            .insert_conversation_tree(agent_id, None, &conversation)
+            .expect("insert conversation");
+
+        let output_path = tmp.path().join("export.md");
+        run_export(
+            &session_path,
+            Some(db_path),
+            None,
+            ConvExportFormat::Markdown,
+            Some(output_path.as_path()),
+            false,
+            true,
+        )
+        .expect("export should fall back to indexed content when the local JSONL is invalid");
+
+        let markdown = std::fs::read_to_string(&output_path).expect("read markdown");
+        assert!(markdown.contains("indexed markdown fallback"));
+    }
+
+    #[test]
+    fn run_export_keeps_index_for_local_markdown_files() {
+        let tmp = TempDir::new().expect("temp dir");
+        let db_path = tmp.path().join("agent_search.db");
+        let storage = SqliteStorage::open(&db_path).expect("open sqlite");
+
+        let agent = Agent {
+            id: None,
+            slug: "aider".to_string(),
+            name: "Aider".to_string(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+
+        let session_path = tmp.path().join("aider-session.md");
+        std::fs::write(
+            &session_path,
+            "# raw aider markdown
+
+This should stay behind the indexed export.
+",
+        )
+        .expect("write aider markdown");
+
+        let conversation = Conversation {
+            id: None,
+            agent_slug: "aider".to_string(),
+            workspace: Some(PathBuf::from("/tmp/ws")),
+            external_id: Some("aider-indexed".to_string()),
+            title: Some("Aider Session".to_string()),
+            source_path: session_path.clone(),
+            started_at: Some(1_733_000_000_000),
+            ended_at: Some(1_733_000_010_000),
+            approx_tokens: None,
+            metadata_json: serde_json::json!({}),
+            messages: vec![Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: Some("me".to_string()),
+                created_at: Some(1_733_000_000_000),
+                content: "indexed aider markdown body".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            }],
+            source_id: "local".to_string(),
+            origin_host: None,
+        };
+        storage
+            .insert_conversation_tree(agent_id, None, &conversation)
+            .expect("insert conversation");
+
+        let output_path = tmp.path().join("export.md");
+        run_export(
+            &session_path,
+            Some(db_path),
+            None,
+            ConvExportFormat::Markdown,
+            Some(output_path.as_path()),
+            false,
+            true,
+        )
+        .expect("export should prefer indexed content for local markdown-backed sessions");
+
+        let markdown = std::fs::read_to_string(&output_path).expect("read markdown");
+        assert!(markdown.contains("indexed aider markdown body"));
+        assert!(
+            !markdown.contains("This should stay behind the indexed export"),
+            "local raw markdown should not bypass indexed export rendering"
+        );
+    }
+
+    #[test]
+    fn run_export_html_falls_back_to_indexed_conversation_when_local_jsonl_is_invalid() {
+        let tmp = TempDir::new().expect("temp dir");
+        let db_path = tmp.path().join("agent_search.db");
+        let storage = SqliteStorage::open(&db_path).expect("open sqlite");
+
+        let agent = Agent {
+            id: None,
+            slug: "claude_code".to_string(),
+            name: "Claude Code".to_string(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+
+        let session_path = tmp.path().join("broken-session-html.jsonl");
+        std::fs::write(&session_path, b"this is not valid jsonl\n").expect("write invalid jsonl");
+
+        let conversation = Conversation {
+            id: None,
+            agent_slug: "claude_code".to_string(),
+            workspace: Some(PathBuf::from("/tmp/ws")),
+            external_id: Some("indexed-fallback".to_string()),
+            title: Some("Indexed Session".to_string()),
+            source_path: session_path.clone(),
+            started_at: Some(1_733_000_000_000),
+            ended_at: Some(1_733_000_010_000),
+            approx_tokens: None,
+            metadata_json: serde_json::json!({}),
+            messages: vec![Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: Some("me".to_string()),
+                created_at: Some(1_733_000_000_000),
+                content: "indexed html fallback".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            }],
+            source_id: "local".to_string(),
+            origin_host: None,
+        };
+        storage
+            .insert_conversation_tree(agent_id, None, &conversation)
+            .expect("insert conversation");
+
+        let output_dir = tmp.path().join("html-out");
+        std::fs::create_dir_all(&output_dir).expect("mkdir html-out");
+        run_export_html(
+            &session_path,
+            Some(db_path),
+            None,
+            Some(output_dir.as_path()),
+            Some("export.html"),
+            false,
+            None,
+            false,
+            false,
+            true,
+            true,
+            false,
+            "system",
+            false,
+            false,
+            false,
+            Some(RobotFormat::Json),
+        )
+        .expect("html export should fall back to indexed content when the local JSONL is invalid");
+
+        let html_path = output_dir.join("export.html");
+        let html = std::fs::read_to_string(&html_path).expect("read html");
+        assert!(html.contains("indexed html fallback"));
+    }
+
+    #[test]
+    fn run_export_html_keeps_index_for_local_markdown_files() {
+        let tmp = TempDir::new().expect("temp dir");
+        let db_path = tmp.path().join("agent_search.db");
+        let storage = SqliteStorage::open(&db_path).expect("open sqlite");
+
+        let agent = Agent {
+            id: None,
+            slug: "aider".to_string(),
+            name: "Aider".to_string(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+
+        let session_path = tmp.path().join("aider-session-html.md");
+        std::fs::write(
+            &session_path,
+            "# raw aider markdown
+
+This should stay behind the indexed html export.
+",
+        )
+        .expect("write aider markdown");
+
+        let conversation = Conversation {
+            id: None,
+            agent_slug: "aider".to_string(),
+            workspace: Some(PathBuf::from("/tmp/ws")),
+            external_id: Some("aider-indexed-html".to_string()),
+            title: Some("Aider Session".to_string()),
+            source_path: session_path.clone(),
+            started_at: Some(1_733_000_000_000),
+            ended_at: Some(1_733_000_010_000),
+            approx_tokens: None,
+            metadata_json: serde_json::json!({}),
+            messages: vec![Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: Some("me".to_string()),
+                created_at: Some(1_733_000_000_000),
+                content: "indexed aider html body".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            }],
+            source_id: "local".to_string(),
+            origin_host: None,
+        };
+        storage
+            .insert_conversation_tree(agent_id, None, &conversation)
+            .expect("insert conversation");
+
+        let output_dir = tmp.path().join("html-out");
+        std::fs::create_dir_all(&output_dir).expect("mkdir html-out");
+        run_export_html(
+            &session_path,
+            Some(db_path),
+            None,
+            Some(output_dir.as_path()),
+            Some("export.html"),
+            false,
+            None,
+            false,
+            false,
+            true,
+            true,
+            false,
+            "system",
+            false,
+            false,
+            false,
+            Some(RobotFormat::Json),
+        )
+        .expect("html export should prefer indexed content for local markdown-backed sessions");
+
+        let html_path = output_dir.join("export.html");
+        let html = std::fs::read_to_string(&html_path).expect("read html");
+        assert!(html.contains("indexed aider html body"));
+        assert!(
+            !html.contains("This should stay behind the indexed html export"),
+            "local raw markdown should not bypass indexed html export rendering"
+        );
+    }
+
+    #[test]
+    fn run_view_falls_back_to_indexed_conversation_when_local_jsonl_is_unreadable() {
+        let tmp = TempDir::new().expect("temp dir");
+        let db_path = tmp.path().join("agent_search.db");
+        let storage = SqliteStorage::open(&db_path).expect("open sqlite");
+
+        let agent = Agent {
+            id: None,
+            slug: "claude_code".to_string(),
+            name: "Claude Code".to_string(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+
+        let session_path = tmp.path().join("unreadable-session.jsonl");
+        std::fs::write(&session_path, [0xff, 0xfe, 0xfd]).expect("write invalid utf8 jsonl");
+
+        let conversation = Conversation {
+            id: None,
+            agent_slug: "claude_code".to_string(),
+            workspace: Some(PathBuf::from("/tmp/ws")),
+            external_id: Some("indexed-fallback".to_string()),
+            title: Some("Indexed Session".to_string()),
+            source_path: session_path.clone(),
+            started_at: Some(1_733_000_000_000),
+            ended_at: Some(1_733_000_010_000),
+            approx_tokens: None,
+            metadata_json: serde_json::json!({}),
+            messages: vec![Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: Some("me".to_string()),
+                created_at: Some(1_733_000_000_000),
+                content: "indexed view fallback".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            }],
+            source_id: "local".to_string(),
+            origin_host: None,
+        };
+        storage
+            .insert_conversation_tree(agent_id, None, &conversation)
+            .expect("insert conversation");
+
+        run_view(
+            &session_path,
+            Some(db_path),
+            None,
+            Some(1),
+            0,
+            Some(RobotFormat::Json),
+        )
+        .expect("view should fall back to indexed content when the local JSONL cannot be read");
+    }
+
+    #[test]
+    fn run_expand_falls_back_to_indexed_conversation_when_local_jsonl_is_unreadable() {
+        let tmp = TempDir::new().expect("temp dir");
+        let db_path = tmp.path().join("agent_search.db");
+        let storage = SqliteStorage::open(&db_path).expect("open sqlite");
+
+        let agent = Agent {
+            id: None,
+            slug: "claude_code".to_string(),
+            name: "Claude Code".to_string(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+
+        let session_path = tmp.path().join("unreadable-expand.jsonl");
+        std::fs::write(&session_path, [0xff, 0xfe, 0xfd]).expect("write invalid utf8 jsonl");
+
+        let conversation = Conversation {
+            id: None,
+            agent_slug: "claude_code".to_string(),
+            workspace: Some(PathBuf::from("/tmp/ws")),
+            external_id: Some("indexed-fallback".to_string()),
+            title: Some("Indexed Session".to_string()),
+            source_path: session_path.clone(),
+            started_at: Some(1_733_000_000_000),
+            ended_at: Some(1_733_000_010_000),
+            approx_tokens: None,
+            metadata_json: serde_json::json!({}),
+            messages: vec![Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: Some("me".to_string()),
+                created_at: Some(1_733_000_000_000),
+                content: "indexed expand fallback".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            }],
+            source_id: "local".to_string(),
+            origin_host: None,
+        };
+        storage
+            .insert_conversation_tree(agent_id, None, &conversation)
+            .expect("insert conversation");
+
+        run_expand(
+            &session_path,
+            Some(db_path),
+            None,
+            1,
+            0,
+            Some(RobotFormat::Json),
+        )
+        .expect("expand should fall back to indexed content when the local JSONL cannot be read");
+    }
+
+    #[test]
+    fn run_view_prefers_indexed_conversation_over_local_backing_file() {
+        let tmp = TempDir::new().expect("temp dir");
+        let db_path = tmp.path().join("agent_search.db");
+        let storage = SqliteStorage::open(&db_path).expect("open sqlite");
+
+        let agent = Agent {
+            id: None,
+            slug: "cursor".to_string(),
+            name: "Cursor".to_string(),
+            version: None,
+            kind: AgentKind::VsCode,
+        };
+        let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+
+        let synthetic_path = tmp.path().join("Cursor/globalStorage/state.vscdb");
+        std::fs::create_dir_all(synthetic_path.parent().expect("parent")).expect("mkdirs");
+        std::fs::write(&synthetic_path, [0xff, 0xfe, 0xfd]).expect("write invalid backing file");
+
+        let conversation = Conversation {
+            id: None,
+            agent_slug: "cursor".to_string(),
+            workspace: Some(PathBuf::from("/tmp/ws")),
+            external_id: Some("composer-123".to_string()),
+            title: Some("Cursor synthetic path".to_string()),
+            source_path: synthetic_path.clone(),
+            started_at: Some(1_733_000_000_000),
+            ended_at: Some(1_733_000_010_000),
+            approx_tokens: None,
+            metadata_json: serde_json::json!({}),
+            messages: vec![Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: Some("me".to_string()),
+                created_at: Some(1_733_000_000_000),
+                content: "hello from cursor".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            }],
+            source_id: "local".to_string(),
+            origin_host: None,
+        };
+        storage
+            .insert_conversation_tree(agent_id, None, &conversation)
+            .expect("insert conversation");
+
+        run_view(
+            &synthetic_path,
+            Some(db_path),
+            None,
+            Some(1),
+            0,
+            Some(RobotFormat::Json),
+        )
+        .expect("view should prefer indexed conversation over unreadable backing file");
+    }
+
+    #[test]
+    fn run_expand_prefers_indexed_conversation_over_local_backing_file() {
+        let tmp = TempDir::new().expect("temp dir");
+        let db_path = tmp.path().join("agent_search.db");
+        let storage = SqliteStorage::open(&db_path).expect("open sqlite");
+
+        let agent = Agent {
+            id: None,
+            slug: "cursor".to_string(),
+            name: "Cursor".to_string(),
+            version: None,
+            kind: AgentKind::VsCode,
+        };
+        let agent_id = storage.ensure_agent(&agent).expect("ensure agent");
+
+        let synthetic_path = tmp.path().join("Cursor/globalStorage/state.vscdb");
+        std::fs::create_dir_all(synthetic_path.parent().expect("parent")).expect("mkdirs");
+        std::fs::write(&synthetic_path, [0xff, 0xfe, 0xfd]).expect("write invalid backing file");
+
+        let conversation = Conversation {
+            id: None,
+            agent_slug: "cursor".to_string(),
+            workspace: Some(PathBuf::from("/tmp/ws")),
+            external_id: Some("composer-123".to_string()),
+            title: Some("Cursor synthetic path".to_string()),
+            source_path: synthetic_path.clone(),
+            started_at: Some(1_733_000_000_000),
+            ended_at: Some(1_733_000_010_000),
+            approx_tokens: None,
+            metadata_json: serde_json::json!({}),
+            messages: vec![Message {
+                id: None,
+                idx: 0,
+                role: MessageRole::User,
+                author: Some("me".to_string()),
+                created_at: Some(1_733_000_000_000),
+                content: "hello from cursor".to_string(),
+                extra_json: serde_json::json!({}),
+                snippets: Vec::new(),
+            }],
+            source_id: "local".to_string(),
+            origin_host: None,
+        };
+        storage
+            .insert_conversation_tree(agent_id, None, &conversation)
+            .expect("insert conversation");
+
+        run_expand(
+            &synthetic_path,
+            Some(db_path),
+            None,
+            1,
+            0,
+            Some(RobotFormat::Json),
+        )
+        .expect("expand should prefer indexed conversation over unreadable backing file");
+    }
 }
 
 #[cfg(test)]
 mod robot_output_score_tests {
-    use super::{filter_hit_fields, projected_hit_field_value, safe_robot_score_value};
+    use super::{
+        filter_hit_fields, normalized_robot_hit_for_output, projected_hit_field_value,
+        safe_robot_score_value,
+    };
     use crate::search::query::{MatchType, SearchHit};
 
     fn test_hit(score: f32) -> SearchHit {
@@ -15170,6 +17195,7 @@ mod robot_output_score_tests {
             snippet: "Snippet".to_string(),
             content: "Content".to_string(),
             content_hash: 0,
+            conversation_id: None,
             score,
             source_path: "/tmp/session.jsonl".to_string(),
             agent: "codex".to_string(),
@@ -15216,6 +17242,50 @@ mod robot_output_score_tests {
                 "workspace_original": "/remote/workspace"
             })
         );
+    }
+
+    #[test]
+    fn projected_hit_field_value_normalizes_blank_local_source_id() {
+        let mut hit = test_hit(1.0);
+        hit.source_id = "   ".to_string();
+        hit.origin_kind = "local".to_string();
+
+        let projected = projected_hit_field_value(&hit, "source_id");
+        assert_eq!(projected, Some(serde_json::json!("local")));
+    }
+
+    #[test]
+    fn filter_hit_fields_normalizes_blank_local_source_id_in_full_output() {
+        let mut hit = test_hit(1.0);
+        hit.source_id = "   ".to_string();
+        hit.origin_kind = "local".to_string();
+        hit.origin_host = Some("   ".to_string());
+
+        let filtered = filter_hit_fields(&hit, &None);
+        assert_eq!(filtered["source_id"], serde_json::json!("local"));
+        assert!(filtered.get("origin_host").is_none());
+    }
+
+    #[test]
+    fn normalized_robot_hit_for_output_trims_remote_origin_host() {
+        let mut hit = test_hit(1.0);
+        hit.source_id = "work-laptop".to_string();
+        hit.origin_kind = "ssh".to_string();
+        hit.origin_host = Some("  laptop-01  ".to_string());
+
+        let normalized = normalized_robot_hit_for_output(&hit);
+        assert_eq!(normalized.source_id, "work-laptop");
+        assert_eq!(normalized.origin_host.as_deref(), Some("laptop-01"));
+    }
+
+    #[test]
+    fn filter_hit_fields_normalizes_blank_local_origin_kind_in_full_output() {
+        let mut hit = test_hit(1.0);
+        hit.source_id = "local".to_string();
+        hit.origin_kind = "   ".to_string();
+
+        let filtered = filter_hit_fields(&hit, &None);
+        assert_eq!(filtered["origin_kind"], serde_json::json!("local"));
     }
 }
 
@@ -15931,58 +18001,54 @@ fn run_expand(
     context: usize,
     output_format: Option<RobotFormat>,
 ) -> CliResult<()> {
-    use std::fs::File;
-    use std::io::{BufRead, BufReader};
-
     if let Some(source_id) = source_id {
         validate_followup_source_id(source_id, "cass expand")?;
+    }
+    let normalized_source_id = canonical_followup_source_id(source_id);
+    let source_id = normalized_source_id.as_deref();
+    if line == 0 {
+        return Err(CliError {
+            code: 2,
+            kind: "invalid-line",
+            message: "Line numbers start at 1, not 0".to_string(),
+            hint: Some("Use -n 1 for the first line".to_string()),
+            retryable: false,
+        });
     }
 
     let db_path = db_override.unwrap_or_else(default_db_path);
     let indexed_view = try_load_indexed_conversation_from_db_with_source(path, &db_path, source_id);
-    let allow_direct_file = source_id.is_none()
-        || source_id == Some(crate::sources::provenance::LOCAL_SOURCE_ID);
+    let allow_direct_file = followup_source_is_local(source_id) || source_id.is_none();
 
-    let raw_lines: Vec<String> = if source_id.is_none() && path.exists() {
-        let file = File::open(path).map_err(|e| CliError {
-            code: 9,
-            kind: "file-open",
-            message: format!("Failed to open file: {e}"),
-            hint: None,
-            retryable: false,
-        })?;
-        let reader = BufReader::new(file);
-        reader
-            .lines()
-            .collect::<std::io::Result<Vec<_>>>()
-            .map_err(|e| CliError {
-                code: 9,
-                kind: "file-read",
-                message: format!("Failed to read file: {e}"),
-                hint: Some("The session file may be truncated or contain invalid UTF-8".into()),
-                retryable: false,
-            })?
-    } else if let Some(view) = indexed_view {
-        serialize_indexed_view_lines(&view)?
+    let prefer_direct_file = prefers_direct_jsonl_file(path, source_id);
+
+    let raw_lines: Vec<String> = if prefer_direct_file {
+        match read_followup_file_lines(path) {
+            Ok(lines) => lines,
+            Err(err) => {
+                if let Some(view) = indexed_view.as_ref() {
+                    serialize_indexed_view_lines(view)?
+                } else {
+                    return Err(err);
+                }
+            }
+        }
+    } else if let Some(view) = indexed_view.as_ref() {
+        serialize_indexed_view_lines(view)?
     } else if allow_direct_file && path.exists() {
-        let file = File::open(path).map_err(|e| CliError {
+        return Err(CliError {
             code: 9,
-            kind: "file-open",
-            message: format!("Failed to open file: {e}"),
-            hint: None,
+            kind: "indexed-session-required",
+            message: format!(
+                "Local expand for '{}' requires an indexed conversation or a JSONL session",
+                path.display()
+            ),
+            hint: Some(
+                "Run 'cass index --full' first, or expand directly from a JSONL session."
+                    .to_string(),
+            ),
             retryable: false,
-        })?;
-        let reader = BufReader::new(file);
-        reader
-            .lines()
-            .collect::<std::io::Result<Vec<_>>>()
-            .map_err(|e| CliError {
-                code: 9,
-                kind: "file-read",
-                message: format!("Failed to read file: {e}"),
-                hint: Some("The session file may be truncated or contain invalid UTF-8".into()),
-                retryable: false,
-            })?
+        });
     } else {
         return Err(CliError {
             code: 3,
@@ -16301,7 +18367,7 @@ fn run_timeline(
 
     let mut sql = String::from(
         "SELECT c.id, a.slug as agent, c.title, c.started_at, c.ended_at, c.source_path,
-                COUNT(m.id) as message_count, c.source_id, c.origin_host, s.kind as origin_kind
+                COUNT(m.id) as message_count, COALESCE(c.source_id, 'local') as source_id, c.origin_host, s.kind as origin_kind
          FROM conversations c
          JOIN agents a ON c.agent_id = a.id
          LEFT JOIN sources s ON c.source_id = s.id
@@ -16325,21 +18391,7 @@ fn run_timeline(
 
     // Source filter (P3.2)
     if let Some(ref filter) = source_filter {
-        match filter {
-            SourceFilter::All => {
-                // No filtering needed
-            }
-            SourceFilter::Local => {
-                sql.push_str(" AND c.source_id = 'local'");
-            }
-            SourceFilter::Remote => {
-                sql.push_str(" AND c.source_id != 'local'");
-            }
-            SourceFilter::SourceId(id) => {
-                sql.push_str(&format!(" AND c.source_id = ?{}", params.len() + 1));
-                params.push(id.clone().into());
-            }
-        }
+        append_source_filter_condition(&mut sql, &mut params, filter);
     }
 
     sql.push_str(" GROUP BY c.id ORDER BY c.started_at DESC");
@@ -16409,17 +18461,26 @@ fn run_timeline(
                         )| {
                             let duration_ms = ended.map(|e| e - started);
                             let duration_secs = duration_ms.map(|ms| ms / 1000);
-                            // Use "local" as default origin_kind if not in DB (backward compat)
-                            let kind = origin_kind.as_deref().unwrap_or("local");
+                            let normalized_source_id = normalized_provenance_source_id(
+                                source_id,
+                                origin_kind.as_deref(),
+                                origin_host.as_deref(),
+                            );
+                            let normalized_origin_kind = normalized_provenance_origin_kind(
+                                normalized_source_id.as_str(),
+                                origin_kind.as_deref(),
+                            );
+                            let normalized_origin_host =
+                                normalized_provenance_origin_host(origin_host.as_deref());
                             serde_json::json!({
                                 "id": id, "agent": agent, "title": title,
                                 "started_at": started, "ended_at": ended,
                                 "duration_seconds": duration_secs, "source_path": path,
                                 "message_count": msg_count,
                                 // Provenance fields (P3.5)
-                                "source_id": source_id,
-                                "origin_kind": kind,
-                                "origin_host": origin_host,
+                                "source_id": normalized_source_id,
+                                "origin_kind": normalized_origin_kind,
+                                "origin_host": normalized_origin_host,
                             })
                         },
                     )
@@ -16454,16 +18515,25 @@ fn run_timeline(
                         TimelineGrouping::Day => dt.format("%Y-%m-%d").to_string(),
                         _ => unreachable!(),
                     };
-                    // Use "local" as default origin_kind if not in DB (backward compat)
-                    let kind = origin_kind.as_deref().unwrap_or("local");
+                    let normalized_source_id = normalized_provenance_source_id(
+                        source_id,
+                        origin_kind.as_deref(),
+                        origin_host.as_deref(),
+                    );
+                    let normalized_origin_kind = normalized_provenance_origin_kind(
+                        normalized_source_id.as_str(),
+                        origin_kind.as_deref(),
+                    );
+                    let normalized_origin_host =
+                        normalized_provenance_origin_host(origin_host.as_deref());
                     groups.entry(key).or_default().push(serde_json::json!({
                         "id": id, "agent": agent, "title": title,
                         "started_at": started, "ended_at": ended,
                         "source_path": path, "message_count": msg_count,
                         // Provenance fields (P3.5)
-                        "source_id": source_id,
-                        "origin_kind": kind,
-                        "origin_host": origin_host,
+                        "source_id": normalized_source_id,
+                        "origin_kind": normalized_origin_kind,
+                        "origin_host": normalized_origin_host,
                     }));
                 }
                 serde_json::json!({
@@ -16509,7 +18579,7 @@ fn run_timeline(
         msg_count,
         source_id,
         origin_host,
-        _origin_kind,
+        origin_kind,
     ) in &sessions
     {
         let dt = Utc
@@ -16553,10 +18623,23 @@ fn run_timeline(
         };
 
         // Source badge for remote sessions (P3.2, P3.5)
-        // Prefer origin_host if available, otherwise use source_id
-        let source_badge = if source_id != "local" {
-            let label = origin_host.as_deref().unwrap_or(source_id.as_str());
-            format!(" [{}]", label)
+        // Prefer origin_host if available, otherwise use normalized source_id.
+        let normalized_source_id = normalized_provenance_source_id(
+            source_id,
+            origin_kind.as_deref(),
+            origin_host.as_deref(),
+        );
+        let source_badge = if normalized_source_id != crate::sources::provenance::LOCAL_SOURCE_ID {
+            let label = origin_host
+                .as_deref()
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .unwrap_or(normalized_source_id.as_str());
+            if label.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", label)
+            }
         } else {
             String::new()
         };
@@ -16623,9 +18706,9 @@ fn run_sources_command(cmd: SourcesCommand, cli: &Cli) -> CliResult<()> {
             timeout,
             resume,
             verbose,
-            json: _,
+            json,
         } => {
-            let structured_format = cli.robot_format.or_else(robot_format_from_env);
+            let structured_format = resolve_subcommand_structured_format(cli, json);
             let is_robot = structured_format.is_some();
             run_sources_setup(sources::setup::SetupOptions {
                 dry_run,
@@ -19306,6 +21389,91 @@ mod daemon_cli_config_tests {
                 assert_eq!(config.max_connections, 3);
                 assert_eq!(config.request_timeout, Duration::from_secs(9));
             },
+        );
+    }
+}
+
+#[cfg(test)]
+mod subcommand_robot_output_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn subcommand_json_flags_enable_robot_mode_and_structured_output() {
+        let cases = [
+            vec!["cass", "search", "needle", "--json"],
+            vec!["cass", "index", "--json"],
+            vec!["cass", "health", "--json"],
+            vec!["cass", "sessions", "--json"],
+            vec!["cass", "timeline", "--json"],
+            vec!["cass", "analytics", "status", "--json"],
+            vec![
+                "cass",
+                "pages",
+                "--export-only",
+                "/tmp/export",
+                "--dry-run",
+                "--json",
+            ],
+            vec!["cass", "export-html", "session.jsonl", "--json"],
+            vec!["cass", "sources", "setup", "--json"],
+        ];
+
+        for args in cases {
+            let cli = Cli::try_parse_from(args.clone()).expect("parse command with --json");
+            let command = cli.command.as_ref().expect("command");
+            assert!(
+                is_robot_mode(command, &cli),
+                "expected robot mode for args: {args:?}"
+            );
+
+            let format = match command {
+                Commands::Search { json, .. }
+                | Commands::Index { json, .. }
+                | Commands::Health { json, .. }
+                | Commands::Sessions { json, .. }
+                | Commands::Timeline { json, .. }
+                | Commands::Pages { json, .. }
+                | Commands::ExportHtml { json, .. } => {
+                    resolve_subcommand_structured_format(&cli, *json)
+                }
+                Commands::Analytics(
+                    AnalyticsCommand::Status { common }
+                    | AnalyticsCommand::Tokens { common, .. }
+                    | AnalyticsCommand::Tools { common, .. }
+                    | AnalyticsCommand::AnalyticsModels { common, .. }
+                    | AnalyticsCommand::Rebuild { common, .. }
+                    | AnalyticsCommand::Validate { common, .. },
+                ) => resolve_subcommand_structured_format(&cli, common.json),
+                Commands::Sources(SourcesCommand::Setup { json, .. }) => {
+                    resolve_subcommand_structured_format(&cli, *json)
+                }
+                other => panic!("unexpected command variant for args {args:?}: {other:?}"),
+            };
+
+            assert_eq!(
+                format,
+                Some(RobotFormat::Json),
+                "expected structured JSON output for args: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn global_robot_format_overrides_subcommand_json_format() {
+        let cli = Cli::try_parse_from(["cass", "--robot-format", "jsonl", "index", "--json"])
+            .expect("parse index command");
+        let command = cli.command.as_ref().expect("command");
+
+        let json = match command {
+            Commands::Index { json, .. } => *json,
+            other => panic!("expected index command, got {other:?}"),
+        };
+
+        assert!(is_robot_mode(command, &cli));
+        assert_eq!(
+            resolve_subcommand_structured_format(&cli, json),
+            Some(RobotFormat::Jsonl)
         );
     }
 }

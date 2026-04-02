@@ -954,6 +954,8 @@ pub struct SearchHit {
     pub content: String,
     #[serde(skip_serializing)]
     pub content_hash: u64,
+    #[serde(skip_serializing)]
+    pub conversation_id: Option<i64>,
     pub score: f32,
     pub source_path: String,
     pub agent: String,
@@ -1057,16 +1059,95 @@ pub(crate) struct ProgressiveSearchRequest<'a> {
 struct SearchHitKey {
     source_id: String,
     source_path: String,
+    conversation_id: Option<i64>,
+    title: String,
     line_number: Option<usize>,
     created_at: Option<i64>,
     content_hash: u64,
 }
 
+fn normalized_search_source_id_sql_expr(column: &str) -> String {
+    format!(
+        "CASE WHEN TRIM(COALESCE({column}, '')) = '' THEN '{local}' \
+         WHEN LOWER(TRIM(COALESCE({column}, ''))) = '{local}' THEN '{local}' \
+         ELSE TRIM(COALESCE({column}, '')) END",
+        local = crate::sources::provenance::LOCAL_SOURCE_ID,
+    )
+}
+
+fn normalize_search_source_filter_value(source_id: &str) -> String {
+    let trimmed = source_id.trim();
+    if trimmed.eq_ignore_ascii_case(crate::sources::provenance::LOCAL_SOURCE_ID) {
+        crate::sources::provenance::LOCAL_SOURCE_ID.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn normalized_search_hit_source_id_parts(
+    source_id: &str,
+    origin_kind: &str,
+    origin_host: Option<&str>,
+) -> String {
+    let trimmed_source_id = source_id.trim();
+    if !trimmed_source_id.is_empty() {
+        if trimmed_source_id.eq_ignore_ascii_case(crate::sources::provenance::LOCAL_SOURCE_ID) {
+            return crate::sources::provenance::LOCAL_SOURCE_ID.to_string();
+        }
+        return trimmed_source_id.to_string();
+    }
+
+    let trimmed_origin_kind = origin_kind.trim();
+    if trimmed_origin_kind.eq_ignore_ascii_case("ssh")
+        || trimmed_origin_kind.eq_ignore_ascii_case("remote")
+    {
+        return origin_host
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("remote")
+            .to_string();
+    }
+
+    crate::sources::provenance::LOCAL_SOURCE_ID.to_string()
+}
+
+fn normalized_search_hit_origin_kind(source_id: &str, origin_kind: Option<&str>) -> String {
+    if let Some(kind) = origin_kind.map(str::trim).filter(|value| !value.is_empty()) {
+        if kind.eq_ignore_ascii_case("local") {
+            return crate::sources::provenance::LOCAL_SOURCE_ID.to_string();
+        }
+        if kind.eq_ignore_ascii_case("ssh") || kind.eq_ignore_ascii_case("remote") {
+            return "remote".to_string();
+        }
+        return kind.to_ascii_lowercase();
+    }
+
+    if source_id == crate::sources::provenance::LOCAL_SOURCE_ID {
+        crate::sources::provenance::LOCAL_SOURCE_ID.to_string()
+    } else {
+        "remote".to_string()
+    }
+}
+
+fn normalized_search_hit_source_id(hit: &SearchHit) -> String {
+    normalized_search_hit_source_id_parts(
+        hit.source_id.as_str(),
+        hit.origin_kind.as_str(),
+        hit.origin_host.as_deref(),
+    )
+}
+
 impl SearchHitKey {
     fn from_hit(hit: &SearchHit) -> Self {
         Self {
-            source_id: hit.source_id.clone(),
+            source_id: normalized_search_hit_source_id(hit),
             source_path: hit.source_path.clone(),
+            conversation_id: hit.conversation_id,
+            title: if hit.conversation_id.is_some() {
+                String::new()
+            } else {
+                hit.title.trim().to_string()
+            },
             line_number: hit.line_number,
             created_at: hit.created_at,
             content_hash: hit.content_hash,
@@ -1079,6 +1160,8 @@ impl Ord for SearchHitKey {
         self.source_id
             .cmp(&other.source_id)
             .then_with(|| self.source_path.cmp(&other.source_path))
+            .then_with(|| self.conversation_id.cmp(&other.conversation_id))
+            .then_with(|| self.title.cmp(&other.title))
             .then_with(|| self.line_number.cmp(&other.line_number))
             .then_with(|| self.created_at.cmp(&other.created_at))
             .then_with(|| self.content_hash.cmp(&other.content_hash))
@@ -1166,9 +1249,13 @@ fn search_hit_key_doc_id(key: &SearchHitKey) -> String {
     // Unit Separator (0x1F) is extremely unlikely in filesystem paths/ids.
     let sep = '\u{1f}';
     format!(
-        "{}{sep}{}{sep}{}{sep}{}{sep}{}",
+        "{}{sep}{}{sep}{}{sep}{}{sep}{}{sep}{}{sep}{}",
         key.source_id,
         key.source_path,
+        key.conversation_id
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        key.title,
         key.line_number.map(|v| v.to_string()).unwrap_or_default(),
         key.created_at.map(|v| v.to_string()).unwrap_or_default(),
         key.content_hash,
@@ -1303,20 +1390,55 @@ pub fn rrf_fuse_hits(
         &FsRrfConfig::default(),
     );
 
-    // Dedup by (source_id, source_path, content_hash) while preserving RRF order.
+    // Dedup by (source_id, source_path, conversation_id-or-title, line_number,
+    // created_at, content_hash) while preserving RRF order. When a real
+    // conversation_id is present, it is the authoritative session key and title
+    // drift must not split the same conversation.
+    #[derive(Clone, Copy)]
+    struct CompatSlot {
+        index: usize,
+        conversation_id: Option<i64>,
+        ambiguous: bool,
+    }
+
     let mut source_ids: HashMap<String, u32> = HashMap::new();
     let mut path_ids: HashMap<String, u32> = HashMap::new();
+    let mut title_ids: HashMap<String, u32> = HashMap::new();
     let mut next_source_id: u32 = 0;
     let mut next_path_id: u32 = 0;
-    let mut seen_content: HashSet<(u32, u32, u64)> = HashSet::with_capacity(fused.len());
-    let mut unique_hits = Vec::with_capacity(fused.len());
+    let mut next_title_id: u32 = 0;
+    let mut exact_seen: HashMap<
+        (
+            u32,
+            u32,
+            Option<i64>,
+            Option<u32>,
+            Option<usize>,
+            Option<i64>,
+            u64,
+        ),
+        usize,
+    > = HashMap::with_capacity(fused.len());
+    let mut fallback_seen: HashMap<(u32, u32, u32, Option<usize>, Option<i64>, u64), CompatSlot> =
+        HashMap::with_capacity(fused.len());
+    let mut unique_hits: Vec<SearchHit> = Vec::with_capacity(fused.len());
+
+    let update_slot = |slot: &mut CompatSlot, conversation_id: Option<i64>| {
+        if slot.ambiguous {
+            return;
+        }
+        match (slot.conversation_id, conversation_id) {
+            (Some(existing), Some(current)) if existing != current => slot.ambiguous = true,
+            (None, Some(current)) => slot.conversation_id = Some(current),
+            _ => {}
+        }
+    };
 
     for fused_hit in fused {
         let mut hit = match hit_by_doc_id.remove(&fused_hit.doc_id) {
             Some(hit) => hit,
             None => continue,
         };
-        // Skip tool noise if present (though inputs should be clean)
         let content_to_check = if hit.content.is_empty() {
             &hit.snippet
         } else {
@@ -1326,13 +1448,13 @@ pub fn rrf_fuse_hits(
             continue;
         }
 
-        // Intern IDs for the seen set key to avoid String clones.
-        let source_key = if let Some(id) = source_ids.get(hit.source_id.as_str()) {
+        let normalized_source_id = normalized_search_hit_source_id(&hit);
+        let source_key = if let Some(id) = source_ids.get(normalized_source_id.as_str()) {
             *id
         } else {
             let id = next_source_id;
             next_source_id = next_source_id.saturating_add(1);
-            source_ids.insert(hit.source_id.clone(), id);
+            source_ids.insert(normalized_source_id, id);
             id
         };
         let path_key = if let Some(id) = path_ids.get(hit.source_path.as_str()) {
@@ -1343,16 +1465,91 @@ pub fn rrf_fuse_hits(
             path_ids.insert(hit.source_path.clone(), id);
             id
         };
-        let key = (source_key, path_key, hit.content_hash);
+        let normalized_title = hit.title.trim();
+        let fallback_title_key = if let Some(id) = title_ids.get(normalized_title) {
+            *id
+        } else {
+            let id = next_title_id;
+            next_title_id = next_title_id.saturating_add(1);
+            title_ids.insert(normalized_title.to_string(), id);
+            id
+        };
+        let exact_title_key = if hit.conversation_id.is_some() {
+            None
+        } else {
+            Some(fallback_title_key)
+        };
+        let exact_key = (
+            source_key,
+            path_key,
+            hit.conversation_id,
+            exact_title_key,
+            hit.line_number,
+            hit.created_at,
+            hit.content_hash,
+        );
+        let fallback_key = (
+            source_key,
+            path_key,
+            fallback_title_key,
+            hit.line_number,
+            hit.created_at,
+            hit.content_hash,
+        );
 
-        if seen_content.insert(key) {
-            // Update hit score to the fused RRF score
-            hit.score = fused_hit.rrf_score as f32;
-            unique_hits.push(hit);
+        let merged_idx = exact_seen.get(&exact_key).copied().or_else(|| {
+            fallback_seen.get(&fallback_key).and_then(|slot| {
+                if slot.ambiguous {
+                    return None;
+                }
+                match (slot.conversation_id, hit.conversation_id) {
+                    (Some(existing), Some(current)) if existing != current => None,
+                    _ => Some(slot.index),
+                }
+            })
+        });
+
+        if let Some(existing_idx) = merged_idx {
+            exact_seen.insert(exact_key, existing_idx);
+            let slot = fallback_seen.entry(fallback_key).or_insert(CompatSlot {
+                index: existing_idx,
+                conversation_id: hit.conversation_id,
+                ambiguous: false,
+            });
+            update_slot(slot, hit.conversation_id);
+            if unique_hits[existing_idx].conversation_id.is_none() && hit.conversation_id.is_some()
+            {
+                unique_hits[existing_idx].conversation_id = hit.conversation_id;
+            }
+            unique_hits[existing_idx].score += fused_hit.rrf_score as f32;
+            continue;
+        }
+
+        hit.score = fused_hit.rrf_score as f32;
+        let index = unique_hits.len();
+        unique_hits.push(hit);
+        exact_seen.insert(exact_key, index);
+        match fallback_seen.get_mut(&fallback_key) {
+            Some(slot) => update_slot(slot, unique_hits[index].conversation_id),
+            None => {
+                fallback_seen.insert(
+                    fallback_key,
+                    CompatSlot {
+                        index,
+                        conversation_id: unique_hits[index].conversation_id,
+                        ambiguous: false,
+                    },
+                );
+            }
         }
     }
 
-    // Take the slice from offset to offset+limit
+    unique_hits.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| SearchHitKey::from_hit(a).cmp(&SearchHitKey::from_hit(b)))
+    });
+
     let start = offset.min(unique_hits.len());
     unique_hits.into_iter().skip(start).take(limit).collect()
 }
@@ -1585,7 +1782,9 @@ struct ResolvedSemanticDocId {
     doc_id: String,
 }
 
-type ProgressiveLookupKey = (String, String, i64);
+type ProgressiveLookupKey = (String, String, Option<i64>, String, i64, Option<i64>, u64);
+type ProgressiveExactQueryKey = (i64, i64);
+type ProgressiveFallbackQueryKey = (String, String, i64);
 type ResolvedSemanticLookupRow = Option<(ProgressiveLookupKey, ResolvedSemanticDocId)>;
 
 #[derive(Debug, Clone)]
@@ -1594,6 +1793,7 @@ struct ProgressiveLexicalHit {
     snippet: String,
     content: String,
     content_hash: u64,
+    conversation_id: Option<i64>,
     source_path: String,
     agent: String,
     workspace: String,
@@ -1625,6 +1825,7 @@ impl ProgressiveLexicalHit {
                 String::new()
             },
             content_hash: hit.content_hash,
+            conversation_id: hit.conversation_id,
             source_path: hit.source_path.clone(),
             agent: hit.agent.clone(),
             workspace: hit.workspace.clone(),
@@ -1644,6 +1845,7 @@ impl ProgressiveLexicalHit {
             snippet: self.snippet.clone(),
             content: self.content.clone(),
             content_hash: self.content_hash,
+            conversation_id: self.conversation_id,
             score,
             source_path: self.source_path.clone(),
             agent: self.agent.clone(),
@@ -2211,21 +2413,38 @@ fn snippet_from_content(content: &str) -> String {
     }
 }
 
-/// Deduplicate search hits by (source_id, content), keeping only the highest-scored hit
-/// for each unique content within a source.
+/// Deduplicate search hits by message-level provenance and content, keeping
+/// only the highest-scored hit for each unique matched message.
 ///
 /// This respects source boundaries (P2.3): the same content from different sources
 /// appears as separate results, since they represent distinct conversations.
 ///
 /// Also filters out tool invocation noise that isn't useful for search results.
 pub(crate) fn deduplicate_hits(hits: Vec<SearchHit>) -> Vec<SearchHit> {
-    // Key: (source_numeric_id, source_path_numeric_id, content_hash) -> index in deduped.
-    // Intern IDs to avoid cloning strings for every hit.
+    // Key: (source_numeric_id, source_path_numeric_id, conversation_id-or-title,
+    //       line_number, created_at, content_hash) -> index in deduped.
+    // Include message-level identity so repeated identical content in the same
+    // session remains visible as distinct hits when it came from different messages.
+    // When conversation_id exists, it is authoritative and title drift must not
+    // split or merge hits incorrectly.
     let mut source_ids: HashMap<String, u32> = HashMap::new();
     let mut path_ids: HashMap<String, u32> = HashMap::new();
+    let mut title_ids: HashMap<String, u32> = HashMap::new();
     let mut next_source_id: u32 = 0;
     let mut next_path_id: u32 = 0;
-    let mut seen: HashMap<(u32, u32, u64), usize> = HashMap::new();
+    let mut next_title_id: u32 = 0;
+    let mut seen: HashMap<
+        (
+            u32,
+            u32,
+            Option<i64>,
+            Option<u32>,
+            Option<usize>,
+            Option<i64>,
+            u64,
+        ),
+        usize,
+    > = HashMap::new();
     let mut deduped: Vec<SearchHit> = Vec::new();
 
     for hit in hits {
@@ -2239,13 +2458,15 @@ pub(crate) fn deduplicate_hits(hits: Vec<SearchHit>) -> Vec<SearchHit> {
             continue;
         }
 
-        // Include source_id AND source_path in the key so different sessions keep their results.
-        let source_key = if let Some(id) = source_ids.get(hit.source_id.as_str()) {
+        // Include normalized source identity AND source_path in the key so different
+        // sessions keep their results while local provenance drift still coalesces.
+        let normalized_source_id = normalized_search_hit_source_id(&hit);
+        let source_key = if let Some(id) = source_ids.get(normalized_source_id.as_str()) {
             *id
         } else {
             let id = next_source_id;
             next_source_id = next_source_id.saturating_add(1);
-            source_ids.insert(hit.source_id.clone(), id);
+            source_ids.insert(normalized_source_id, id);
             id
         };
         let path_key = if let Some(id) = path_ids.get(hit.source_path.as_str()) {
@@ -2256,7 +2477,28 @@ pub(crate) fn deduplicate_hits(hits: Vec<SearchHit>) -> Vec<SearchHit> {
             path_ids.insert(hit.source_path.clone(), id);
             id
         };
-        let key = (source_key, path_key, hit.content_hash);
+        let title_key = if hit.conversation_id.is_some() {
+            None
+        } else {
+            let normalized_title = hit.title.trim();
+            Some(if let Some(id) = title_ids.get(normalized_title) {
+                *id
+            } else {
+                let id = next_title_id;
+                next_title_id = next_title_id.saturating_add(1);
+                title_ids.insert(normalized_title.to_string(), id);
+                id
+            })
+        };
+        let key = (
+            source_key,
+            path_key,
+            hit.conversation_id,
+            title_key,
+            hit.line_number,
+            hit.created_at,
+            hit.content_hash,
+        );
 
         if let Some(&existing_idx) = seen.get(&key) {
             // If existing hit has lower score, replace it
@@ -2787,22 +3029,40 @@ impl SearchClient {
                     .transpose()
                     .ok()
                     .flatten()?;
-                Some((hit.source_id.clone(), hit.source_path.clone(), idx))
+                Some((
+                    normalized_search_hit_source_id(hit),
+                    hit.source_path.clone(),
+                    hit.conversation_id,
+                    hit.title.trim().to_string(),
+                    idx,
+                    hit.created_at,
+                    hit.content_hash,
+                ))
             })
             .collect();
 
-        let unique_keys: Vec<ProgressiveLookupKey> = {
-            let mut seen = HashSet::new();
-            let mut keys = Vec::new();
-            for key in lookup_keys.iter().flatten() {
-                if seen.insert(key.clone()) {
-                    keys.push(key.clone());
+        let mut seen_exact = HashSet::new();
+        let mut exact_query_keys = Vec::new();
+        let mut seen_fallback = HashSet::new();
+        let mut fallback_query_keys = Vec::new();
+        for (source_id, source_path, conversation_id, _title, idx, _created_at, _content_hash) in
+            lookup_keys.iter().flatten()
+        {
+            if let Some(conversation_id) = conversation_id {
+                let query_key: ProgressiveExactQueryKey = (*conversation_id, *idx);
+                if seen_exact.insert(query_key) {
+                    exact_query_keys.push(query_key);
+                }
+            } else {
+                let query_key: ProgressiveFallbackQueryKey =
+                    (source_id.clone(), source_path.clone(), *idx);
+                if seen_fallback.insert(query_key.clone()) {
+                    fallback_query_keys.push(query_key);
                 }
             }
-            keys
-        };
+        }
 
-        if unique_keys.is_empty() {
+        if exact_query_keys.is_empty() && fallback_query_keys.is_empty() {
             return Ok(vec![None; hits.len()]);
         }
 
@@ -2812,39 +3072,41 @@ impl SearchClient {
             .ok_or_else(|| anyhow!("progressive search requires database connection"))?;
 
         let mut resolved_by_key = HashMap::new();
+        let normalized_source_sql = normalized_search_source_id_sql_expr("c.source_id");
 
-        // SQLite has a maximum parameter limit (usually 999). Each key uses 3 params.
-        // Chunk to avoid hitting this limit.
         const CHUNK_SIZE: usize = 300;
-        for chunk in unique_keys.chunks(CHUNK_SIZE) {
-            let mut sql = String::from(
-                "SELECT c.source_id, c.source_path, m.idx, m.id, c.agent_id, c.workspace_id, m.role, m.created_at, m.content
+        for chunk in exact_query_keys.chunks(CHUNK_SIZE) {
+            let mut sql = String::from("SELECT c.id, ");
+            sql.push_str(&normalized_source_sql);
+            sql.push_str(
+                ", c.source_path, m.idx, m.id, c.agent_id, c.workspace_id, m.role, m.created_at, m.content, c.title
                  FROM messages m
                  JOIN conversations c ON m.conversation_id = c.id
                  WHERE ",
             );
-            let mut params = Vec::with_capacity(chunk.len().saturating_mul(3));
-            for (idx, (source_id, source_path, line_idx)) in chunk.iter().enumerate() {
+            let mut params = Vec::with_capacity(chunk.len().saturating_mul(2));
+            for (idx, (conversation_id, line_idx)) in chunk.iter().enumerate() {
                 if idx > 0 {
                     sql.push_str(" OR ");
                 }
-                sql.push_str("(c.source_id = ? AND c.source_path = ? AND m.idx = ?)");
-                params.push(ParamValue::from(source_id.clone()));
-                params.push(ParamValue::from(source_path.clone()));
+                sql.push_str("(c.id = ? AND m.idx = ?)");
+                params.push(ParamValue::from(*conversation_id));
                 params.push(ParamValue::from(*line_idx));
             }
 
             let chunk_rows: Vec<ResolvedSemanticLookupRow> =
                 conn.query_map_collect(&sql, &params, |row: &frankensqlite::Row| {
-                    let source_id: String = row.get_typed(0)?;
-                    let source_path: String = row.get_typed(1)?;
-                    let idx: i64 = row.get_typed(2)?;
-                    let message_id_raw: i64 = row.get_typed(3)?;
-                    let agent_id_raw: i64 = row.get_typed(4)?;
-                    let workspace_id_raw: Option<i64> = row.get_typed(5)?;
-                    let role_raw: String = row.get_typed(6)?;
-                    let created_at_ms: Option<i64> = row.get_typed(7)?;
-                    let content: String = row.get_typed(8)?;
+                    let conversation_id: i64 = row.get_typed(0)?;
+                    let source_id: String = row.get_typed(1)?;
+                    let source_path: String = row.get_typed(2)?;
+                    let idx: i64 = row.get_typed(3)?;
+                    let message_id_raw: i64 = row.get_typed(4)?;
+                    let agent_id_raw: i64 = row.get_typed(5)?;
+                    let workspace_id_raw: Option<i64> = row.get_typed(6)?;
+                    let role_raw: String = row.get_typed(7)?;
+                    let created_at_ms: Option<i64> = row.get_typed(8)?;
+                    let content: String = row.get_typed(9)?;
+                    let title: Option<String> = row.get_typed(10)?;
 
                     let canonical = canonicalize_for_embedding(&content);
                     if canonical.is_empty() {
@@ -2876,9 +3138,108 @@ impl SearchClient {
                         content_hash: Some(content_hash(&canonical)),
                     }
                     .to_doc_id_string();
+                    let line_number = usize::try_from(idx).ok().map(|line| line.saturating_add(1));
+                    let lookup_key = (
+                        source_id,
+                        source_path.clone(),
+                        Some(conversation_id),
+                        title.unwrap_or_default().trim().to_string(),
+                        idx,
+                        created_at_ms,
+                        stable_hit_hash(&content, &source_path, line_number, created_at_ms),
+                    );
 
                     Ok(Some((
-                        (source_id, source_path, idx),
+                        lookup_key,
+                        ResolvedSemanticDocId { message_id, doc_id },
+                    )))
+                })?;
+
+            for row in chunk_rows.into_iter().flatten() {
+                resolved_by_key.insert(row.0, row.1);
+            }
+        }
+
+        for chunk in fallback_query_keys.chunks(CHUNK_SIZE) {
+            let mut sql = String::from("SELECT ");
+            sql.push_str(&normalized_source_sql);
+            sql.push_str(
+                ", c.source_path, m.idx, m.id, c.agent_id, c.workspace_id, m.role, m.created_at, m.content, c.title
+                 FROM messages m
+                 JOIN conversations c ON m.conversation_id = c.id
+                 WHERE ",
+            );
+            let mut params = Vec::with_capacity(chunk.len().saturating_mul(3));
+            for (idx, (source_id, source_path, line_idx)) in chunk.iter().enumerate() {
+                if idx > 0 {
+                    sql.push_str(" OR ");
+                }
+                sql.push_str(&format!(
+                    "({normalized_source_sql} = ? AND c.source_path = ? AND m.idx = ?)"
+                ));
+                params.push(ParamValue::from(normalize_search_source_filter_value(
+                    source_id,
+                )));
+                params.push(ParamValue::from(source_path.clone()));
+                params.push(ParamValue::from(*line_idx));
+            }
+
+            let chunk_rows: Vec<ResolvedSemanticLookupRow> =
+                conn.query_map_collect(&sql, &params, |row: &frankensqlite::Row| {
+                    let source_id: String = row.get_typed(0)?;
+                    let source_path: String = row.get_typed(1)?;
+                    let idx: i64 = row.get_typed(2)?;
+                    let message_id_raw: i64 = row.get_typed(3)?;
+                    let agent_id_raw: i64 = row.get_typed(4)?;
+                    let workspace_id_raw: Option<i64> = row.get_typed(5)?;
+                    let role_raw: String = row.get_typed(6)?;
+                    let created_at_ms: Option<i64> = row.get_typed(7)?;
+                    let content: String = row.get_typed(8)?;
+                    let title: Option<String> = row.get_typed(9)?;
+
+                    let canonical = canonicalize_for_embedding(&content);
+                    if canonical.is_empty() {
+                        return Ok(None);
+                    }
+
+                    let message_id = u64::try_from(message_id_raw).map_err(|_| {
+                        std::io::Error::other("message id out of range for progressive doc_id")
+                    })?;
+                    let agent_id = if agent_id_raw < 0 {
+                        0
+                    } else {
+                        u32::try_from(agent_id_raw).unwrap_or(u32::MAX)
+                    };
+                    let workspace_id = if workspace_id_raw.unwrap_or(0) < 0 {
+                        0
+                    } else {
+                        u32::try_from(workspace_id_raw.unwrap_or(0)).unwrap_or(u32::MAX)
+                    };
+                    let role = role_code_from_str(&role_raw).unwrap_or(ROLE_USER);
+                    let doc_id = SemanticDocId {
+                        message_id,
+                        chunk_idx: 0,
+                        agent_id,
+                        workspace_id,
+                        source_id: crc32fast::hash(source_id.as_bytes()),
+                        role,
+                        created_at_ms: created_at_ms.unwrap_or(0),
+                        content_hash: Some(content_hash(&canonical)),
+                    }
+                    .to_doc_id_string();
+                    let line_number = usize::try_from(idx).ok().map(|line| line.saturating_add(1));
+                    let lookup_key = (
+                        source_id,
+                        source_path.clone(),
+                        None,
+                        title.unwrap_or_default().trim().to_string(),
+                        idx,
+                        created_at_ms,
+                        stable_hit_hash(&content, &source_path, line_number, created_at_ms),
+                    );
+
+                    Ok(Some((
+                        lookup_key,
                         ResolvedSemanticDocId { message_id, doc_id },
                     )))
                 })?;
@@ -2968,18 +3329,14 @@ impl SearchClient {
             params.push(ParamValue::from(i64::try_from(result.message_id)?));
         }
 
-        let content_expr = if field_mask.needs_content() {
-            "m.content"
-        } else {
-            "''"
-        };
         let title_expr = if field_mask.wants_title() {
             "c.title"
         } else {
             "''"
         };
+        let normalized_source_sql = normalized_search_source_id_sql_expr("c.source_id");
         let sql = format!(
-            "SELECT m.id, {content_expr}, m.created_at, m.idx, m.role, {title_expr}, c.source_path, c.source_id, c.origin_host, a.slug, w.path, COALESCE(s.kind, 'local'), c.started_at
+            "SELECT m.id, c.id, m.content, m.created_at, m.idx, m.role, {title_expr}, c.source_path, {normalized_source_sql}, c.origin_host, a.slug, w.path, s.kind, c.started_at
              FROM messages m
              JOIN conversations c ON m.conversation_id = c.id
              JOIN agents a ON c.agent_id = a.id
@@ -2991,48 +3348,57 @@ impl SearchClient {
         let rows: Vec<(u64, SearchHit)> =
             conn.query_map_collect(&sql, &params, |row: &frankensqlite::Row| {
                 let message_id: i64 = row.get_typed(0)?;
-                let content: String = row.get_typed(1)?;
-                let msg_created_at: Option<i64> = row.get_typed(2)?;
-                let idx: Option<i64> = row.get_typed(3)?;
+                let conversation_id: i64 = row.get_typed(1)?;
+                let full_content: String = row.get_typed(2)?;
+                let msg_created_at: Option<i64> = row.get_typed(3)?;
+                let idx: Option<i64> = row.get_typed(4)?;
                 let title: Option<String> = if field_mask.wants_title() {
-                    row.get_typed(5)?
+                    row.get_typed(6)?
                 } else {
                     None
                 };
-                let source_path: String = row.get_typed(6)?;
-                let source_id: Option<String> = row.get_typed(7)?;
-                let origin_host: Option<String> = row.get_typed(8)?;
-                let agent: String = row.get_typed(9)?;
-                let workspace: Option<String> = row.get_typed(10)?;
-                let origin_kind: String = row.get_typed(11)?;
-                let started_at: Option<i64> = row.get_typed(12)?;
+                let source_path: String = row.get_typed(7)?;
+                let raw_source_id: String = row.get_typed(8)?;
+                let origin_host: Option<String> = row.get_typed(9)?;
+                let agent: String = row.get_typed(10)?;
+                let workspace: Option<String> = row.get_typed(11)?;
+                let raw_origin_kind: Option<String> = row.get_typed(12)?;
+                let started_at: Option<i64> = row.get_typed(13)?;
 
                 let created_at = msg_created_at.or(started_at);
                 let line_number = idx
                     .and_then(|i| usize::try_from(i).ok())
                     .map(|i| i.saturating_add(1));
                 let snippet = if field_mask.wants_snippet() {
-                    snippet_from_content(&content)
+                    snippet_from_content(&full_content)
                 } else {
                     String::new()
                 };
-                let hash_basis = if content.is_empty() {
-                    snippet.as_str()
+                let content = if field_mask.needs_content() {
+                    full_content.clone()
                 } else {
-                    content.as_str()
+                    String::new()
                 };
                 let content_hash =
-                    stable_hit_hash(hash_basis, &source_path, line_number, created_at);
+                    stable_hit_hash(&full_content, &source_path, line_number, created_at);
+                let source_id = normalized_search_hit_source_id_parts(
+                    raw_source_id.as_str(),
+                    raw_origin_kind.as_deref().unwrap_or_default(),
+                    origin_host.as_deref(),
+                );
+                let origin_kind =
+                    normalized_search_hit_origin_kind(&source_id, raw_origin_kind.as_deref());
 
                 let hit = SearchHit {
                     title: if field_mask.wants_title() {
-                        title.unwrap_or_else(|| "Untitled".to_string())
+                        title.unwrap_or_default()
                     } else {
                         String::new()
                     },
                     snippet,
                     content,
                     content_hash,
+                    conversation_id: Some(conversation_id),
                     score: 0.0,
                     source_path,
                     agent,
@@ -3041,7 +3407,7 @@ impl SearchClient {
                     created_at,
                     line_number,
                     match_type: MatchType::Exact,
-                    source_id: source_id.unwrap_or_else(default_source_id),
+                    source_id,
                     origin_kind,
                     origin_host,
                 };
@@ -4017,7 +4383,9 @@ impl SearchClient {
                 SourceFilter::All => FsCassSourceFilter::All,
                 SourceFilter::Local => FsCassSourceFilter::Local,
                 SourceFilter::Remote => FsCassSourceFilter::Remote,
-                SourceFilter::SourceId(id) => FsCassSourceFilter::SourceId(id),
+                SourceFilter::SourceId(id) => {
+                    FsCassSourceFilter::SourceId(normalize_search_source_filter_value(&id))
+                }
             },
         };
 
@@ -4110,26 +4478,33 @@ impl SearchClient {
             };
             let content_hash = stable_hit_hash(hash_basis, &source, line_number, created_at);
             // Provenance fields (P3.3)
-            let source_id = doc
+            let raw_source_id = doc
                 .get_first(fields.source_id)
                 .and_then(|v| v.as_str())
-                .unwrap_or("local")
-                .to_string();
-            let origin_kind = doc
-                .get_first(fields.origin_kind)
-                .and_then(|v| v.as_str())
-                .unwrap_or("local")
-                .to_string();
+                .unwrap_or_default();
+            let conversation_id = fields
+                .conversation_id
+                .and_then(|field| doc.get_first(field))
+                .and_then(|v| v.as_i64());
+            let raw_origin_kind = doc.get_first(fields.origin_kind).and_then(|v| v.as_str());
             let origin_host = doc
                 .get_first(fields.origin_host)
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(String::from);
+            let source_id = normalized_search_hit_source_id_parts(
+                raw_source_id,
+                raw_origin_kind.unwrap_or_default(),
+                origin_host.as_deref(),
+            );
+            let origin_kind =
+                normalized_search_hit_origin_kind(&source_id, raw_origin_kind).to_string();
             hits.push(SearchHit {
                 title,
                 snippet,
                 content,
                 content_hash,
+                conversation_id,
                 score,
                 source_path: source,
                 agent,
@@ -4199,29 +4574,22 @@ impl SearchClient {
         field_mask: FieldMask,
     ) -> Result<Vec<SearchHit>> {
         let order = if newest_first { "DESC" } else { "ASC" };
-        let content_expr = if field_mask.needs_content() {
-            "m.content"
-        } else if field_mask.wants_snippet() {
-            "substr(m.content, 1, 512)"
-        } else {
-            "''"
-        };
         let title_expr = if field_mask.wants_title() {
             "c.title"
         } else {
             "''"
         };
-        let mut sql =
-            format!(
-                "SELECT {title_expr}, {content_expr}, a.slug, w.path, c.source_path, m.created_at, m.idx, \
-                 c.source_id, c.origin_host, COALESCE(s.kind, 'local')
+        let normalized_source_sql = normalized_search_source_id_sql_expr("c.source_id");
+        let mut sql = format!(
+            "SELECT c.id, {title_expr}, m.content, a.slug, w.path, c.source_path, m.created_at, m.idx, \
+                 {normalized_source_sql}, c.origin_host, s.kind
              FROM messages m
              JOIN conversations c ON m.conversation_id = c.id
              JOIN agents a ON c.agent_id = a.id
              LEFT JOIN workspaces w ON c.workspace_id = w.id
              LEFT JOIN sources s ON c.source_id = s.id
              WHERE 1=1"
-            );
+        );
         let mut params: Vec<ParamValue> = Vec::new();
 
         if !filters.agents.is_empty() {
@@ -4252,11 +4620,17 @@ impl SearchClient {
         // Apply source filter
         match &filters.source_filter {
             SourceFilter::All => {}
-            SourceFilter::Local => sql.push_str(" AND COALESCE(c.source_id, 'local') = 'local'"),
-            SourceFilter::Remote => sql.push_str(" AND COALESCE(c.source_id, 'local') != 'local'"),
+            SourceFilter::Local => sql.push_str(&format!(
+                " AND {normalized_source_sql} = '{local}'",
+                local = crate::sources::provenance::LOCAL_SOURCE_ID,
+            )),
+            SourceFilter::Remote => sql.push_str(&format!(
+                " AND {normalized_source_sql} != '{local}'",
+                local = crate::sources::provenance::LOCAL_SOURCE_ID,
+            )),
             SourceFilter::SourceId(id) => {
-                sql.push_str(" AND COALESCE(c.source_id, 'local') = ?");
-                params.push(ParamValue::from(id.as_str()));
+                sql.push_str(&format!(" AND {normalized_source_sql} = ?"));
+                params.push(ParamValue::from(normalize_search_source_filter_value(id)));
             }
         }
 
@@ -4268,24 +4642,32 @@ impl SearchClient {
 
         let rows: Vec<SearchHit> =
             conn.query_map_collect(&sql, &params, |row: &frankensqlite::Row| {
+                let conversation_id: i64 = row.get_typed(0)?;
                 let title: String = if field_mask.wants_title() {
-                    row.get_typed::<Option<String>>(0)?.unwrap_or_default()
+                    row.get_typed::<Option<String>>(1)?.unwrap_or_default()
                 } else {
                     String::new()
                 };
-                let raw_content: String = row.get_typed(1)?;
-                let agent: String = row.get_typed(2)?;
-                let workspace: Option<String> = row.get_typed(3)?;
-                let source_path: String = row.get_typed(4)?;
-                let created_at: Option<i64> = row.get_typed(5)?;
-                let idx: Option<i64> = row.get_typed(6)?;
-                let source_id: String = row
-                    .get_typed::<Option<String>>(7)?
+                let raw_content: String = row.get_typed(2)?;
+                let agent: String = row.get_typed(3)?;
+                let workspace: Option<String> = row.get_typed(4)?;
+                let source_path: String = row.get_typed(5)?;
+                let created_at: Option<i64> = row.get_typed(6)?;
+                let idx: Option<i64> = row.get_typed(7)?;
+                let raw_source_id: String = row
+                    .get_typed::<Option<String>>(8)?
                     .unwrap_or_else(default_source_id);
-                let origin_host: Option<String> = row.get_typed(8)?;
-                let origin_kind: String = row
-                    .get_typed::<Option<String>>(9)?
-                    .unwrap_or_else(default_origin_kind);
+                let origin_host: Option<String> = row.get_typed(9)?;
+                let raw_origin_kind: Option<String> = row.get_typed(10)?;
+                let source_id = normalized_search_hit_source_id_parts(
+                    raw_source_id.as_str(),
+                    raw_origin_kind.as_deref().unwrap_or_default(),
+                    origin_host.as_deref(),
+                );
+                let origin_kind = normalized_search_hit_origin_kind(
+                    source_id.as_str(),
+                    raw_origin_kind.as_deref(),
+                );
                 let line_number = idx
                     .and_then(|i| usize::try_from(i).ok())
                     .map(|i| i.saturating_add(1));
@@ -4295,22 +4677,18 @@ impl SearchClient {
                     String::new()
                 };
                 let content = if field_mask.needs_content() {
-                    raw_content
+                    raw_content.clone()
                 } else {
                     String::new()
                 };
-                let hash_basis = if content.is_empty() {
-                    snippet.as_str()
-                } else {
-                    content.as_str()
-                };
                 let content_hash =
-                    stable_hit_hash(hash_basis, &source_path, line_number, created_at);
+                    stable_hit_hash(&raw_content, &source_path, line_number, created_at);
                 Ok(SearchHit {
                     title,
                     snippet,
                     content,
                     content_hash,
+                    conversation_id: Some(conversation_id),
                     score: 0.0,
                     source_path,
                     agent,
@@ -5772,6 +6150,7 @@ mod tests {
             source_id: "local".into(),
             origin_kind: "local".into(),
             origin_host: None,
+            conversation_id: None,
         };
         let cached = cached_hit_from(&hit);
 
@@ -5797,6 +6176,8 @@ mod tests {
             key: SearchHitKey {
                 source_id: "local".to_string(),
                 source_path: id.to_string(),
+                conversation_id: None,
+                title: String::new(),
                 line_number: None,
                 created_at: None,
                 content_hash: 0,
@@ -5824,6 +6205,7 @@ mod tests {
                 source_id: "local".into(),
                 origin_kind: "local".into(),
                 origin_host: None,
+                conversation_id: None,
             },
         }
     }
@@ -6033,6 +6415,7 @@ mod tests {
             source_id: "local".into(),
             origin_kind: "local".into(),
             origin_host: None,
+            conversation_id: None,
         };
 
         let cached = CachedHit {
@@ -6221,6 +6604,7 @@ mod tests {
             source_id: "local".into(),
             origin_kind: "local".into(),
             origin_host: None,
+            conversation_id: None,
         }];
 
         client.put_cache("こん", &SearchFilters::default(), &hits);
@@ -6250,6 +6634,7 @@ mod tests {
             source_id: "local".into(),
             origin_kind: "local".into(),
             origin_host: None,
+            conversation_id: None,
         };
         let cached = cached_hit_from(&hit);
         assert!(hit_matches_query_cached(&cached, "hello"));
@@ -6282,6 +6667,7 @@ mod tests {
             source_id: "local".into(),
             origin_kind: "local".into(),
             origin_host: None,
+            conversation_id: None,
         };
 
         let snippet_only =
@@ -6339,6 +6725,7 @@ mod tests {
             source_id: "local".into(),
             origin_kind: "local".into(),
             origin_host: None,
+            conversation_id: None,
         };
         let mut lexical_cache = ProgressiveLexicalCache::default();
         lexical_cache.hits_by_message.insert(
@@ -7479,7 +7866,7 @@ mod tests {
         conn.execute("INSERT INTO workspaces(id, path) VALUES(1, '/local')")?;
         conn.execute("INSERT INTO workspaces(id, path) VALUES(2, '/remote')")?;
         conn.execute(
-            "INSERT INTO conversations(id, agent_id, workspace_id, source_id, origin_host, title, source_path) VALUES(1, 1, 1, 'local', NULL, 'local title', '/tmp/local.jsonl')",
+            "INSERT INTO conversations(id, agent_id, workspace_id, source_id, origin_host, title, source_path) VALUES(1, 1, 1, '  local  ', NULL, 'local title', '/tmp/local.jsonl')",
         )?;
         conn.execute("INSERT INTO conversations(id, agent_id, workspace_id, source_id, origin_host, title, source_path) VALUES(2, 1, 2, 'laptop', 'dev@laptop', 'remote title', '/tmp/remote.jsonl')")?;
         conn.execute("INSERT INTO messages(id, conversation_id, idx, content, created_at) VALUES(1, 1, 0, 'auth token failure', 42)")?;
@@ -7529,32 +7916,32 @@ mod tests {
             last_tantivy_total_count: Mutex::new(None),
         };
 
-        let local_hits = client.search(
-            "auth",
+        let local_hits = client.browse_by_date(
             SearchFilters {
                 source_filter: SourceFilter::Local,
                 ..SearchFilters::default()
             },
             5,
             0,
+            true,
             FieldMask::FULL,
         )?;
         assert_eq!(local_hits.len(), 1);
         assert_eq!(local_hits[0].source_id, "local");
 
-        let remote_hits = client.search(
-            "auth",
+        let remote_hits = client.browse_by_date(
             SearchFilters {
-                source_filter: SourceFilter::SourceId("laptop".to_string()),
+                source_filter: SourceFilter::SourceId("  LOCAL  ".to_string()),
                 ..SearchFilters::default()
             },
             5,
             0,
+            true,
             FieldMask::FULL,
         )?;
         assert_eq!(remote_hits.len(), 1);
-        assert_eq!(remote_hits[0].source_id, "laptop");
-        assert_eq!(remote_hits[0].origin_kind, "ssh");
+        assert_eq!(remote_hits[0].source_id, "local");
+        assert_eq!(remote_hits[0].origin_kind, "local");
 
         Ok(())
     }
@@ -7739,6 +8126,892 @@ mod tests {
     }
 
     #[test]
+    fn hydrate_semantic_hits_with_ids_snippet_only_uses_full_content_for_snippets_and_identity()
+    -> Result<()> {
+        let conn = Connection::open(":memory:")?;
+        conn.execute_batch(
+            "CREATE TABLE agents (id INTEGER PRIMARY KEY, slug TEXT NOT NULL);
+             CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY,
+                agent_id INTEGER NOT NULL,
+                workspace_id INTEGER,
+                source_id TEXT,
+                origin_host TEXT,
+                title TEXT,
+                source_path TEXT NOT NULL,
+                started_at INTEGER
+             );
+             CREATE TABLE workspaces (id INTEGER PRIMARY KEY, path TEXT NOT NULL);
+             CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER NOT NULL,
+                idx INTEGER,
+                role TEXT,
+                content TEXT NOT NULL,
+                created_at INTEGER
+             );
+             CREATE TABLE sources (id TEXT PRIMARY KEY, kind TEXT);",
+        )?;
+        conn.execute("INSERT INTO agents(id, slug) VALUES(1, 'codex')")?;
+        conn.execute(
+            "INSERT INTO conversations(id, agent_id, workspace_id, source_id, origin_host, title, source_path, started_at)
+             VALUES(1, 1, NULL, 'local', NULL, 'semantic title', '/tmp/semantic.jsonl', 100)",
+        )?;
+        let shared_prefix = "shared-prefix ".repeat(32);
+        let first = format!("{shared_prefix}first unique semantic tail");
+        let second = format!("{shared_prefix}second unique semantic tail");
+        conn.execute_with_params(
+            "INSERT INTO messages(id, conversation_id, idx, role, content, created_at)
+             VALUES(?1, 1, ?2, 'assistant', ?3, ?4)",
+            &[
+                fsqlite_types::value::SqliteValue::Integer(1),
+                fsqlite_types::value::SqliteValue::Integer(0),
+                fsqlite_types::value::SqliteValue::Text(first.clone().into()),
+                fsqlite_types::value::SqliteValue::Integer(101),
+            ],
+        )?;
+        conn.execute_with_params(
+            "INSERT INTO messages(id, conversation_id, idx, role, content, created_at)
+             VALUES(?1, 1, ?2, 'assistant', ?3, ?4)",
+            &[
+                fsqlite_types::value::SqliteValue::Integer(2),
+                fsqlite_types::value::SqliteValue::Integer(1),
+                fsqlite_types::value::SqliteValue::Text(second.clone().into()),
+                fsqlite_types::value::SqliteValue::Integer(102),
+            ],
+        )?;
+
+        let client = SearchClient {
+            reader: None,
+            sqlite: Mutex::new(Some(SendConnection(conn))),
+            sqlite_path: None,
+            prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
+            last_reload: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch: Arc::new(AtomicU64::new(0)),
+            warm_tx: None,
+            _warm_handle: None,
+            _shared_filters: Arc::new(Mutex::new(())),
+            metrics: Metrics::default(),
+            cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
+            semantic: Mutex::new(None),
+            last_tantivy_total_count: Mutex::new(None),
+        };
+
+        let hits = client.hydrate_semantic_hits_with_ids(
+            &[
+                VectorSearchResult {
+                    message_id: 1,
+                    chunk_idx: 0,
+                    score: 0.9,
+                },
+                VectorSearchResult {
+                    message_id: 2,
+                    chunk_idx: 0,
+                    score: 0.8,
+                },
+            ],
+            FieldMask::new(false, true, true, true),
+        )?;
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|(_, hit)| hit.content.is_empty()));
+        assert!(hits.iter().all(|(_, hit)| !hit.snippet.is_empty()));
+        assert_ne!(hits[0].1.content_hash, hits[1].1.content_hash);
+
+        Ok(())
+    }
+
+    #[test]
+    fn hydrate_semantic_hits_with_ids_normalizes_trimmed_local_source_metadata() -> Result<()> {
+        let conn = Connection::open(":memory:")?;
+        conn.execute_batch(
+            "CREATE TABLE agents (id INTEGER PRIMARY KEY, slug TEXT NOT NULL);
+             CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY,
+                agent_id INTEGER NOT NULL,
+                workspace_id INTEGER,
+                source_id TEXT,
+                origin_host TEXT,
+                title TEXT,
+                source_path TEXT NOT NULL,
+                started_at INTEGER
+             );
+             CREATE TABLE workspaces (id INTEGER PRIMARY KEY, path TEXT NOT NULL);
+             CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER NOT NULL,
+                idx INTEGER,
+                role TEXT,
+                content TEXT NOT NULL,
+                created_at INTEGER
+             );
+             CREATE TABLE sources (id TEXT PRIMARY KEY, kind TEXT);",
+        )?;
+        conn.execute("INSERT INTO agents(id, slug) VALUES(1, 'codex')")?;
+        conn.execute(
+            "INSERT INTO conversations(id, agent_id, workspace_id, source_id, origin_host, title, source_path, started_at)
+             VALUES(1, 1, NULL, '  local  ', NULL, 'trimmed local semantic', '/tmp/trimmed-local-semantic.jsonl', 100)",
+        )?;
+        conn.execute_with_params(
+            "INSERT INTO messages(id, conversation_id, idx, role, content, created_at)
+             VALUES(?1, 1, 0, 'assistant', ?2, 101)",
+            &[
+                fsqlite_types::value::SqliteValue::Integer(1),
+                fsqlite_types::value::SqliteValue::Text("trimmed local semantic body".into()),
+            ],
+        )?;
+
+        let client = SearchClient {
+            reader: None,
+            sqlite: Mutex::new(Some(SendConnection(conn))),
+            sqlite_path: None,
+            prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
+            last_reload: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch: Arc::new(AtomicU64::new(0)),
+            warm_tx: None,
+            _warm_handle: None,
+            _shared_filters: Arc::new(Mutex::new(())),
+            metrics: Metrics::default(),
+            cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
+            semantic: Mutex::new(None),
+            last_tantivy_total_count: Mutex::new(None),
+        };
+
+        let hits = client.hydrate_semantic_hits_with_ids(
+            &[VectorSearchResult {
+                message_id: 1,
+                chunk_idx: 0,
+                score: 0.9,
+            }],
+            FieldMask::new(false, true, true, true),
+        )?;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].1.source_id, "local");
+        assert_eq!(hits[0].1.origin_kind, "local");
+
+        Ok(())
+    }
+
+    #[test]
+    fn hydrate_semantic_hits_with_ids_preserves_remote_origin_without_source_row() -> Result<()> {
+        let conn = Connection::open(":memory:")?;
+        conn.execute_batch(
+            "CREATE TABLE agents (id INTEGER PRIMARY KEY, slug TEXT NOT NULL);
+             CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY,
+                agent_id INTEGER NOT NULL,
+                workspace_id INTEGER,
+                source_id TEXT,
+                origin_host TEXT,
+                title TEXT,
+                source_path TEXT NOT NULL,
+                started_at INTEGER
+             );
+             CREATE TABLE workspaces (id INTEGER PRIMARY KEY, path TEXT NOT NULL);
+             CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER NOT NULL,
+                idx INTEGER,
+                role TEXT,
+                content TEXT NOT NULL,
+                created_at INTEGER
+             );
+             CREATE TABLE sources (id TEXT PRIMARY KEY, kind TEXT);",
+        )?;
+        conn.execute("INSERT INTO agents(id, slug) VALUES(1, 'codex')")?;
+        conn.execute(
+            "INSERT INTO conversations(id, agent_id, workspace_id, source_id, origin_host, title, source_path, started_at)
+             VALUES(1, 1, NULL, 'laptop', 'dev@laptop', 'remote semantic', '/tmp/remote-semantic.jsonl', 100)",
+        )?;
+        conn.execute_with_params(
+            "INSERT INTO messages(id, conversation_id, idx, role, content, created_at)
+             VALUES(?1, 1, 0, 'assistant', ?2, 101)",
+            &[
+                fsqlite_types::value::SqliteValue::Integer(1),
+                fsqlite_types::value::SqliteValue::Text("remote semantic body".into()),
+            ],
+        )?;
+
+        let client = SearchClient {
+            reader: None,
+            sqlite: Mutex::new(Some(SendConnection(conn))),
+            sqlite_path: None,
+            prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
+            last_reload: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch: Arc::new(AtomicU64::new(0)),
+            warm_tx: None,
+            _warm_handle: None,
+            _shared_filters: Arc::new(Mutex::new(())),
+            metrics: Metrics::default(),
+            cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
+            semantic: Mutex::new(None),
+            last_tantivy_total_count: Mutex::new(None),
+        };
+
+        let hits = client.hydrate_semantic_hits_with_ids(
+            &[VectorSearchResult {
+                message_id: 1,
+                chunk_idx: 0,
+                score: 0.9,
+            }],
+            FieldMask::new(false, true, true, true),
+        )?;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].1.source_id, "laptop");
+        assert_eq!(hits[0].1.origin_kind, "remote");
+        assert_eq!(hits[0].1.origin_host.as_deref(), Some("dev@laptop"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_semantic_doc_ids_for_hits_distinguishes_same_source_path_line_by_content_hash()
+    -> Result<()> {
+        let conn = Connection::open(":memory:")?;
+        conn.execute_batch(
+            "CREATE TABLE agents (id INTEGER PRIMARY KEY, slug TEXT NOT NULL);
+             CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY,
+                agent_id INTEGER NOT NULL,
+                workspace_id INTEGER,
+                source_id TEXT,
+                origin_host TEXT,
+                title TEXT,
+                source_path TEXT NOT NULL
+             );
+             CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER NOT NULL,
+                idx INTEGER,
+                role TEXT,
+                content TEXT NOT NULL,
+                created_at INTEGER
+             );",
+        )?;
+        conn.execute("INSERT INTO agents(id, slug) VALUES(1, 'codex')")?;
+        conn.execute(
+            "INSERT INTO conversations(id, agent_id, workspace_id, source_id, origin_host, title, source_path)
+             VALUES(1, 1, NULL, 'local', NULL, 'Shared Session', '/tmp/progressive-shared.jsonl')",
+        )?;
+        conn.execute(
+            "INSERT INTO conversations(id, agent_id, workspace_id, source_id, origin_host, title, source_path)
+             VALUES(2, 1, NULL, 'local', NULL, 'Shared Session', '/tmp/progressive-shared.jsonl')",
+        )?;
+        let first = "same prefix first tail".to_string();
+        let second = "same prefix second tail".to_string();
+        conn.execute_with_params(
+            "INSERT INTO messages(id, conversation_id, idx, role, content, created_at)
+             VALUES(?1, ?2, 0, 'assistant', ?3, 100)",
+            &[
+                fsqlite_types::value::SqliteValue::Integer(11),
+                fsqlite_types::value::SqliteValue::Integer(1),
+                fsqlite_types::value::SqliteValue::Text(first.clone().into()),
+            ],
+        )?;
+        conn.execute_with_params(
+            "INSERT INTO messages(id, conversation_id, idx, role, content, created_at)
+             VALUES(?1, ?2, 0, 'assistant', ?3, 100)",
+            &[
+                fsqlite_types::value::SqliteValue::Integer(22),
+                fsqlite_types::value::SqliteValue::Integer(2),
+                fsqlite_types::value::SqliteValue::Text(second.clone().into()),
+            ],
+        )?;
+
+        let client = SearchClient {
+            reader: None,
+            sqlite: Mutex::new(Some(SendConnection(conn))),
+            sqlite_path: None,
+            prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
+            last_reload: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch: Arc::new(AtomicU64::new(0)),
+            warm_tx: None,
+            _warm_handle: None,
+            _shared_filters: Arc::new(Mutex::new(())),
+            metrics: Metrics::default(),
+            cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
+            semantic: Mutex::new(None),
+            last_tantivy_total_count: Mutex::new(None),
+        };
+
+        let first_hit = SearchHit {
+            title: "Shared Session".into(),
+            snippet: String::new(),
+            content: String::new(),
+            content_hash: stable_hit_hash(
+                &first,
+                "/tmp/progressive-shared.jsonl",
+                Some(1),
+                Some(100),
+            ),
+            score: 0.0,
+            source_path: "/tmp/progressive-shared.jsonl".into(),
+            agent: "codex".into(),
+            workspace: String::new(),
+            workspace_original: None,
+            created_at: Some(100),
+            line_number: Some(1),
+            match_type: MatchType::Exact,
+            source_id: "local".into(),
+            origin_kind: "local".into(),
+            origin_host: None,
+            conversation_id: None,
+        };
+        let second_hit = SearchHit {
+            title: "Shared Session".into(),
+            snippet: String::new(),
+            content: String::new(),
+            content_hash: stable_hit_hash(
+                &second,
+                "/tmp/progressive-shared.jsonl",
+                Some(1),
+                Some(100),
+            ),
+            score: 0.0,
+            source_path: "/tmp/progressive-shared.jsonl".into(),
+            agent: "codex".into(),
+            workspace: String::new(),
+            workspace_original: None,
+            created_at: Some(100),
+            line_number: Some(1),
+            match_type: MatchType::Exact,
+            source_id: "local".into(),
+            origin_kind: "local".into(),
+            origin_host: None,
+            conversation_id: None,
+        };
+
+        let resolved = client.resolve_semantic_doc_ids_for_hits(&[first_hit, second_hit])?;
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].as_ref().map(|hit| hit.message_id), Some(11));
+        assert_eq!(resolved[1].as_ref().map(|hit| hit.message_id), Some(22));
+        assert_ne!(
+            resolved[0].as_ref().map(|hit| hit.doc_id.as_str()),
+            resolved[1].as_ref().map(|hit| hit.doc_id.as_str())
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn hydrate_semantic_hits_with_ids_keeps_missing_title_empty() -> Result<()> {
+        let conn = Connection::open(":memory:")?;
+        conn.execute_batch(
+            "CREATE TABLE agents (id INTEGER PRIMARY KEY, slug TEXT NOT NULL);
+             CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY,
+                agent_id INTEGER NOT NULL,
+                workspace_id INTEGER,
+                source_id TEXT,
+                origin_host TEXT,
+                title TEXT,
+                source_path TEXT NOT NULL,
+                started_at INTEGER
+             );
+             CREATE TABLE workspaces (id INTEGER PRIMARY KEY, path TEXT NOT NULL);
+             CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER NOT NULL,
+                idx INTEGER,
+                role TEXT,
+                content TEXT NOT NULL,
+                created_at INTEGER
+             );
+             CREATE TABLE sources (id TEXT PRIMARY KEY, kind TEXT);",
+        )?;
+        conn.execute("INSERT INTO agents(id, slug) VALUES(1, 'codex')")?;
+        conn.execute(
+            "INSERT INTO conversations(id, agent_id, workspace_id, source_id, origin_host, title, source_path, started_at)
+             VALUES(1, 1, NULL, 'local', NULL, NULL, '/tmp/untitled-semantic.jsonl', 100)",
+        )?;
+        conn.execute_with_params(
+            "INSERT INTO messages(id, conversation_id, idx, role, content, created_at)
+             VALUES(?1, 1, 0, 'assistant', ?2, 101)",
+            &[
+                fsqlite_types::value::SqliteValue::Integer(1),
+                fsqlite_types::value::SqliteValue::Text("untitled semantic body".into()),
+            ],
+        )?;
+
+        let client = SearchClient {
+            reader: None,
+            sqlite: Mutex::new(Some(SendConnection(conn))),
+            sqlite_path: None,
+            prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
+            last_reload: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch: Arc::new(AtomicU64::new(0)),
+            warm_tx: None,
+            _warm_handle: None,
+            _shared_filters: Arc::new(Mutex::new(())),
+            metrics: Metrics::default(),
+            cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
+            semantic: Mutex::new(None),
+            last_tantivy_total_count: Mutex::new(None),
+        };
+
+        let hits = client.hydrate_semantic_hits_with_ids(
+            &[VectorSearchResult {
+                message_id: 1,
+                chunk_idx: 0,
+                score: 0.9,
+            }],
+            FieldMask::new(false, true, true, true),
+        )?;
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].1.title, "");
+
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_semantic_doc_ids_for_hits_prefers_conversation_id_over_ambiguous_provenance()
+    -> Result<()> {
+        let conn = Connection::open(":memory:")?;
+        conn.execute_batch(
+            "CREATE TABLE agents (id INTEGER PRIMARY KEY, slug TEXT NOT NULL);
+             CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY,
+                agent_id INTEGER NOT NULL,
+                workspace_id INTEGER,
+                source_id TEXT,
+                origin_host TEXT,
+                title TEXT,
+                source_path TEXT NOT NULL
+             );
+             CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER NOT NULL,
+                idx INTEGER,
+                role TEXT,
+                content TEXT NOT NULL,
+                created_at INTEGER
+             );",
+        )?;
+        conn.execute("INSERT INTO agents(id, slug) VALUES(1, 'codex')")?;
+        conn.execute(
+            "INSERT INTO conversations(id, agent_id, workspace_id, source_id, origin_host, title, source_path)
+             VALUES(1, 1, NULL, 'local', NULL, 'Shared Session', '/tmp/progressive-conversation-id.jsonl')",
+        )?;
+        conn.execute(
+            "INSERT INTO conversations(id, agent_id, workspace_id, source_id, origin_host, title, source_path)
+             VALUES(2, 1, NULL, 'local', NULL, 'Shared Session', '/tmp/progressive-conversation-id.jsonl')",
+        )?;
+        let content = "same ambiguous content".to_string();
+        conn.execute_with_params(
+            "INSERT INTO messages(id, conversation_id, idx, role, content, created_at)
+             VALUES(?1, ?2, 0, 'assistant', ?3, 100)",
+            &[
+                fsqlite_types::value::SqliteValue::Integer(11),
+                fsqlite_types::value::SqliteValue::Integer(1),
+                fsqlite_types::value::SqliteValue::Text(content.clone().into()),
+            ],
+        )?;
+        conn.execute_with_params(
+            "INSERT INTO messages(id, conversation_id, idx, role, content, created_at)
+             VALUES(?1, ?2, 0, 'assistant', ?3, 100)",
+            &[
+                fsqlite_types::value::SqliteValue::Integer(22),
+                fsqlite_types::value::SqliteValue::Integer(2),
+                fsqlite_types::value::SqliteValue::Text(content.clone().into()),
+            ],
+        )?;
+
+        let client = SearchClient {
+            reader: None,
+            sqlite: Mutex::new(Some(SendConnection(conn))),
+            sqlite_path: None,
+            prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
+            last_reload: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch: Arc::new(AtomicU64::new(0)),
+            warm_tx: None,
+            _warm_handle: None,
+            _shared_filters: Arc::new(Mutex::new(())),
+            metrics: Metrics::default(),
+            cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
+            semantic: Mutex::new(None),
+            last_tantivy_total_count: Mutex::new(None),
+        };
+
+        let first_hit = SearchHit {
+            title: "Shared Session".into(),
+            snippet: String::new(),
+            content: String::new(),
+            content_hash: stable_hit_hash(
+                &content,
+                "/tmp/progressive-conversation-id.jsonl",
+                Some(1),
+                Some(100),
+            ),
+            score: 0.0,
+            source_path: "/tmp/progressive-conversation-id.jsonl".into(),
+            agent: "codex".into(),
+            workspace: String::new(),
+            workspace_original: None,
+            created_at: Some(100),
+            line_number: Some(1),
+            match_type: MatchType::Exact,
+            source_id: "local".into(),
+            origin_kind: "local".into(),
+            origin_host: None,
+            conversation_id: Some(1),
+        };
+        let second_hit = SearchHit {
+            conversation_id: Some(2),
+            ..first_hit.clone()
+        };
+
+        let resolved = client.resolve_semantic_doc_ids_for_hits(&[first_hit, second_hit])?;
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].as_ref().map(|hit| hit.message_id), Some(11));
+        assert_eq!(resolved[1].as_ref().map(|hit| hit.message_id), Some(22));
+
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_semantic_doc_ids_for_hits_treats_null_source_as_local() -> Result<()> {
+        let conn = Connection::open(":memory:")?;
+        conn.execute_batch(
+            "CREATE TABLE agents (id INTEGER PRIMARY KEY, slug TEXT NOT NULL);
+             CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY,
+                agent_id INTEGER NOT NULL,
+                workspace_id INTEGER,
+                source_id TEXT,
+                origin_host TEXT,
+                title TEXT,
+                source_path TEXT NOT NULL
+             );
+             CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER NOT NULL,
+                idx INTEGER,
+                role TEXT,
+                content TEXT NOT NULL,
+                created_at INTEGER
+             );",
+        )?;
+        conn.execute("INSERT INTO agents(id, slug) VALUES(1, 'codex')")?;
+        conn.execute(
+            "INSERT INTO conversations(id, agent_id, workspace_id, source_id, origin_host, title, source_path)
+             VALUES(1, 1, NULL, NULL, NULL, 'Legacy Local', '/tmp/legacy-local.jsonl')",
+        )?;
+        let content = "legacy local semantic message".to_string();
+        conn.execute_with_params(
+            "INSERT INTO messages(id, conversation_id, idx, role, content, created_at)
+             VALUES(?1, 1, 0, 'assistant', ?2, 100)",
+            &[
+                fsqlite_types::value::SqliteValue::Integer(11),
+                fsqlite_types::value::SqliteValue::Text(content.clone().into()),
+            ],
+        )?;
+
+        let client = SearchClient {
+            reader: None,
+            sqlite: Mutex::new(Some(SendConnection(conn))),
+            sqlite_path: None,
+            prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
+            last_reload: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch: Arc::new(AtomicU64::new(0)),
+            warm_tx: None,
+            _warm_handle: None,
+            _shared_filters: Arc::new(Mutex::new(())),
+            metrics: Metrics::default(),
+            cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
+            semantic: Mutex::new(None),
+            last_tantivy_total_count: Mutex::new(None),
+        };
+
+        let hit = SearchHit {
+            title: "Legacy Local".into(),
+            snippet: String::new(),
+            content: String::new(),
+            content_hash: stable_hit_hash(&content, "/tmp/legacy-local.jsonl", Some(1), Some(100)),
+            score: 0.0,
+            source_path: "/tmp/legacy-local.jsonl".into(),
+            agent: "codex".into(),
+            workspace: String::new(),
+            workspace_original: None,
+            created_at: Some(100),
+            line_number: Some(1),
+            match_type: MatchType::Exact,
+            source_id: "local".into(),
+            origin_kind: "local".into(),
+            origin_host: None,
+            conversation_id: None,
+        };
+
+        let resolved = client.resolve_semantic_doc_ids_for_hits(&[hit])?;
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].as_ref().map(|hit| hit.message_id), Some(11));
+
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_semantic_doc_ids_for_hits_matches_trimmed_local_source_id() -> Result<()> {
+        let conn = Connection::open(":memory:")?;
+        conn.execute_batch(
+            "CREATE TABLE agents (id INTEGER PRIMARY KEY, slug TEXT NOT NULL);
+             CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY,
+                agent_id INTEGER NOT NULL,
+                workspace_id INTEGER,
+                source_id TEXT,
+                origin_host TEXT,
+                title TEXT,
+                source_path TEXT NOT NULL
+             );
+             CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER NOT NULL,
+                idx INTEGER,
+                role TEXT,
+                content TEXT NOT NULL,
+                created_at INTEGER
+             );",
+        )?;
+        conn.execute("INSERT INTO agents(id, slug) VALUES(1, 'codex')")?;
+        conn.execute(
+            "INSERT INTO conversations(id, agent_id, workspace_id, source_id, origin_host, title, source_path)
+             VALUES(1, 1, NULL, '  local  ', NULL, 'Trimmed Local', '/tmp/trimmed-local.jsonl')",
+        )?;
+        let content = "trimmed local semantic message".to_string();
+        conn.execute_with_params(
+            "INSERT INTO messages(id, conversation_id, idx, role, content, created_at)
+             VALUES(?1, 1, 0, 'assistant', ?2, 100)",
+            &[
+                fsqlite_types::value::SqliteValue::Integer(11),
+                fsqlite_types::value::SqliteValue::Text(content.clone().into()),
+            ],
+        )?;
+
+        let client = SearchClient {
+            reader: None,
+            sqlite: Mutex::new(Some(SendConnection(conn))),
+            sqlite_path: None,
+            prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
+            last_reload: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch: Arc::new(AtomicU64::new(0)),
+            warm_tx: None,
+            _warm_handle: None,
+            _shared_filters: Arc::new(Mutex::new(())),
+            metrics: Metrics::default(),
+            cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
+            semantic: Mutex::new(None),
+            last_tantivy_total_count: Mutex::new(None),
+        };
+
+        let hit = SearchHit {
+            title: "Trimmed Local".into(),
+            snippet: String::new(),
+            content: String::new(),
+            content_hash: stable_hit_hash(&content, "/tmp/trimmed-local.jsonl", Some(1), Some(100)),
+            score: 0.0,
+            source_path: "/tmp/trimmed-local.jsonl".into(),
+            agent: "codex".into(),
+            workspace: String::new(),
+            workspace_original: None,
+            created_at: Some(100),
+            line_number: Some(1),
+            match_type: MatchType::Exact,
+            source_id: "local".into(),
+            origin_kind: "local".into(),
+            origin_host: None,
+            conversation_id: None,
+        };
+
+        let resolved = client.resolve_semantic_doc_ids_for_hits(&[hit])?;
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].as_ref().map(|doc| doc.message_id), Some(11));
+
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_semantic_doc_ids_for_hits_normalizes_blank_local_source_id() -> Result<()> {
+        let conn = Connection::open(":memory:")?;
+        conn.execute_batch(
+            "CREATE TABLE agents (id INTEGER PRIMARY KEY, slug TEXT NOT NULL);
+             CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY,
+                agent_id INTEGER NOT NULL,
+                workspace_id INTEGER,
+                source_id TEXT,
+                origin_host TEXT,
+                title TEXT,
+                source_path TEXT NOT NULL
+             );
+             CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER NOT NULL,
+                idx INTEGER,
+                role TEXT,
+                content TEXT NOT NULL,
+                created_at INTEGER
+             );",
+        )?;
+        conn.execute("INSERT INTO agents(id, slug) VALUES(1, 'codex')")?;
+        conn.execute(
+            "INSERT INTO conversations(id, agent_id, workspace_id, source_id, origin_host, title, source_path)
+             VALUES(1, 1, NULL, 'local', NULL, 'Blank Local', '/tmp/blank-local.jsonl')",
+        )?;
+        let content = "blank local semantic message".to_string();
+        conn.execute_with_params(
+            "INSERT INTO messages(id, conversation_id, idx, role, content, created_at)
+             VALUES(?1, 1, 0, 'assistant', ?2, 100)",
+            &[
+                fsqlite_types::value::SqliteValue::Integer(11),
+                fsqlite_types::value::SqliteValue::Text(content.clone().into()),
+            ],
+        )?;
+
+        let client = SearchClient {
+            reader: None,
+            sqlite: Mutex::new(Some(SendConnection(conn))),
+            sqlite_path: None,
+            prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
+            last_reload: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch: Arc::new(AtomicU64::new(0)),
+            warm_tx: None,
+            _warm_handle: None,
+            _shared_filters: Arc::new(Mutex::new(())),
+            metrics: Metrics::default(),
+            cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
+            semantic: Mutex::new(None),
+            last_tantivy_total_count: Mutex::new(None),
+        };
+
+        let hit = SearchHit {
+            title: "Blank Local".into(),
+            snippet: String::new(),
+            content: String::new(),
+            content_hash: stable_hit_hash(&content, "/tmp/blank-local.jsonl", Some(1), Some(100)),
+            score: 0.0,
+            source_path: "/tmp/blank-local.jsonl".into(),
+            agent: "codex".into(),
+            workspace: String::new(),
+            workspace_original: None,
+            created_at: Some(100),
+            line_number: Some(1),
+            match_type: MatchType::Exact,
+            source_id: "   ".into(),
+            origin_kind: "local".into(),
+            origin_host: None,
+            conversation_id: None,
+        };
+
+        let resolved = client.resolve_semantic_doc_ids_for_hits(&[hit])?;
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].as_ref().map(|doc| doc.message_id), Some(11));
+
+        Ok(())
+    }
+
+    #[test]
+    fn browse_by_date_snippet_only_uses_full_content_for_hit_identity() -> Result<()> {
+        let conn = Connection::open(":memory:")?;
+        conn.execute_batch(
+            "CREATE TABLE agents (id INTEGER PRIMARY KEY, slug TEXT NOT NULL);
+             CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY,
+                agent_id INTEGER NOT NULL,
+                workspace_id INTEGER,
+                source_id TEXT,
+                origin_host TEXT,
+                title TEXT,
+                source_path TEXT NOT NULL
+             );
+             CREATE TABLE workspaces (id INTEGER PRIMARY KEY, path TEXT NOT NULL);
+             CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER NOT NULL,
+                idx INTEGER,
+                content TEXT NOT NULL,
+                created_at INTEGER
+             );
+             CREATE TABLE sources (id TEXT PRIMARY KEY, kind TEXT);",
+        )?;
+        conn.execute("INSERT INTO agents(id, slug) VALUES(1, 'codex')")?;
+        conn.execute(
+            "INSERT INTO conversations(id, agent_id, workspace_id, source_id, origin_host, title, source_path)
+             VALUES(1, 1, NULL, 'local', NULL, 'browse title', '/tmp/browse-shared.jsonl')",
+        )?;
+        let shared_prefix = "shared-prefix ".repeat(48);
+        let first = format!("{shared_prefix}first browse-only tail");
+        let second = format!("{shared_prefix}second browse-only tail");
+        conn.execute_with_params(
+            "INSERT INTO messages(id, conversation_id, idx, content, created_at)
+             VALUES(?1, 1, ?2, ?3, ?4)",
+            &[
+                fsqlite_types::value::SqliteValue::Integer(1),
+                fsqlite_types::value::SqliteValue::Integer(0),
+                fsqlite_types::value::SqliteValue::Text(first.clone().into()),
+                fsqlite_types::value::SqliteValue::Integer(101),
+            ],
+        )?;
+        conn.execute_with_params(
+            "INSERT INTO messages(id, conversation_id, idx, content, created_at)
+             VALUES(?1, 1, ?2, ?3, ?4)",
+            &[
+                fsqlite_types::value::SqliteValue::Integer(2),
+                fsqlite_types::value::SqliteValue::Integer(1),
+                fsqlite_types::value::SqliteValue::Text(second.clone().into()),
+                fsqlite_types::value::SqliteValue::Integer(102),
+            ],
+        )?;
+
+        let client = SearchClient {
+            reader: None,
+            sqlite: Mutex::new(Some(SendConnection(conn))),
+            sqlite_path: None,
+            prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: true,
+            last_reload: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch: Arc::new(AtomicU64::new(0)),
+            warm_tx: None,
+            _warm_handle: None,
+            _shared_filters: Arc::new(Mutex::new(())),
+            metrics: Metrics::default(),
+            cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
+            semantic: Mutex::new(None),
+            last_tantivy_total_count: Mutex::new(None),
+        };
+
+        let hits = client.browse_by_date(
+            SearchFilters::default(),
+            10,
+            0,
+            true,
+            FieldMask::new(false, true, true, true),
+        )?;
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|hit| hit.content.is_empty()));
+        assert!(hits.iter().all(|hit| !hit.snippet.is_empty()));
+        assert_ne!(hits[0].content_hash, hits[1].content_hash);
+
+        Ok(())
+    }
+
+    #[test]
     fn cache_invalidates_on_new_data() -> Result<()> {
         let dir = TempDir::new()?;
         let mut index = TantivyIndex::open_or_create(dir.path())?;
@@ -7865,6 +9138,7 @@ mod tests {
             source_id: "local".into(),
             origin_kind: "local".into(),
             origin_host: None,
+            conversation_id: None,
         };
         let hits = vec![hit];
 
@@ -7923,6 +9197,7 @@ mod tests {
             source_id: "local".into(),
             origin_kind: "local".into(),
             origin_host: None,
+            conversation_id: None,
         };
         let hits = vec![hit.clone()];
 
@@ -8012,6 +9287,7 @@ mod tests {
             source_id: "local".into(),
             origin_kind: "local".into(),
             origin_host: None,
+            conversation_id: None,
         };
 
         // Put 3 entries - should trigger 1 eviction (cap is 2)
@@ -8079,6 +9355,7 @@ mod tests {
             source_id: "local".into(),
             origin_kind: "local".into(),
             origin_host: None,
+            conversation_id: None,
         };
 
         // Put 3 large entries - should trigger byte-based evictions
@@ -8358,23 +9635,25 @@ mod tests {
                 source_id: "local".into(),
                 origin_kind: "local".into(),
                 origin_host: None,
+                conversation_id: None,
             },
             SearchHit {
-                title: "title2".into(),
+                title: "title1".into(),
                 snippet: "snip2".into(),
                 content: "hello world".into(), // same content
                 content_hash: stable_content_hash("hello world"),
                 score: 0.5, // lower score
-                source_path: "b.jsonl".into(),
+                source_path: "a.jsonl".into(),
                 agent: "agent".into(),
                 workspace: "ws".into(),
                 workspace_original: None,
-                created_at: Some(200),
+                created_at: Some(100),
                 line_number: None,
                 match_type: MatchType::Exact,
                 source_id: "local".into(), // same source_id = will dedupe
                 origin_kind: "local".into(),
                 origin_host: None,
+                conversation_id: None,
             },
         ];
 
@@ -8403,30 +9682,145 @@ mod tests {
                 source_id: "local".into(),
                 origin_kind: "local".into(),
                 origin_host: None,
+                conversation_id: None,
             },
             SearchHit {
-                title: "title2".into(),
+                title: "title1".into(),
                 snippet: "snip2".into(),
                 content: "hello world".into(),
                 content_hash: stable_content_hash("hello world"),
                 score: 0.9, // higher score second
-                source_path: "b.jsonl".into(),
+                source_path: "a.jsonl".into(),
                 agent: "agent".into(),
                 workspace: "ws".into(),
                 workspace_original: None,
-                created_at: Some(200),
+                created_at: Some(100),
                 line_number: None,
                 match_type: MatchType::Exact,
                 source_id: "local".into(),
                 origin_kind: "local".into(),
                 origin_host: None,
+                conversation_id: None,
             },
         ];
 
         let deduped = deduplicate_hits(hits);
         assert_eq!(deduped.len(), 1);
         assert_eq!(deduped[0].score, 0.9); // kept higher score
-        assert_eq!(deduped[0].title, "title2");
+        assert_eq!(deduped[0].title, "title1");
+    }
+
+    #[test]
+    fn deduplicate_hits_keeps_repeated_same_content_at_different_lines() {
+        let first = SearchHit {
+            title: "Shared Session".into(),
+            snippet: String::new(),
+            content: "repeat me".into(),
+            content_hash: stable_content_hash("repeat me"),
+            score: 10.0,
+            source_path: "/shared/session.jsonl".into(),
+            agent: "codex".into(),
+            workspace: "/ws".into(),
+            workspace_original: None,
+            created_at: Some(100),
+            line_number: Some(1),
+            match_type: MatchType::Exact,
+            source_id: "local".into(),
+            origin_kind: "local".into(),
+            origin_host: None,
+            conversation_id: None,
+        };
+        let mut second = first.clone();
+        second.line_number = Some(2);
+        second.created_at = Some(200);
+        second.score = 9.0;
+
+        let deduped = deduplicate_hits(vec![first, second]);
+        assert_eq!(deduped.len(), 2);
+    }
+
+    #[test]
+    fn deduplicate_hits_keeps_distinct_conversation_ids_with_same_title_path_and_content() {
+        let mut first = make_test_hit("same", 1.0);
+        first.title = "Shared Session".into();
+        first.source_path = "/shared/session.jsonl".into();
+        first.content = "identical body".into();
+        first.content_hash = stable_content_hash("identical body");
+        first.conversation_id = Some(1);
+
+        let mut second = first.clone();
+        second.conversation_id = Some(2);
+        second.score = 0.9;
+
+        let deduped = deduplicate_hits(vec![first, second]);
+        assert_eq!(deduped.len(), 2);
+        assert!(deduped.iter().any(|hit| hit.conversation_id == Some(1)));
+        assert!(deduped.iter().any(|hit| hit.conversation_id == Some(2)));
+    }
+
+    #[test]
+    fn deduplicate_hits_coalesces_same_conversation_id_despite_title_drift() {
+        let mut first = make_test_hit("same", 1.0);
+        first.title = "Morning Session".into();
+        first.source_path = "/shared/session.jsonl".into();
+        first.content = "identical body".into();
+        first.content_hash = stable_content_hash("identical body");
+        first.conversation_id = Some(7);
+
+        let mut second = first.clone();
+        second.title = "Evening Session".into();
+        second.score = 0.9;
+
+        let deduped = deduplicate_hits(vec![first, second]);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].conversation_id, Some(7));
+    }
+
+    #[test]
+    fn deduplicate_hits_keeps_distinct_titles_with_same_source_path_and_content() {
+        let hits = vec![
+            SearchHit {
+                title: "Morning Session".into(),
+                snippet: "snip1".into(),
+                content: "hello world".into(),
+                content_hash: stable_content_hash("hello world"),
+                score: 0.9,
+                source_path: "shared.jsonl".into(),
+                agent: "agent".into(),
+                workspace: "ws".into(),
+                workspace_original: None,
+                created_at: None,
+                line_number: Some(1),
+                match_type: MatchType::Exact,
+                source_id: "local".into(),
+                origin_kind: "local".into(),
+                origin_host: None,
+                conversation_id: None,
+            },
+            SearchHit {
+                title: "Evening Session".into(),
+                snippet: "snip2".into(),
+                content: "hello world".into(),
+                content_hash: stable_content_hash("hello world"),
+                score: 0.8,
+                source_path: "shared.jsonl".into(),
+                agent: "agent".into(),
+                workspace: "ws".into(),
+                workspace_original: None,
+                created_at: None,
+                line_number: Some(1),
+                match_type: MatchType::Exact,
+                source_id: "local".into(),
+                origin_kind: "local".into(),
+                origin_host: None,
+                conversation_id: None,
+            },
+        ];
+
+        let deduped = deduplicate_hits(hits);
+        assert_eq!(deduped.len(), 2);
+        assert!(deduped.iter().any(|hit| hit.title == "Morning Session"));
+        assert!(deduped.iter().any(|hit| hit.title == "Evening Session"));
     }
 
     #[test]
@@ -8448,28 +9842,76 @@ mod tests {
                 source_id: "local".into(),
                 origin_kind: "local".into(),
                 origin_host: None,
+                conversation_id: None,
             },
             SearchHit {
-                title: "title2".into(),
+                title: "title1".into(),
                 snippet: "snip2".into(),
                 content: "hello world".into(), // normal spacing
                 content_hash: stable_content_hash("hello world"),
                 score: 0.5,
-                source_path: "b.jsonl".into(),
+                source_path: "a.jsonl".into(),
                 agent: "agent".into(),
                 workspace: "ws".into(),
                 workspace_original: None,
-                created_at: Some(200),
+                created_at: Some(100),
                 line_number: None,
                 match_type: MatchType::Exact,
                 source_id: "local".into(),
                 origin_kind: "local".into(),
                 origin_host: None,
+                conversation_id: None,
             },
         ];
 
         let deduped = deduplicate_hits(hits);
         assert_eq!(deduped.len(), 1); // normalized to same content
+    }
+
+    #[test]
+    fn deduplicate_hits_normalizes_blank_local_source_id() {
+        let hits = vec![
+            SearchHit {
+                title: "title1".into(),
+                snippet: "snip1".into(),
+                content: "hello world".into(),
+                content_hash: stable_content_hash("hello world"),
+                score: 1.0,
+                source_path: "a.jsonl".into(),
+                agent: "agent".into(),
+                workspace: "ws".into(),
+                workspace_original: None,
+                created_at: Some(100),
+                line_number: None,
+                match_type: MatchType::Exact,
+                source_id: "local".into(),
+                origin_kind: "local".into(),
+                origin_host: None,
+                conversation_id: None,
+            },
+            SearchHit {
+                title: "title1".into(),
+                snippet: "snip2".into(),
+                content: "hello world".into(),
+                content_hash: stable_content_hash("hello world"),
+                score: 0.5,
+                source_path: "a.jsonl".into(),
+                agent: "agent".into(),
+                workspace: "ws".into(),
+                workspace_original: None,
+                created_at: Some(100),
+                line_number: None,
+                match_type: MatchType::Exact,
+                source_id: "   ".into(),
+                origin_kind: "local".into(),
+                origin_host: None,
+                conversation_id: None,
+            },
+        ];
+
+        let deduped = deduplicate_hits(hits);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].source_id, "local");
     }
 
     #[test]
@@ -8491,6 +9933,7 @@ mod tests {
                 source_id: "local".into(),
                 origin_kind: "local".into(),
                 origin_host: None,
+                conversation_id: None,
             },
             SearchHit {
                 title: "title2".into(),
@@ -8508,6 +9951,7 @@ mod tests {
                 source_id: "local".into(),
                 origin_kind: "local".into(),
                 origin_host: None,
+                conversation_id: None,
             },
         ];
 
@@ -8535,6 +9979,7 @@ mod tests {
                 source_id: "local".into(),
                 origin_kind: "local".into(),
                 origin_host: None,
+                conversation_id: None,
             },
             SearchHit {
                 title: "title2".into(),
@@ -8552,6 +9997,7 @@ mod tests {
                 source_id: "local".into(),
                 origin_kind: "local".into(),
                 origin_host: None,
+                conversation_id: None,
             },
             SearchHit {
                 title: "title3".into(),
@@ -8569,6 +10015,7 @@ mod tests {
                 source_id: "local".into(),
                 origin_kind: "local".into(),
                 origin_host: None,
+                conversation_id: None,
             },
         ];
 
@@ -8597,6 +10044,7 @@ mod tests {
                 source_id: "local".into(),
                 origin_kind: "local".into(),
                 origin_host: None,
+                conversation_id: None,
             },
             SearchHit {
                 title: "remote title".into(),
@@ -8614,6 +10062,7 @@ mod tests {
                 source_id: "work-laptop".into(), // different source = no dedupe
                 origin_kind: "ssh".into(),
                 origin_host: Some("work-laptop.local".into()),
+                conversation_id: None,
             },
         ];
 
@@ -9591,6 +11040,98 @@ mod tests {
     }
 
     #[test]
+    fn lexical_hits_normalize_trimmed_local_source_metadata() -> Result<()> {
+        let dir = TempDir::new()?;
+        let mut index = TantivyIndex::open_or_create(dir.path())?;
+
+        let conv = NormalizedConversation {
+            agent_slug: "codex".into(),
+            external_id: None,
+            title: Some("trimmed local doc".into()),
+            workspace: None,
+            source_path: dir.path().join("trimmed-local.jsonl"),
+            started_at: Some(100),
+            ended_at: None,
+            metadata: serde_json::json!({
+                "cass": {
+                    "origin": {
+                        "source_id": "  LOCAL  ",
+                        "kind": "local"
+                    }
+                }
+            }),
+            messages: vec![NormalizedMessage {
+                idx: 0,
+                role: "user".into(),
+                author: None,
+                created_at: Some(100),
+                content: "trimmed local lexical".into(),
+                extra: serde_json::json!({}),
+                snippets: vec![],
+                invocations: Vec::new(),
+            }],
+        };
+        index.add_conversation(&conv)?;
+        index.commit()?;
+
+        let client = SearchClient::open(dir.path(), None)?.expect("index present");
+        let hits = client.search("trimmed", SearchFilters::default(), 10, 0, FieldMask::FULL)?;
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].source_id, "local");
+        assert_eq!(hits[0].origin_kind, "local");
+
+        Ok(())
+    }
+
+    #[test]
+    fn lexical_hits_normalize_remote_origin_kind_without_source_id() -> Result<()> {
+        let dir = TempDir::new()?;
+        let mut index = TantivyIndex::open_or_create(dir.path())?;
+
+        let conv = NormalizedConversation {
+            agent_slug: "codex".into(),
+            external_id: None,
+            title: Some("remote lexical doc".into()),
+            workspace: None,
+            source_path: dir.path().join("remote-lexical.jsonl"),
+            started_at: Some(100),
+            ended_at: None,
+            metadata: serde_json::json!({
+                "cass": {
+                    "origin": {
+                        "source_id": "   ",
+                        "kind": "ssh",
+                        "host": "dev@laptop"
+                    }
+                }
+            }),
+            messages: vec![NormalizedMessage {
+                idx: 0,
+                role: "user".into(),
+                author: None,
+                created_at: Some(100),
+                content: "remote lexical".into(),
+                extra: serde_json::json!({}),
+                snippets: vec![],
+                invocations: Vec::new(),
+            }],
+        };
+        index.add_conversation(&conv)?;
+        index.commit()?;
+
+        let client = SearchClient::open(dir.path(), None)?.expect("index present");
+        let hits = client.search("remote", SearchFilters::default(), 10, 0, FieldMask::FULL)?;
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].source_id, "dev@laptop");
+        assert_eq!(hits[0].origin_kind, "remote");
+        assert_eq!(hits[0].origin_host.as_deref(), Some("dev@laptop"));
+
+        Ok(())
+    }
+
+    #[test]
     fn filter_fidelity_source_filter_respected() -> Result<()> {
         // P3.1: Source filter should filter by origin_kind or source_id
         let dir = TempDir::new()?;
@@ -9644,7 +11185,7 @@ mod tests {
 
         // Filter for specific source ID
         let filters_id = SearchFilters {
-            source_filter: SourceFilter::SourceId("local".to_string()),
+            source_filter: SourceFilter::SourceId("  LOCAL  ".to_string()),
             ..Default::default()
         };
 
@@ -11223,6 +12764,7 @@ mod tests {
             source_id: "local".to_string(),
             origin_kind: "local".to_string(),
             origin_host: None,
+            conversation_id: None,
         }
     }
 
@@ -11355,6 +12897,162 @@ mod tests {
         let fused = rrf_fuse_hits(&non_empty, &empty, 10, 0);
         assert_eq!(fused.len(), 1);
         assert_eq!(fused[0].title, "A");
+    }
+
+    #[test]
+    fn test_rrf_coalesces_empty_title_hits_across_search_modes() {
+        let mut lexical = make_test_hit("shared", 10.0);
+        lexical.title.clear();
+        lexical.source_path = "/shared/untitled.jsonl".into();
+        lexical.content = "same untitled body".into();
+        lexical.content_hash = stable_content_hash("same untitled body");
+
+        let mut semantic = lexical.clone();
+        semantic.score = 0.9;
+
+        let fused = rrf_fuse_hits(&[lexical], &[semantic], 10, 0);
+        assert_eq!(fused.len(), 1);
+        assert_eq!(fused[0].title, "");
+    }
+
+    #[test]
+    fn test_rrf_coalesces_blank_local_source_id_hits_across_search_modes() {
+        let mut lexical = make_test_hit("shared-local", 10.0);
+        lexical.source_path = "/shared/local.jsonl".into();
+        lexical.content = "same local body".into();
+        lexical.content_hash = stable_content_hash("same local body");
+        lexical.source_id = "local".into();
+        lexical.origin_kind = "local".into();
+
+        let mut semantic = lexical.clone();
+        semantic.source_id = "   ".into();
+        semantic.origin_kind = "local".into();
+        semantic.score = 0.9;
+
+        let fused = rrf_fuse_hits(&[lexical], &[semantic], 10, 0);
+        assert_eq!(fused.len(), 1);
+        assert_eq!(fused[0].source_id, "local");
+    }
+
+    #[test]
+    fn test_rrf_keeps_repeated_same_content_at_different_lines() {
+        let mut first = make_test_hit("same", 10.0);
+        first.title = "Shared Session".into();
+        first.source_path = "/shared/session.jsonl".into();
+        first.content = "repeat me".into();
+        first.content_hash = stable_content_hash("repeat me");
+        first.line_number = Some(1);
+        first.created_at = Some(100);
+
+        let mut second = first.clone();
+        second.line_number = Some(2);
+        second.created_at = Some(200);
+        second.score = 0.9;
+
+        let fused = rrf_fuse_hits(&[first], &[second], 10, 0);
+        assert_eq!(fused.len(), 2);
+        assert_eq!(fused[0].line_number, Some(1));
+        assert_eq!(fused[1].line_number, Some(2));
+    }
+
+    #[test]
+    fn test_rrf_coalesces_present_and_missing_conversation_id_for_same_message() {
+        let mut lexical = make_test_hit("same", 10.0);
+        lexical.title = "Shared Session".into();
+        lexical.source_path = "/shared/session.jsonl".into();
+        lexical.content = "identical body".into();
+        lexical.content_hash = stable_content_hash("identical body");
+        lexical.created_at = Some(100);
+        lexical.line_number = Some(1);
+        lexical.conversation_id = None;
+
+        let mut semantic = lexical.clone();
+        semantic.conversation_id = Some(42);
+        semantic.score = 0.9;
+
+        let fused = rrf_fuse_hits(&[lexical], &[semantic], 10, 0);
+        assert_eq!(fused.len(), 1);
+        assert_eq!(fused[0].conversation_id, Some(42));
+    }
+
+    #[test]
+    fn test_rrf_coalesces_present_and_missing_conversation_id_despite_blank_local_source_id() {
+        let mut lexical = make_test_hit("same", 10.0);
+        lexical.title = "Shared Session".into();
+        lexical.source_path = "/shared/session.jsonl".into();
+        lexical.content = "identical body".into();
+        lexical.content_hash = stable_content_hash("identical body");
+        lexical.created_at = Some(100);
+        lexical.line_number = Some(1);
+        lexical.conversation_id = None;
+        lexical.source_id = "local".into();
+        lexical.origin_kind = "local".into();
+
+        let mut semantic = lexical.clone();
+        semantic.conversation_id = Some(42);
+        semantic.source_id = "   ".into();
+        semantic.origin_kind = "local".into();
+        semantic.score = 0.9;
+
+        let fused = rrf_fuse_hits(&[lexical], &[semantic], 10, 0);
+        assert_eq!(fused.len(), 1);
+        assert_eq!(fused[0].conversation_id, Some(42));
+    }
+
+    #[test]
+    fn test_rrf_keeps_distinct_conversation_ids_for_shared_path_and_content() {
+        let mut first = make_test_hit("same", 10.0);
+        first.title = "Shared Session".into();
+        first.source_path = "/shared/session.jsonl".into();
+        first.content = "identical body".into();
+        first.content_hash = stable_content_hash("identical body");
+        first.conversation_id = Some(1);
+
+        let mut second = first.clone();
+        second.conversation_id = Some(2);
+        second.score = 0.9;
+
+        let fused = rrf_fuse_hits(&[first], &[second], 10, 0);
+        assert_eq!(fused.len(), 2);
+        assert!(fused.iter().any(|hit| hit.conversation_id == Some(1)));
+        assert!(fused.iter().any(|hit| hit.conversation_id == Some(2)));
+    }
+
+    #[test]
+    fn test_rrf_coalesces_same_conversation_id_despite_title_drift() {
+        let mut lexical = make_test_hit("same", 10.0);
+        lexical.title = "Morning Session".into();
+        lexical.source_path = "/shared/session.jsonl".into();
+        lexical.content = "identical body".into();
+        lexical.content_hash = stable_content_hash("identical body");
+        lexical.conversation_id = Some(9);
+
+        let mut semantic = lexical.clone();
+        semantic.title = "Evening Session".into();
+        semantic.score = 0.9;
+
+        let fused = rrf_fuse_hits(&[lexical], &[semantic], 10, 0);
+        assert_eq!(fused.len(), 1);
+        assert_eq!(fused[0].conversation_id, Some(9));
+    }
+
+    #[test]
+    fn test_rrf_keeps_distinct_titles_for_shared_path_and_content() {
+        let mut morning = make_test_hit("same", 10.0);
+        morning.title = "Morning Session".into();
+        morning.source_path = "/shared/session.jsonl".into();
+        morning.content = "identical body".into();
+        morning.content_hash = stable_content_hash("identical body");
+        morning.created_at = None;
+
+        let mut evening = morning.clone();
+        evening.title = "Evening Session".into();
+        evening.score = 0.9;
+
+        let fused = rrf_fuse_hits(&[morning], &[evening], 10, 0);
+        assert_eq!(fused.len(), 2);
+        assert!(fused.iter().any(|hit| hit.title == "Morning Session"));
+        assert!(fused.iter().any(|hit| hit.title == "Evening Session"));
     }
 
     #[test]

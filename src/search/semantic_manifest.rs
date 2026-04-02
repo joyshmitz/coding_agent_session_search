@@ -142,6 +142,13 @@ impl ArtifactRecord {
 
     /// Evaluate this artifact's readiness against the current policy and DB
     /// fingerprint.
+    ///
+    /// **Note**: This checks schema/chunking versions, mode, model revision,
+    /// and DB fingerprint.  It does NOT detect embedder changes because the
+    /// expected embedder ID requires the embedder registry to resolve.
+    /// Callers needing embedder-change detection should call
+    /// [`SemanticAssetManifest::invalidation_action`] directly with the
+    /// correct `expected_embedder_id` from the registry.
     pub fn readiness(
         &self,
         policy: &SemanticPolicy,
@@ -606,6 +613,13 @@ impl SemanticManifest {
 
     /// Invalidate artifacts that are incompatible with the current policy.
     /// Returns the number of artifacts invalidated.
+    ///
+    /// **Note**: This detects schema version, chunking version, and mode
+    /// incompatibilities.  It does NOT detect embedder changes (e.g., minilm →
+    /// snowflake) because the policy stores short names while artifacts store
+    /// full registry IDs.  Callers who need embedder-change detection should
+    /// compare `artifact.embedder_id` against the expected ID from the
+    /// embedder registry.
     pub fn invalidate_incompatible(
         &mut self,
         policy: &SemanticPolicy,
@@ -648,12 +662,11 @@ impl SemanticManifest {
         }
 
         // Invalidate checkpoint if its schema/chunking is wrong.
-        if let Some(ref cp) = self.checkpoint {
-            if cp.schema_version != policy.semantic_schema_version
-                || cp.chunking_version != policy.chunking_strategy_version
-            {
-                self.checkpoint = None;
-            }
+        if let Some(ref cp) = self.checkpoint
+            && (cp.schema_version != policy.semantic_schema_version
+                || cp.chunking_version != policy.chunking_strategy_version)
+        {
+            self.checkpoint = None;
         }
 
         count
@@ -669,7 +682,7 @@ impl SemanticManifest {
 
     /// Total disk usage in megabytes (rounded up).
     pub fn total_size_mb(&self) -> u64 {
-        (self.total_size_bytes() + 1_048_575) / 1_048_576
+        self.total_size_bytes().div_ceil(1_048_576)
     }
 }
 
@@ -761,14 +774,19 @@ fn replace_file_from_temp(temp_path: &Path, final_path: &Path) -> std::io::Resul
                     ) =>
             {
                 let backup_path = unique_manifest_backup_path(final_path);
-                fs::rename(final_path, &backup_path)?;
+                fs::rename(final_path, &backup_path).map_err(|backup_err| {
+                    let _ = fs::remove_file(temp_path);
+                    backup_err
+                })?;
                 match fs::rename(temp_path, final_path) {
                     Ok(()) => {
                         let _ = fs::remove_file(&backup_path);
                         Ok(())
                     }
                     Err(second_err) => {
-                        let _ = fs::rename(&backup_path, final_path);
+                        if fs::rename(&backup_path, final_path).is_ok() {
+                            let _ = fs::remove_file(temp_path);
+                        }
                         Err(second_err)
                     }
                 }
