@@ -346,6 +346,7 @@ impl BundleBuilder {
                 write_private_unencrypted_notice(&private_dir)?;
             }
 
+            sync_tree(&temp_output_dir)?;
             replace_attempted = true;
             replace_dir_from_temp(&temp_output_dir, output_dir)
                 .context("Failed to install completed bundle")?;
@@ -401,13 +402,15 @@ fn unique_bundle_sidecar_path(path: &Path, suffix: &str, fallback_name: &str) ->
 
 fn replace_dir_from_temp(temp_dir: &Path, final_dir: &Path) -> Result<()> {
     if !final_dir.exists() {
-        return fs::rename(temp_dir, final_dir).with_context(|| {
+        fs::rename(temp_dir, final_dir).with_context(|| {
             format!(
                 "failed renaming completed bundle {} into place at {}",
                 temp_dir.display(),
                 final_dir.display()
             )
-        });
+        })?;
+        sync_parent_directory(final_dir)?;
+        return Ok(());
     }
 
     let backup_dir = unique_bundle_backup_dir(final_dir);
@@ -421,12 +424,15 @@ fn replace_dir_from_temp(temp_dir: &Path, final_dir: &Path) -> Result<()> {
 
     match fs::rename(temp_dir, final_dir) {
         Ok(()) => {
+            sync_parent_directory(final_dir)?;
             let _ = fs::remove_dir_all(&backup_dir);
+            sync_parent_directory(final_dir)?;
             Ok(())
         }
         Err(second_err) => match fs::rename(&backup_dir, final_dir) {
             Ok(()) => {
                 let _ = fs::remove_dir_all(temp_dir);
+                sync_parent_directory(final_dir)?;
                 bail!(
                     "failed replacing {} with {}: {}; restored original bundle",
                     final_dir.display(),
@@ -446,6 +452,63 @@ fn replace_dir_from_temp(temp_dir: &Path, final_dir: &Path) -> Result<()> {
             }
         },
     }
+}
+
+#[cfg(not(windows))]
+fn sync_tree(path: &Path) -> Result<()> {
+    sync_tree_inner(path)?;
+    sync_parent_directory(path)
+}
+
+#[cfg(windows)]
+fn sync_tree(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn sync_tree_inner(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("failed reading metadata for {}", path.display()))?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Ok(());
+    }
+    if file_type.is_file() {
+        File::open(path)
+            .with_context(|| format!("failed opening {} for sync", path.display()))?
+            .sync_all()
+            .with_context(|| format!("failed syncing {}", path.display()))?;
+        return Ok(());
+    }
+    if file_type.is_dir() {
+        for entry in
+            fs::read_dir(path).with_context(|| format!("failed reading {}", path.display()))?
+        {
+            let entry = entry.with_context(|| format!("failed walking {}", path.display()))?;
+            sync_tree_inner(&entry.path())?;
+        }
+        File::open(path)
+            .with_context(|| format!("failed opening directory {} for sync", path.display()))?
+            .sync_all()
+            .with_context(|| format!("failed syncing directory {}", path.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn sync_parent_directory(path: &Path) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    File::open(parent)
+        .with_context(|| format!("failed opening parent directory {}", parent.display()))?
+        .sync_all()
+        .with_context(|| format!("failed syncing parent directory {}", parent.display()))
+}
+
+#[cfg(windows)]
+fn sync_parent_directory(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 /// Result from bundle building
@@ -1166,6 +1229,33 @@ mod tests {
             output_dir
                 .join("private/integrity-fingerprint.txt")
                 .exists()
+        );
+    }
+
+    #[test]
+    fn test_replace_dir_from_temp_overwrites_existing_bundle() {
+        let temp = TempDir::new().unwrap();
+        let final_dir = temp.path().join("bundle");
+        let staged_dir = temp.path().join("bundle.staged");
+
+        fs::create_dir_all(final_dir.join("site")).unwrap();
+        fs::write(final_dir.join("site/old.txt"), "old").unwrap();
+
+        fs::create_dir_all(staged_dir.join("site")).unwrap();
+        fs::write(staged_dir.join("site/new.txt"), "new").unwrap();
+
+        replace_dir_from_temp(&staged_dir, &final_dir).unwrap();
+
+        assert!(!staged_dir.exists());
+        assert!(final_dir.join("site/new.txt").exists());
+        assert!(!final_dir.join("site/old.txt").exists());
+        let sidecars = fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            !sidecars.iter().any(|name| name.contains(".bundle.bak.")),
+            "backup sidecar should be cleaned up, found: {sidecars:?}"
         );
     }
 }

@@ -370,6 +370,7 @@ pub fn key_rotate(
     // 6. Regenerate integrity.json for the staged site, then swap atomically
     let manifest = crate::pages::bundle::generate_integrity_manifest(&staged_site_dir)?;
     write_json_pretty(&staged_site_dir.join("integrity.json"), &manifest)?;
+    sync_tree(&staged_site_dir)?;
     replace_dir_from_temp(&staged_site_dir, &archive_dir)?;
     refresh_private_artifacts(
         &archive_dir,
@@ -942,6 +943,7 @@ fn replace_dir_from_temp(temp_dir: &Path, final_dir: &Path) -> Result<()> {
                 final_dir.display()
             )
         })?;
+        sync_parent_directory(final_dir)?;
         return Ok(());
     }
 
@@ -956,16 +958,22 @@ fn replace_dir_from_temp(temp_dir: &Path, final_dir: &Path) -> Result<()> {
 
     match std::fs::rename(temp_dir, final_dir) {
         Ok(()) => {
+            sync_parent_directory(final_dir)?;
             let _ = std::fs::remove_dir_all(&backup_dir);
+            sync_parent_directory(final_dir)?;
             Ok(())
         }
         Err(second_err) => match std::fs::rename(&backup_dir, final_dir) {
-            Ok(()) => anyhow::bail!(
-                "failed replacing {} with {}: {}; restored original site",
-                final_dir.display(),
-                temp_dir.display(),
-                second_err
-            ),
+            Ok(()) => {
+                let _ = std::fs::remove_dir_all(temp_dir);
+                sync_parent_directory(final_dir)?;
+                anyhow::bail!(
+                    "failed replacing {} with {}: {}; restored original site",
+                    final_dir.display(),
+                    temp_dir.display(),
+                    second_err
+                )
+            }
             Err(restore_err) => anyhow::bail!(
                 "failed replacing {} with {}: {}; restore error: {}; staged site retained at {}",
                 final_dir.display(),
@@ -976,6 +984,47 @@ fn replace_dir_from_temp(temp_dir: &Path, final_dir: &Path) -> Result<()> {
             ),
         },
     }
+}
+
+#[cfg(not(windows))]
+fn sync_tree(path: &Path) -> Result<()> {
+    sync_tree_inner(path)?;
+    sync_parent_directory(path)
+}
+
+#[cfg(windows)]
+fn sync_tree(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn sync_tree_inner(path: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("Failed reading metadata for {}", path.display()))?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Ok(());
+    }
+    if file_type.is_file() {
+        std::fs::File::open(path)
+            .with_context(|| format!("Failed opening {} for sync", path.display()))?
+            .sync_all()
+            .with_context(|| format!("Failed syncing {}", path.display()))?;
+        return Ok(());
+    }
+    if file_type.is_dir() {
+        for entry in std::fs::read_dir(path)
+            .with_context(|| format!("Failed reading directory {}", path.display()))?
+        {
+            let entry = entry.with_context(|| format!("Failed walking {}", path.display()))?;
+            sync_tree_inner(&entry.path())?;
+        }
+        std::fs::File::open(path)
+            .with_context(|| format!("Failed opening directory {} for sync", path.display()))?
+            .sync_all()
+            .with_context(|| format!("Failed syncing directory {}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn copy_site_except_runtime_state(src: &Path, dst: &Path) -> Result<()> {
@@ -1639,5 +1688,32 @@ mod tests {
         let written: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(written, value);
+    }
+
+    #[test]
+    fn test_replace_dir_from_temp_overwrites_existing_site() {
+        let temp_dir = TempDir::new().unwrap();
+        let final_dir = temp_dir.path().join("archive");
+        let staged_dir = temp_dir.path().join("archive.staged");
+
+        std::fs::create_dir_all(final_dir.join("site")).unwrap();
+        std::fs::write(final_dir.join("site/old.txt"), "old").unwrap();
+
+        std::fs::create_dir_all(staged_dir.join("site")).unwrap();
+        std::fs::write(staged_dir.join("site/new.txt"), "new").unwrap();
+
+        replace_dir_from_temp(&staged_dir, &final_dir).unwrap();
+
+        assert!(!staged_dir.exists());
+        assert!(final_dir.join("site/new.txt").exists());
+        assert!(!final_dir.join("site/old.txt").exists());
+        let sidecars = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(
+            !sidecars.iter().any(|name| name.contains(".archive.bak.")),
+            "backup sidecar should be cleaned up, found: {sidecars:?}"
+        );
     }
 }

@@ -337,6 +337,7 @@ impl EncryptionEngine {
             let chunk_path = payload_dir.join(&chunk_filename);
             let mut chunk_file = File::create(&chunk_path)?;
             chunk_file.write_all(&ciphertext)?;
+            chunk_file.sync_all()?;
 
             chunk_files.push(format!("payload/{}", chunk_filename));
             total_compressed += ciphertext.len() as u64;
@@ -369,10 +370,45 @@ impl EncryptionEngine {
         // Write config.json
         let config_path = output_dir.join("config.json");
         let config_file = File::create(&config_path)?;
-        serde_json::to_writer_pretty(BufWriter::new(config_file), &config)?;
+        let mut config_writer = BufWriter::new(config_file);
+        serde_json::to_writer_pretty(&mut config_writer, &config)?;
+        config_writer.flush()?;
+        config_writer.get_ref().sync_all()?;
+        sync_tree(output_dir)?;
 
         Ok(config)
     }
+}
+
+#[cfg(not(windows))]
+fn sync_tree(path: &Path) -> Result<()> {
+    sync_tree_inner(path)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn sync_tree(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn sync_tree_inner(path: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Ok(());
+    }
+    if file_type.is_file() {
+        File::open(path)?.sync_all()?;
+        return Ok(());
+    }
+    if file_type.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            sync_tree_inner(&entry?.path())?;
+        }
+        File::open(path)?.sync_all()?;
+    }
+    Ok(())
 }
 
 /// Decryption engine
