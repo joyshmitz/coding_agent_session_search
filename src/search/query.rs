@@ -1027,6 +1027,9 @@ pub enum ProgressivePhaseKind {
     Refined,
 }
 
+// Phase events intentionally carry a complete SearchResult so consumers can
+// react without reloading auxiliary state or keeping cross-event caches.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum ProgressiveSearchEvent {
     Phase {
@@ -1403,19 +1406,19 @@ pub fn rrf_fuse_hits(
     let mut next_source_id: u32 = 0;
     let mut next_path_id: u32 = 0;
     let mut next_title_id: u32 = 0;
-    let mut exact_seen: HashMap<
-        (
-            u32,
-            u32,
-            Option<i64>,
-            Option<u32>,
-            Option<usize>,
-            Option<i64>,
-            u64,
-        ),
-        usize,
-    > = HashMap::with_capacity(fused.len());
-    let mut fallback_seen: HashMap<(u32, u32, u32, Option<usize>, Option<i64>, u64), CompatSlot> =
+    type CompatExactKey = (
+        u32,
+        u32,
+        Option<i64>,
+        Option<u32>,
+        Option<usize>,
+        Option<i64>,
+        u64,
+    );
+    type CompatFallbackKey = (u32, u32, u32, Option<usize>, Option<i64>, u64);
+
+    let mut exact_seen: HashMap<CompatExactKey, usize> = HashMap::with_capacity(fused.len());
+    let mut fallback_seen: HashMap<CompatFallbackKey, CompatSlot> =
         HashMap::with_capacity(fused.len());
     let mut unique_hits: Vec<SearchHit> = Vec::with_capacity(fused.len());
 
@@ -1933,7 +1936,7 @@ impl FsLexicalSearch for CassProgressiveLexicalAdapter {
             let mut scored = Vec::with_capacity(result.hits.len());
             let mut hits_by_message = HashMap::with_capacity(result.hits.len());
 
-            for (hit, resolved_doc) in result.hits.iter().zip(resolved.into_iter()) {
+            for (hit, resolved_doc) in result.hits.iter().zip(resolved) {
                 let Some(resolved_doc) = resolved_doc else {
                     continue;
                 };
@@ -2427,18 +2430,17 @@ pub(crate) fn deduplicate_hits(hits: Vec<SearchHit>) -> Vec<SearchHit> {
     let mut next_source_id: u32 = 0;
     let mut next_path_id: u32 = 0;
     let mut next_title_id: u32 = 0;
-    let mut seen: HashMap<
-        (
-            u32,
-            u32,
-            Option<i64>,
-            Option<u32>,
-            Option<usize>,
-            Option<i64>,
-            u64,
-        ),
-        usize,
-    > = HashMap::new();
+    type DedupKey = (
+        u32,
+        u32,
+        Option<i64>,
+        Option<u32>,
+        Option<usize>,
+        Option<i64>,
+        u64,
+    );
+
+    let mut seen: HashMap<DedupKey, usize> = HashMap::new();
     let mut deduped: Vec<SearchHit> = Vec::new();
 
     for hit in hits {

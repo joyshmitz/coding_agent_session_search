@@ -3736,7 +3736,7 @@ async fn execute_cli(
                     group_by,
                     source,
                 } => {
-                    let structured_format = resolve_subcommand_structured_format(&cli, json);
+                    let structured_format = resolve_subcommand_structured_format(cli, json);
                     run_timeline(
                         since.as_deref(),
                         until.as_deref(),
@@ -4757,6 +4757,9 @@ struct ActiveIndexRunDetails {
     started_at_ms: Option<i64>,
     data_dir: PathBuf,
     db_path: PathBuf,
+    job_id: Option<String>,
+    job_kind: Option<crate::search::asset_state::SearchMaintenanceJobKind>,
+    phase: Option<String>,
 }
 
 impl ActiveIndexRunDetails {
@@ -4770,6 +4773,9 @@ impl ActiveIndexRunDetails {
             started_at_ms: snapshot.started_at_ms,
             data_dir: data_dir.to_path_buf(),
             db_path: snapshot.db_path.unwrap_or_else(|| db_path.to_path_buf()),
+            job_id: snapshot.job_id,
+            job_kind: snapshot.job_kind,
+            phase: snapshot.phase,
         })
     }
 
@@ -4779,6 +4785,9 @@ impl ActiveIndexRunDetails {
             started_at_ms: None,
             data_dir: data_dir.to_path_buf(),
             db_path: db_path.to_path_buf(),
+            job_id: None,
+            job_kind: None,
+            phase: None,
         }
     }
 
@@ -4792,6 +4801,9 @@ impl ActiveIndexRunDetails {
             "db_path": self.db_path.display().to_string(),
             "pid": self.pid,
             "started_at": self.started_at_rfc3339(),
+            "job_id": self.job_id,
+            "job_kind": self.job_kind.map(|kind| kind.as_lock_value()),
+            "phase": self.phase,
         })
     }
 
@@ -4799,6 +4811,15 @@ impl ActiveIndexRunDetails {
         let mut details = Vec::new();
         if let Some(pid) = self.pid {
             details.push(format!("pid {pid}"));
+        }
+        if let Some(job_id) = &self.job_id {
+            details.push(format!("job {job_id}"));
+        }
+        if let Some(job_kind) = self.job_kind {
+            details.push(format!("kind {}", job_kind.as_lock_value()));
+        }
+        if let Some(phase) = &self.phase {
+            details.push(format!("phase {phase}"));
         }
         if let Some(started_at) = self.started_at_rfc3339() {
             details.push(format!("started {started_at}"));
@@ -5037,12 +5058,17 @@ fn state_meta_json(
         },
         "pending": {
             "sessions": lexical.pending_sessions,
-            "watch_active": lexical.watch_active
+            "watch_active": lexical.watch_active,
+            "orphaned": index_run.orphaned
         },
         "rebuild": {
             "active": lexical.rebuilding,
+            "orphaned": index_run.orphaned,
             "pid": index_run.pid,
             "mode": index_run.mode.map(|mode| mode.as_lock_value()),
+            "job_id": index_run.job_id,
+            "job_kind": index_run.job_kind.map(|kind| kind.as_lock_value()),
+            "phase": index_run.phase,
             "started_at": index_run.started_at_ms.map(|ts| {
                 chrono::DateTime::from_timestamp_millis(ts)
                     .unwrap_or_else(chrono::Utc::now)
@@ -9971,6 +9997,47 @@ mod cli_read_db_tests {
     }
 
     #[test]
+    fn state_meta_json_reports_orphaned_lock_metadata() {
+        let (temp, db_path) = seed_cli_db();
+        let index_path = crate::search::tantivy::index_dir(temp.path()).expect("index dir");
+        std::fs::create_dir_all(&index_path).expect("create index dir");
+        std::fs::write(index_path.join("meta.json"), b"{}").expect("write meta.json");
+
+        let lock_path = temp.path().join("index-run.lock");
+        std::fs::write(
+            &lock_path,
+            format!(
+                concat!(
+                    "pid={}\n",
+                    "started_at_ms={}\n",
+                    "updated_at_ms={}\n",
+                    "db_path={}\n",
+                    "mode=index\n",
+                    "job_id={}\n",
+                    "job_kind=lexical_refresh\n",
+                    "phase=rebuilding\n"
+                ),
+                4242_u32,
+                1_733_000_888_000_i64,
+                1_733_000_999_000_i64,
+                db_path.display(),
+                "lexical_refresh-1733000888000-4242"
+            ),
+        )
+        .expect("write orphaned lock metadata");
+
+        let state = state_meta_json(temp.path(), &db_path, 60, true);
+        assert_eq!(state["pending"]["orphaned"].as_bool(), Some(true));
+        assert_eq!(state["rebuild"]["orphaned"].as_bool(), Some(true));
+        assert_eq!(state["rebuild"]["active"].as_bool(), Some(false));
+        assert_eq!(
+            state["rebuild"]["job_kind"].as_str(),
+            Some("lexical_refresh")
+        );
+        assert_eq!(state["rebuild"]["phase"].as_str(), Some("rebuilding"));
+    }
+
+    #[test]
     fn state_meta_json_does_not_infer_watch_activity_from_watch_state_file() {
         let (temp, db_path) = seed_cli_db();
         let index_path = crate::search::tantivy::index_dir(temp.path()).expect("index dir");
@@ -10111,6 +10178,9 @@ mod cli_read_db_tests {
             started_at_ms: Some(1_733_001_333_000_i64),
             data_dir: PathBuf::from("/tmp/cass-data"),
             db_path: PathBuf::from("/tmp/cass-data/agent_search.db"),
+            job_id: Some("lexical_refresh-1733001333000-777".to_string()),
+            job_kind: Some(crate::search::asset_state::SearchMaintenanceJobKind::LexicalRefresh),
+            phase: Some("rebuilding".to_string()),
         };
 
         let err = details.to_cli_error();
@@ -12941,10 +13011,10 @@ fn normalized_provenance_source_id(
         return host;
     }
 
-    if let Some(kind) = origin_kind.map(str::trim).filter(|value| !value.is_empty()) {
-        if kind.eq_ignore_ascii_case("ssh") || kind.eq_ignore_ascii_case("remote") {
-            return "remote".to_string();
-        }
+    if let Some(kind) = origin_kind.map(str::trim).filter(|value| !value.is_empty())
+        && (kind.eq_ignore_ascii_case("ssh") || kind.eq_ignore_ascii_case("remote"))
+    {
+        return "remote".to_string();
     }
 
     crate::sources::provenance::LOCAL_SOURCE_ID.to_string()
@@ -13181,7 +13251,7 @@ fn try_load_indexed_conversation_from_db(
 }
 
 fn run_view(
-    path: &PathBuf,
+    path: &Path,
     db_override: Option<PathBuf>,
     source_id: Option<&str>,
     line: Option<usize>,
@@ -14543,7 +14613,7 @@ fn run_export_html(
             .workspace
             .as_ref()
             .map(|p| p.display().to_string());
-        raw_messages = conversation_view_to_raw_messages(&view);
+        raw_messages = conversation_view_to_raw_messages(view);
     } else {
         // Detect agent from path
         let path_str = session_path.to_string_lossy();

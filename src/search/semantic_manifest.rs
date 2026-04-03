@@ -575,6 +575,7 @@ impl SemanticManifest {
 
     /// Adopt a legacy (pre-manifest) artifact if it is compatible with the
     /// current schema/chunking versions.  Returns `true` if adopted.
+    #[allow(clippy::too_many_arguments)]
     pub fn adopt_legacy_artifact(
         &mut self,
         tier: TierKind,

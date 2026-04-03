@@ -6270,7 +6270,7 @@ impl CassApp {
 
         let moved = self.saved_views.remove(from_idx);
         self.saved_views.insert(to_idx, moved);
-        for (view, slot) in self.saved_views.iter_mut().zip(ordered_slots.into_iter()) {
+        for (view, slot) in self.saved_views.iter_mut().zip(ordered_slots) {
             view.slot = slot;
         }
         self.saved_views_selection = to_idx.min(self.saved_views.len().saturating_sub(1));
@@ -10923,8 +10923,8 @@ impl CassApp {
             ]));
         }
         {
-            let mut ly = inner.y;
-            for line in &lines {
+            for (i, line) in lines.iter().enumerate() {
+                let ly = inner.y + i as u16;
                 if ly >= inner.y + inner.height {
                     break;
                 }
@@ -10938,7 +10938,6 @@ impl CassApp {
                 )
                 .style(bg)
                 .render(row, frame);
-                ly += 1;
             }
         }
     }
@@ -11938,6 +11937,7 @@ impl CassApp {
         let prev_visible = self.help_visible_height.get() as usize;
         let title = if prev_content > prev_visible && prev_visible > 0 {
             let max_scroll = prev_content.saturating_sub(prev_visible);
+            #[allow(clippy::manual_checked_ops)]
             let pct = if max_scroll == 0 {
                 100
             } else {
@@ -21622,6 +21622,7 @@ fn tui_prefers_direct_followup_file(hit: &SearchHit) -> bool {
     )
 }
 
+#[allow(clippy::type_complexity)]
 fn load_local_export_raw_messages(
     session_path: &std::path::Path,
 ) -> Result<(Vec<serde_json::Value>, Option<String>, Option<i64>), String> {
@@ -22172,7 +22173,10 @@ pub fn run_tui_ftui(
     if model.db_path.exists() {
         match crate::storage::sqlite::FrankenStorage::open_readonly(&model.db_path) {
             Ok(storage) => {
-                model.db_reader = Some(Arc::new(storage));
+                #[allow(clippy::arc_with_non_send_sync)]
+                {
+                    model.db_reader = Some(Arc::new(storage));
+                }
             }
             Err(e) => {
                 eprintln!("warn: failed to open db_reader: {e}");

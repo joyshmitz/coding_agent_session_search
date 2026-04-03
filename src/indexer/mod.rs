@@ -32,7 +32,7 @@ use crate::connectors::{
     pi_agent::PiAgentConnector, qwen::QwenConnector, vibe::VibeConnector,
 };
 use crate::connectors::{NormalizedConversation, NormalizedMessage};
-use crate::search::asset_state::SearchMaintenanceMode;
+use crate::search::asset_state::{SearchMaintenanceJobKind, SearchMaintenanceMode};
 use crate::search::tantivy::{TantivyIndex, index_dir, schema_hash_matches};
 use crate::search::vector_index::{ROLE_ASSISTANT, ROLE_SYSTEM, ROLE_TOOL, ROLE_USER};
 
@@ -510,17 +510,24 @@ struct IndexRunLockGuard {
     file: File,
     _path: PathBuf,
     started_at_ms: i64,
+    updated_at_ms: i64,
     db_path: PathBuf,
+    job_id: String,
+    job_kind: SearchMaintenanceJobKind,
 }
 
 impl Drop for IndexRunLockGuard {
     fn drop(&mut self) {
+        let _ = self.file.set_len(0);
+        let _ = self.file.rewind();
+        let _ = self.file.flush();
         let _ = self.file.unlock();
     }
 }
 
 impl IndexRunLockGuard {
     fn write_metadata(&mut self, mode: SearchMaintenanceMode) -> Result<()> {
+        self.updated_at_ms = FrankenStorage::now_millis();
         self.file.set_len(0).with_context(|| {
             format!(
                 "truncating index-run lock file before metadata update: {}",
@@ -535,10 +542,14 @@ impl IndexRunLockGuard {
         })?;
         writeln!(
             self.file,
-            "pid={}\nstarted_at_ms={}\ndb_path={}\nmode={}",
+            "pid={}\nstarted_at_ms={}\nupdated_at_ms={}\ndb_path={}\nmode={}\njob_id={}\njob_kind={}\nphase={}",
             std::process::id(),
             self.started_at_ms,
+            self.updated_at_ms,
             self.db_path.display(),
+            mode.as_lock_value(),
+            self.job_id,
+            self.job_kind.as_lock_value(),
             mode.as_lock_value()
         )
         .with_context(|| format!("writing index-run metadata to {}", self._path.display()))?;
@@ -551,6 +562,10 @@ impl IndexRunLockGuard {
     fn set_mode(&mut self, mode: SearchMaintenanceMode) -> Result<()> {
         self.write_metadata(mode)
     }
+}
+
+fn maintenance_job_kind_for_mode(_mode: SearchMaintenanceMode) -> SearchMaintenanceJobKind {
+    SearchMaintenanceJobKind::LexicalRefresh
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -686,8 +701,17 @@ fn acquire_index_run_lock(
         file,
         _path: lock_path,
         started_at_ms: FrankenStorage::now_millis(),
+        updated_at_ms: FrankenStorage::now_millis(),
         db_path: db_path.to_path_buf(),
+        job_id: String::new(),
+        job_kind: maintenance_job_kind_for_mode(mode),
     };
+    guard.job_id = format!(
+        "{}-{}-{}",
+        guard.job_kind.as_lock_value(),
+        guard.started_at_ms,
+        std::process::id()
+    );
     guard.write_metadata(mode)?;
     Ok(guard)
 }
@@ -1653,6 +1677,7 @@ fn spawn_connector_producer(
 /// Receives batches from producer threads and ingests them into storage.
 /// Processes batches as they arrive, providing early feedback and reducing
 /// peak memory usage compared to batch collection.
+#[allow(clippy::too_many_arguments)]
 fn run_streaming_consumer(
     rx: Receiver<IndexMessage>,
     num_producers: usize,
@@ -1887,6 +1912,7 @@ fn run_streaming_index(
 
 type ConnectorFactory = fn() -> Box<dyn Connector + Send>;
 
+#[allow(clippy::too_many_arguments)]
 fn run_streaming_index_with_connector_factories(
     storage: &FrankenStorage,
     t_index: &mut TantivyIndex,

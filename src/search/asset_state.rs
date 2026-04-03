@@ -62,6 +62,29 @@ impl SearchMaintenanceMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub(crate) enum SearchMaintenanceJobKind {
+    LexicalRefresh,
+    SemanticAcquire,
+}
+
+impl SearchMaintenanceJobKind {
+    pub(crate) fn as_lock_value(self) -> &'static str {
+        match self {
+            Self::LexicalRefresh => "lexical_refresh",
+            Self::SemanticAcquire => "semantic_acquire",
+        }
+    }
+
+    pub(crate) fn parse_lock_value(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "lexical_refresh" => Some(Self::LexicalRefresh),
+            "semantic_acquire" => Some(Self::SemanticAcquire),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SearchMaintenanceSnapshot {
     pub active: bool,
@@ -69,6 +92,11 @@ pub(crate) struct SearchMaintenanceSnapshot {
     pub started_at_ms: Option<i64>,
     pub db_path: Option<PathBuf>,
     pub mode: Option<SearchMaintenanceMode>,
+    pub job_id: Option<String>,
+    pub job_kind: Option<SearchMaintenanceJobKind>,
+    pub phase: Option<String>,
+    pub updated_at_ms: Option<i64>,
+    pub orphaned: bool,
 }
 
 pub(crate) fn read_search_maintenance_snapshot(data_dir: &Path) -> SearchMaintenanceSnapshot {
@@ -85,6 +113,10 @@ pub(crate) fn read_search_maintenance_snapshot(data_dir: &Path) -> SearchMainten
     let mut started_at_ms = None;
     let mut lock_db_path = None::<PathBuf>;
     let mut mode = None;
+    let mut job_id = None;
+    let mut job_kind = None;
+    let mut phase = None;
+    let mut updated_at_ms = None;
     for line in raw.lines() {
         let Some((key, value)) = line.split_once('=') else {
             continue;
@@ -94,6 +126,10 @@ pub(crate) fn read_search_maintenance_snapshot(data_dir: &Path) -> SearchMainten
             "started_at_ms" => started_at_ms = value.trim().parse::<i64>().ok(),
             "db_path" => lock_db_path = Some(PathBuf::from(value.trim())),
             "mode" => mode = SearchMaintenanceMode::parse_lock_value(value),
+            "job_id" => job_id = Some(value.trim().to_string()).filter(|value| !value.is_empty()),
+            "job_kind" => job_kind = SearchMaintenanceJobKind::parse_lock_value(value),
+            "phase" => phase = Some(value.trim().to_string()).filter(|value| !value.is_empty()),
+            "updated_at_ms" => updated_at_ms = value.trim().parse::<i64>().ok(),
             _ => {}
         }
     }
@@ -106,6 +142,14 @@ pub(crate) fn read_search_maintenance_snapshot(data_dir: &Path) -> SearchMainten
         Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => true,
         Err(_) => false,
     };
+    let metadata_present = pid.is_some()
+        || started_at_ms.is_some()
+        || lock_db_path.is_some()
+        || mode.is_some()
+        || job_id.is_some()
+        || job_kind.is_some()
+        || phase.is_some()
+        || updated_at_ms.is_some();
 
     SearchMaintenanceSnapshot {
         active,
@@ -113,6 +157,11 @@ pub(crate) fn read_search_maintenance_snapshot(data_dir: &Path) -> SearchMainten
         started_at_ms,
         db_path: lock_db_path,
         mode,
+        job_id,
+        job_kind,
+        phase,
+        updated_at_ms,
+        orphaned: metadata_present && !active,
     }
 }
 
@@ -420,6 +469,7 @@ fn lexical_state_from_observations(input: LexicalObservationInput<'_>) -> Lexica
     let activity_at_ms = checkpoint
         .filter(|_| checkpoint_progress_usable)
         .and_then(|state| (state.updated_at_ms > 0).then_some(state.updated_at_ms))
+        .or(maintenance.updated_at_ms)
         .or(maintenance.started_at_ms);
 
     LexicalAssetState {
@@ -592,6 +642,53 @@ mod tests {
     }
 
     #[test]
+    fn maintenance_job_kind_round_trips_lock_values() {
+        for kind in [
+            SearchMaintenanceJobKind::LexicalRefresh,
+            SearchMaintenanceJobKind::SemanticAcquire,
+        ] {
+            assert_eq!(
+                SearchMaintenanceJobKind::parse_lock_value(kind.as_lock_value()),
+                Some(kind)
+            );
+        }
+    }
+
+    #[test]
+    fn inactive_lock_metadata_is_reported_as_orphaned() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let lock_path = temp.path().join("index-run.lock");
+        std::fs::write(
+            &lock_path,
+            concat!(
+                "pid=4242\n",
+                "started_at_ms=1733000111000\n",
+                "updated_at_ms=1733000112000\n",
+                "db_path=/tmp/cass/agent_search.db\n",
+                "mode=index\n",
+                "job_id=lexical-refresh-1733000111000-4242\n",
+                "job_kind=lexical_refresh\n",
+                "phase=rebuilding\n"
+            ),
+        )
+        .expect("write lock metadata");
+
+        let snapshot = read_search_maintenance_snapshot(temp.path());
+        assert!(!snapshot.active);
+        assert!(snapshot.orphaned);
+        assert_eq!(
+            snapshot.job_id.as_deref(),
+            Some("lexical-refresh-1733000111000-4242")
+        );
+        assert_eq!(
+            snapshot.job_kind,
+            Some(SearchMaintenanceJobKind::LexicalRefresh)
+        );
+        assert_eq!(snapshot.phase.as_deref(), Some("rebuilding"));
+        assert_eq!(snapshot.updated_at_ms, Some(1_733_000_112_000));
+    }
+
+    #[test]
     fn lexical_state_marks_fingerprint_mismatch_stale() {
         let temp = tempfile::tempdir().expect("tempdir");
         let index_path = temp.path().join("index").join("v4");
@@ -673,6 +770,11 @@ mod tests {
                 started_at_ms: Some(1_733_000_111_000),
                 db_path: Some(db_path.clone()),
                 mode: Some(SearchMaintenanceMode::Index),
+                job_id: None,
+                job_kind: None,
+                phase: None,
+                updated_at_ms: None,
+                orphaned: false,
             },
             checkpoint: Some(&checkpoint),
             current_db_fingerprint: Some("after"),

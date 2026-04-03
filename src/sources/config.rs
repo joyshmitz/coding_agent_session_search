@@ -377,10 +377,10 @@ impl SourcesConfig {
         let platform_path = dirs::config_dir().map(|p| p.join("cass").join("sources.toml"));
 
         // If the platform path exists, use it
-        if let Some(ref p) = platform_path {
-            if p.exists() {
-                return Ok(p.clone());
-            }
+        if let Some(ref p) = platform_path
+            && p.exists()
+        {
+            return Ok(p.clone());
         }
 
         // Fallback: check ~/.config/cass/sources.toml (common on macOS for users

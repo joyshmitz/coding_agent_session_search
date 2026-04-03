@@ -54,21 +54,16 @@ use serde::{Deserialize, Serialize};
 // ─── Behaviour mode ────────────────────────────────────────────────────────
 
 /// How aggressively cass pursues semantic search.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SemanticMode {
     /// Default.  Lexical always works; semantic blended in when available.
+    #[default]
     HybridPreferred,
     /// Lexical only — never build or consult semantic assets.
     LexicalOnly,
     /// Both tiers required.  Errors if semantic is unavailable.
     StrictSemantic,
-}
-
-impl Default for SemanticMode {
-    fn default() -> Self {
-        Self::HybridPreferred
-    }
 }
 
 impl fmt::Display for SemanticMode {
@@ -106,21 +101,16 @@ impl SemanticMode {
 // ─── Model download policy ─────────────────────────────────────────────────
 
 /// Whether model downloads are automatic, opt-in, or budget-gated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelDownloadPolicy {
     /// Never download automatically; user must explicitly request.
+    #[default]
     OptIn,
     /// Download if disk budget allows and user has consented once.
     BudgetGated,
     /// Download automatically when needed (not recommended for constrained machines).
     Automatic,
-}
-
-impl Default for ModelDownloadPolicy {
-    fn default() -> Self {
-        Self::OptIn
-    }
 }
 
 impl fmt::Display for ModelDownloadPolicy {
@@ -319,10 +309,10 @@ impl SemanticPolicy {
     }
 
     fn with_env_lookup(mut self, mut lookup: impl FnMut(&str) -> Option<String>) -> Self {
-        if let Some(val) = lookup("CASS_SEMANTIC_MODE") {
-            if let Some(mode) = SemanticMode::parse(&val) {
-                self.mode = mode;
-            }
+        if let Some(val) = lookup("CASS_SEMANTIC_MODE")
+            && let Some(mode) = SemanticMode::parse(&val)
+        {
+            self.mode = mode;
         }
 
         // Legacy alias: CASS_SEMANTIC_EMBEDDER=hash → LexicalOnly is wrong,
@@ -344,10 +334,10 @@ impl SemanticPolicy {
             }
         }
 
-        if let Some(val) = lookup("CASS_SEMANTIC_DOWNLOAD_POLICY") {
-            if let Some(policy) = ModelDownloadPolicy::parse(&val) {
-                self.download_policy = policy;
-            }
+        if let Some(val) = lookup("CASS_SEMANTIC_DOWNLOAD_POLICY")
+            && let Some(policy) = ModelDownloadPolicy::parse(&val)
+        {
+            self.download_policy = policy;
         }
 
         if let Some(val) = lookup("CASS_SEMANTIC_BUDGET_MB")
@@ -584,7 +574,10 @@ impl EffectiveSettings {
             env_var: None,
         });
 
-        let env_only_fields: &[(&str, &str, fn(&SemanticPolicy) -> String)] = &[
+        type EnvOnlyFieldGetter = fn(&SemanticPolicy) -> String;
+        type EnvOnlyField<'a> = (&'a str, &'a str, EnvOnlyFieldGetter);
+
+        let env_only_fields: &[EnvOnlyField<'_>] = &[
             ("fast_dimension", "CASS_TWO_TIER_FAST_DIM", |p| {
                 p.fast_dimension.to_string()
             }),

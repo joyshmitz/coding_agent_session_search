@@ -156,7 +156,7 @@ impl SemanticIndexer {
                 );
             }
 
-            for (prepared, vector) in batch.iter().zip(vectors.into_iter()) {
+            for (prepared, vector) in batch.iter().zip(vectors) {
                 if vector.len() != embedder.dimension() {
                     bail!(
                         "embedding dimension mismatch: expected {}, got {}",

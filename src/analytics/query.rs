@@ -63,6 +63,11 @@ fn normalize_epoch_millis(ts: i64) -> i64 {
         ts
     }
 }
+fn normalized_epoch_millis_sql(expr: &str) -> String {
+    format!(
+        "CASE WHEN ({expr}) >= 0 AND ({expr}) < 100000000000 THEN ({expr}) * 1000 ELSE ({expr}) END"
+    )
+}
 
 fn is_recently_updated(last_updated: Option<i64>, now_ms: i64, threshold_ms: i64) -> bool {
     last_updated.is_some_and(|ts| (now_ms - normalize_epoch_millis(ts)).abs() < threshold_ms)
@@ -155,6 +160,53 @@ fn normalized_analytics_agent_sql_expr(column: &str) -> String {
 
 fn sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+fn canonical_message_metrics_from_sql(conn: &Connection) -> Option<String> {
+    if !table_exists(conn, "message_metrics")
+        || !table_has_column(conn, "message_metrics", "message_id")
+    {
+        return None;
+    }
+
+    let mut select_parts = vec!["message_id".to_string()];
+    for column in [
+        "created_at_ms",
+        "hour_id",
+        "day_id",
+        "agent_slug",
+        "workspace_id",
+        "source_id",
+        "role",
+        "content_chars",
+        "content_tokens_est",
+        "api_input_tokens",
+        "api_output_tokens",
+        "api_cache_read_tokens",
+        "api_cache_creation_tokens",
+        "api_thinking_tokens",
+        "tool_call_count",
+        "has_plan",
+    ] {
+        if table_has_column(conn, "message_metrics", column) {
+            select_parts.push(format!("MAX({column}) AS {column}"));
+        }
+    }
+    if table_has_column(conn, "message_metrics", "api_data_source") {
+        select_parts.push(
+            "CASE
+                WHEN MAX(CASE WHEN LOWER(TRIM(COALESCE(api_data_source, ''))) = 'api' THEN 1 ELSE 0 END) != 0 THEN 'api'
+                WHEN MAX(CASE WHEN LOWER(TRIM(COALESCE(api_data_source, ''))) = 'estimated' THEN 1 ELSE 0 END) != 0 THEN 'estimated'
+                ELSE NULL
+             END AS api_data_source"
+                .to_string(),
+        );
+    }
+
+    Some(format!(
+        "(SELECT {} FROM message_metrics GROUP BY message_id) mm",
+        select_parts.join(", ")
+    ))
 }
 
 fn analytics_source_filter_matches_key(filter: &SourceFilter, key: &str) -> bool {
@@ -316,11 +368,12 @@ fn build_filtered_where_sql<'a>(
             }
         }
         Some(AnalyticsTimeColumn::TimestampMs(column)) => {
+            let normalized_column = normalized_epoch_millis_sql(column);
             if let Some(min) = filter.since_ms {
-                parts.push(format!("{column} >= {min}"));
+                parts.push(format!("{normalized_column} >= {min}"));
             }
             if let Some(max) = filter.until_ms {
-                parts.push(format!("{column} <= {max}"));
+                parts.push(format!("{normalized_column} <= {max}"));
             }
         }
         None => {}
@@ -355,12 +408,38 @@ pub fn build_where_parts<'a>(
         workspace_column,
     )
 }
+fn message_metrics_time_sql(conn: &Connection) -> Option<String> {
+    let has_messages = table_exists(conn, "messages");
+    let has_conversations = table_exists(conn, "conversations");
+    let joins_available = has_messages && has_conversations;
+    let has_message_created_at =
+        joins_available && table_has_column(conn, "messages", "created_at");
+    let has_conversation_started_at =
+        joins_available && table_has_column(conn, "conversations", "started_at");
+    let has_message_metrics_created_at = table_has_column(conn, "message_metrics", "created_at_ms");
+
+    let mut timestamp_terms: Vec<&str> = Vec::new();
+    if has_message_created_at {
+        timestamp_terms.push("m.created_at");
+    }
+    if has_message_metrics_created_at {
+        timestamp_terms.push("mm.created_at_ms");
+    }
+    if has_conversation_started_at {
+        timestamp_terms.push("c.started_at");
+    }
+
+    if timestamp_terms.is_empty() {
+        None
+    } else {
+        Some(format!("COALESCE({}, 0)", timestamp_terms.join(", ")))
+    }
+}
 
 fn message_metrics_from_sql_and_source_sql(conn: &Connection) -> (String, String) {
-    if table_exists(conn, "messages")
-        && table_exists(conn, "conversations")
-        && table_has_column(conn, "message_metrics", "message_id")
-    {
+    let message_metrics_sql = canonical_message_metrics_from_sql(conn)
+        .unwrap_or_else(|| "message_metrics mm".to_string());
+    if table_exists(conn, "messages") && table_exists(conn, "conversations") {
         let source_sql = if table_has_column(conn, "conversations", "origin_host") {
             normalized_analytics_source_identity_with_fallback_sql_expr(
                 "mm.source_id",
@@ -371,12 +450,14 @@ fn message_metrics_from_sql_and_source_sql(conn: &Connection) -> (String, String
             normalized_analytics_source_id_with_fallback_sql_expr("mm.source_id", "c.source_id")
         };
         (
-            "message_metrics mm JOIN messages m ON m.id = mm.message_id JOIN conversations c ON c.id = m.conversation_id".to_string(),
+            format!(
+                "{message_metrics_sql} JOIN messages m ON m.id = mm.message_id JOIN conversations c ON c.id = m.conversation_id"
+            ),
             source_sql,
         )
     } else {
         (
-            "message_metrics mm".to_string(),
+            message_metrics_sql,
             normalized_analytics_source_id_sql_expr("mm.source_id"),
         )
     }
@@ -385,12 +466,55 @@ fn message_metrics_from_sql_and_source_sql(conn: &Connection) -> (String, String
 fn token_usage_from_sql_agent_and_source_sql(
     conn: &Connection,
 ) -> (String, Option<String>, String) {
-    let has_agents =
-        table_exists(conn, "agents") && table_has_column(conn, "token_usage", "agent_id");
-    let has_conversations = table_exists(conn, "conversations")
-        && table_has_column(conn, "token_usage", "conversation_id");
+    let has_agent_id = table_has_column(conn, "token_usage", "agent_id");
+    let has_agents = table_exists(conn, "agents") && has_agent_id;
+    let has_conversation_id = table_has_column(conn, "token_usage", "conversation_id");
+    let has_conversations = table_exists(conn, "conversations") && has_conversation_id;
+    let has_message_id = table_has_column(conn, "token_usage", "message_id");
 
-    let mut from_sql = String::from("token_usage tu");
+    let mut from_sql = if has_message_id {
+        let mut select_items = vec!["message_id".to_string()];
+        for column in [
+            "conversation_id",
+            "agent_id",
+            "workspace_id",
+            "source_id",
+            "timestamp_ms",
+            "day_id",
+            "model_name",
+            "model_family",
+            "total_tokens",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_creation_tokens",
+            "thinking_tokens",
+            "estimated_cost_usd",
+            "role",
+            "content_chars",
+            "tool_call_count",
+        ] {
+            if table_has_column(conn, "token_usage", column) {
+                select_items.push(format!("MAX({column}) AS {column}"));
+            }
+        }
+        if table_has_column(conn, "token_usage", "data_source") {
+            select_items.push(
+                "CASE
+                    WHEN MAX(CASE WHEN LOWER(TRIM(COALESCE(data_source, ''))) = 'api' THEN 1 ELSE 0 END) != 0 THEN 'api'
+                    WHEN MAX(CASE WHEN LOWER(TRIM(COALESCE(data_source, ''))) = 'estimated' THEN 1 ELSE 0 END) != 0 THEN 'estimated'
+                    ELSE NULL
+                 END AS data_source"
+                    .to_string(),
+            );
+        }
+        format!(
+            "(SELECT {} FROM token_usage GROUP BY message_id) tu",
+            select_items.join(", ")
+        )
+    } else {
+        "token_usage tu".to_string()
+    };
     if has_agents {
         from_sql.push_str(" LEFT JOIN agents a ON a.id = tu.agent_id");
     }
@@ -416,7 +540,30 @@ fn token_usage_from_sql_agent_and_source_sql(
         source_sql,
     )
 }
+fn token_usage_time_sql(conn: &Connection) -> Option<String> {
+    let has_timestamp_ms = table_has_column(conn, "token_usage", "timestamp_ms");
+    let has_conversations = table_exists(conn, "conversations");
+    let has_conversation_join =
+        has_conversations && table_has_column(conn, "token_usage", "conversation_id");
+    let has_conversation_started_at =
+        has_conversation_join && table_has_column(conn, "conversations", "started_at");
 
+    let mut timestamp_terms: Vec<&str> = Vec::new();
+    if has_timestamp_ms {
+        timestamp_terms.push("tu.timestamp_ms");
+    }
+    if has_conversation_started_at {
+        timestamp_terms.push("c.started_at");
+    }
+
+    if timestamp_terms.is_empty() {
+        None
+    } else {
+        Some(format!("COALESCE({}, 0)", timestamp_terms.join(", ")))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn query_table_stats_from_source<'a>(
     conn: &Connection,
     required_table: &str,
@@ -467,22 +614,36 @@ fn query_total_messages_filtered(conn: &Connection, filter: &AnalyticsFilter) ->
     }
 
     let has_agents = table_exists(conn, "agents");
-    let from_sql = if has_agents {
+    let canonical_message_metrics_sql = canonical_message_metrics_from_sql(conn);
+    let has_message_metrics_created_at = canonical_message_metrics_sql.is_some()
+        && table_has_column(conn, "message_metrics", "created_at_ms");
+    let mut from_sql = if has_agents {
         "messages m JOIN conversations c ON c.id = m.conversation_id LEFT JOIN agents a ON a.id = c.agent_id"
+            .to_string()
     } else {
-        "messages m JOIN conversations c ON c.id = m.conversation_id"
+        "messages m JOIN conversations c ON c.id = m.conversation_id".to_string()
     };
+    if let Some(message_metrics_sql) = &canonical_message_metrics_sql {
+        from_sql.push_str(" LEFT JOIN ");
+        from_sql.push_str(message_metrics_sql);
+        from_sql.push_str(" ON mm.message_id = m.id");
+    }
     let source_sql = if table_has_column(conn, "conversations", "origin_host") {
         normalized_analytics_source_identity_sql_expr("c.source_id", "c.origin_host")
     } else {
         normalized_analytics_source_id_sql_expr("c.source_id")
+    };
+    let message_time_sql = if has_message_metrics_created_at {
+        "COALESCE(m.created_at, mm.created_at_ms, c.started_at, 0)"
+    } else {
+        "COALESCE(m.created_at, c.started_at, 0)"
     };
     let (where_sql, params) = build_filtered_where_sql(
         filter,
         Some("c.workspace_id"),
         has_agents.then(|| normalized_analytics_agent_sql_expr("a.slug")),
         source_sql,
-        Some(AnalyticsTimeColumn::TimestampMs("m.created_at")),
+        Some(AnalyticsTimeColumn::TimestampMs(message_time_sql)),
     );
 
     query_scalar_i64(
@@ -502,12 +663,17 @@ fn query_message_metrics_filtered_count(
     }
 
     let (from_sql, source_sql) = message_metrics_from_sql_and_source_sql(conn);
+    let message_metrics_time_sql = message_metrics_time_sql(conn);
+    let time_column = message_metrics_time_sql
+        .as_deref()
+        .map(AnalyticsTimeColumn::TimestampMs)
+        .unwrap_or(AnalyticsTimeColumn::Day("mm.day_id"));
     let (where_sql, params) = build_filtered_where_sql(
         filter,
         Some("mm.workspace_id"),
         Some(normalized_analytics_agent_sql_expr("mm.agent_slug")),
         source_sql,
-        Some(AnalyticsTimeColumn::Day("mm.day_id")),
+        Some(time_column),
     );
     let sql = match extra_condition {
         Some(extra) if where_sql.is_empty() => {
@@ -530,12 +696,17 @@ fn query_token_usage_filtered_count(
     }
 
     let (from_sql, agent_sql, source_sql) = token_usage_from_sql_agent_and_source_sql(conn);
+    let token_usage_time_sql = token_usage_time_sql(conn);
+    let time_column = token_usage_time_sql
+        .as_deref()
+        .map(AnalyticsTimeColumn::TimestampMs)
+        .unwrap_or(AnalyticsTimeColumn::Day("tu.day_id"));
     let (where_sql, params) = build_filtered_where_sql(
         filter,
         Some("tu.workspace_id"),
         agent_sql,
         source_sql,
-        Some(AnalyticsTimeColumn::Day("tu.day_id")),
+        Some(time_column),
     );
     let sql = match extra_condition {
         Some(extra) if where_sql.is_empty() => {
@@ -614,6 +785,19 @@ fn track_a_breakdown_supports_raw_metric(conn: &Connection, metric: Metric) -> b
     }
 }
 
+fn track_a_breakdown_requires_raw_fallback(filter: &AnalyticsFilter, dim: Dim) -> bool {
+    matches!(dim, Dim::Source)
+        || (matches!(dim, Dim::Agent | Dim::Workspace)
+            && (track_a_timeseries_requires_source_fallback(filter)
+                || analytics_requires_exact_raw_time_filter(filter)))
+}
+
+fn track_b_breakdown_requires_token_usage_fallback(filter: &AnalyticsFilter, dim: Dim) -> bool {
+    matches!(dim, Dim::Source)
+        || track_b_requires_token_usage_fallback(filter)
+        || analytics_requires_exact_raw_time_filter(filter)
+}
+
 fn track_a_timeseries_requires_source_fallback(filter: &AnalyticsFilter) -> bool {
     match &filter.source {
         SourceFilter::Remote => true,
@@ -631,6 +815,24 @@ fn track_a_tools_supports_raw_source_fallback(conn: &Connection) -> bool {
         && table_exists(conn, "message_metrics")
         && table_has_column(conn, "message_metrics", "message_id")
         && table_has_column(conn, "message_metrics", "tool_call_count")
+}
+
+fn analytics_requires_exact_raw_time_filter(filter: &AnalyticsFilter) -> bool {
+    filter.since_ms.is_some() || filter.until_ms.is_some()
+}
+
+fn track_a_timeseries_requires_raw_fallback(filter: &AnalyticsFilter) -> bool {
+    track_a_timeseries_requires_source_fallback(filter)
+        || analytics_requires_exact_raw_time_filter(filter)
+}
+
+fn track_b_cost_timeseries_requires_token_usage_fallback(
+    filter: &AnalyticsFilter,
+    group_by: GroupBy,
+) -> bool {
+    matches!(group_by, GroupBy::Hour)
+        || track_b_requires_token_usage_fallback(filter)
+        || analytics_requires_exact_raw_time_filter(filter)
 }
 
 fn query_track_a_rollup_status_with_message_metrics_fallback(
@@ -662,7 +864,8 @@ fn query_track_a_rollup_status_with_message_metrics_fallback(
         )
     };
 
-    if !track_a_timeseries_requires_source_fallback(filter)
+    if !(track_a_timeseries_requires_source_fallback(filter)
+        || analytics_requires_exact_raw_time_filter(filter))
         || !table_exists(conn, "message_metrics")
         || !table_exists(conn, "messages")
         || !table_exists(conn, "conversations")
@@ -680,16 +883,22 @@ fn query_track_a_rollup_status_with_message_metrics_fallback(
         _ => return default_stats(),
     };
     let message_metrics_agent_sql = normalized_analytics_agent_sql_expr("mm.agent_slug");
+    let message_metrics_time_sql = message_metrics_time_sql(conn);
     let (where_sql, params) = build_filtered_where_sql(
         filter,
         Some("mm.workspace_id"),
         Some(message_metrics_agent_sql.clone()),
         message_metrics_source_sql.clone(),
-        Some(match bucket_col {
-            "hour_id" => AnalyticsTimeColumn::Hour("mm.hour_id"),
-            "day_id" => AnalyticsTimeColumn::Day("mm.day_id"),
-            _ => return default_stats(),
-        }),
+        Some(
+            message_metrics_time_sql
+                .as_deref()
+                .map(AnalyticsTimeColumn::TimestampMs)
+                .unwrap_or(match bucket_col {
+                    "hour_id" => AnalyticsTimeColumn::Hour("mm.hour_id"),
+                    "day_id" => AnalyticsTimeColumn::Day("mm.day_id"),
+                    _ => return default_stats(),
+                }),
+        ),
     );
     let rollup_agent_sql = normalized_analytics_agent_sql_expr("rollup.agent_slug");
     let rollup_source_sql = normalized_analytics_source_id_with_fallback_sql_expr(
@@ -716,7 +925,10 @@ fn query_token_daily_stats_status(conn: &Connection, filter: &AnalyticsFilter) -
         return RollupStats::default();
     }
 
-    if !track_b_requires_token_usage_fallback(filter) || !table_exists(conn, "token_usage") {
+    if !(track_b_requires_token_usage_fallback(filter)
+        || analytics_requires_exact_raw_time_filter(filter))
+        || !table_exists(conn, "token_usage")
+    {
         return query_table_stats_from_source(
             conn,
             "token_daily_stats",
@@ -735,12 +947,18 @@ fn query_token_daily_stats_status(conn: &Connection, filter: &AnalyticsFilter) -
         token_usage_from_sql_agent_and_source_sql(conn);
     let token_usage_agent_sql = token_usage_agent_sql.unwrap_or_else(|| "'unknown'".to_string());
     let token_usage_model_sql = normalized_analytics_model_family_sql_expr("tu.model_family");
+    let token_usage_time_sql = token_usage_time_sql(conn);
     let (where_sql, params) = build_filtered_where_sql(
         filter,
         Some("tu.workspace_id"),
         Some(token_usage_agent_sql.clone()),
         token_usage_source_sql.clone(),
-        Some(AnalyticsTimeColumn::Day("tu.day_id")),
+        Some(
+            token_usage_time_sql
+                .as_deref()
+                .map(AnalyticsTimeColumn::TimestampMs)
+                .unwrap_or(AnalyticsTimeColumn::Day("tu.day_id")),
+        ),
     );
     let tds_agent_sql = normalized_analytics_agent_sql_expr("tds.agent_slug");
     let tds_source_sql = normalized_analytics_source_id_with_fallback_sql_expr(
@@ -777,6 +995,7 @@ pub fn query_status(conn: &Connection, filter: &AnalyticsFilter) -> AnalyticsRes
 
     let (message_metrics_from_sql, message_metrics_source_sql) =
         message_metrics_from_sql_and_source_sql(conn);
+    let message_metrics_time_sql = message_metrics_time_sql(conn);
     let mm = query_table_stats_from_source(
         conn,
         "message_metrics",
@@ -787,7 +1006,12 @@ pub fn query_status(conn: &Connection, filter: &AnalyticsFilter) -> AnalyticsRes
         Some("mm.workspace_id"),
         Some(normalized_analytics_agent_sql_expr("mm.agent_slug")),
         message_metrics_source_sql,
-        Some(AnalyticsTimeColumn::Day("mm.day_id")),
+        Some(
+            message_metrics_time_sql
+                .as_deref()
+                .map(AnalyticsTimeColumn::TimestampMs)
+                .unwrap_or(AnalyticsTimeColumn::Day("mm.day_id")),
+        ),
     );
     let uh = query_track_a_rollup_status_with_message_metrics_fallback(
         conn,
@@ -803,6 +1027,7 @@ pub fn query_status(conn: &Connection, filter: &AnalyticsFilter) -> AnalyticsRes
     );
     let (token_usage_from_sql, token_usage_agent_sql, token_usage_source_sql) =
         token_usage_from_sql_agent_and_source_sql(conn);
+    let token_usage_time_sql = token_usage_time_sql(conn);
     let tu = query_table_stats_from_source(
         conn,
         "token_usage",
@@ -813,7 +1038,12 @@ pub fn query_status(conn: &Connection, filter: &AnalyticsFilter) -> AnalyticsRes
         Some("tu.workspace_id"),
         token_usage_agent_sql,
         token_usage_source_sql,
-        Some(AnalyticsTimeColumn::Day("tu.day_id")),
+        Some(
+            token_usage_time_sql
+                .as_deref()
+                .map(AnalyticsTimeColumn::TimestampMs)
+                .unwrap_or(AnalyticsTimeColumn::Day("tu.day_id")),
+        ),
     );
     let tds = query_token_daily_stats_status(conn, filter);
 
@@ -982,7 +1212,7 @@ pub fn query_tokens_timeseries(
 ) -> AnalyticsResult<TimeseriesResult> {
     let query_start = std::time::Instant::now();
 
-    if track_a_timeseries_requires_source_fallback(filter)
+    if track_a_timeseries_requires_raw_fallback(filter)
         && table_exists(conn, "messages")
         && table_exists(conn, "conversations")
     {
@@ -1169,8 +1399,8 @@ fn query_track_a_timeseries_from_raw(
 ) -> AnalyticsResult<TimeseriesResult> {
     let has_agents = table_exists(conn, "agents");
     let has_origin_host = table_has_column(conn, "conversations", "origin_host");
-    let join_message_metrics = table_exists(conn, "message_metrics")
-        && table_has_column(conn, "message_metrics", "message_id");
+    let canonical_message_metrics_sql = canonical_message_metrics_from_sql(conn);
+    let join_message_metrics = canonical_message_metrics_sql.is_some();
     let has_message_metrics_created_at =
         join_message_metrics && table_has_column(conn, "message_metrics", "created_at_ms");
     let has_content_tokens_est =
@@ -1212,8 +1442,10 @@ fn query_track_a_timeseries_from_raw(
     if has_agents {
         from_sql.push_str(" LEFT JOIN agents a ON a.id = c.agent_id");
     }
-    if join_message_metrics {
-        from_sql.push_str(" LEFT JOIN message_metrics mm ON mm.message_id = m.id");
+    if let Some(message_metrics_sql) = &canonical_message_metrics_sql {
+        from_sql.push_str(" LEFT JOIN ");
+        from_sql.push_str(message_metrics_sql);
+        from_sql.push_str(" ON mm.message_id = m.id");
     }
 
     let filter_for_sql = AnalyticsFilter {
@@ -1221,9 +1453,13 @@ fn query_track_a_timeseries_from_raw(
         ..filter.clone()
     };
     let message_time_sql = if has_message_metrics_created_at {
-        "COALESCE(m.created_at, mm.created_at_ms, 0)"
+        if join_message_metrics {
+            "COALESCE(m.created_at, mm.created_at_ms, c.started_at, 0)"
+        } else {
+            "COALESCE(m.created_at, (SELECT MAX(message_metrics.created_at_ms) FROM message_metrics WHERE message_metrics.message_id = m.id), c.started_at, 0)"
+        }
     } else {
-        "COALESCE(m.created_at, 0)"
+        "COALESCE(m.created_at, c.started_at, 0)"
     };
     let (where_sql, params) = build_filtered_where_sql(
         &filter_for_sql,
@@ -1462,89 +1698,119 @@ fn query_cost_timeseries_from_token_usage(
     let has_content_chars = table_has_column(conn, "token_usage", "content_chars");
     let has_tool_call_count = table_has_column(conn, "token_usage", "tool_call_count");
 
-    let sum_or_zero = |expr: &str, present: bool| {
-        if present {
-            format!("SUM(COALESCE({expr}, 0))")
-        } else {
-            "SUM(0)".to_string()
-        }
-    };
-    let count_role = |role: &str| {
-        if has_role {
-            format!("SUM(CASE WHEN tu.role = '{}' THEN 1 ELSE 0 END)", role)
-        } else {
-            "SUM(0)".to_string()
-        }
-    };
-
     let (token_usage_from_sql, token_usage_agent_sql, token_usage_source_sql) =
         token_usage_from_sql_agent_and_source_sql(conn);
+    let token_usage_time_sql = token_usage_time_sql(conn);
+    let has_exact_time = token_usage_time_sql.is_some();
+    let time_column = token_usage_time_sql
+        .as_deref()
+        .map(AnalyticsTimeColumn::TimestampMs)
+        .unwrap_or(AnalyticsTimeColumn::Day("tu.day_id"));
     let (where_sql, params) = build_filtered_where_sql(
         filter,
         Some("tu.workspace_id"),
         token_usage_agent_sql,
         token_usage_source_sql,
-        Some(AnalyticsTimeColumn::Day("tu.day_id")),
+        Some(time_column),
     );
 
     let sql = format!(
-        "SELECT tu.day_id,
-                COUNT(*),
-                {user_count_sql},
-                {assistant_count_sql},
-                {tool_calls_sql},
-                {input_sql},
-                {output_sql},
-                {cache_read_sql},
-                {cache_creation_sql},
-                {thinking_sql},
-                {total_sql},
-                {content_chars_sql},
-                {estimated_cost_sql}
+        "SELECT {},
+                {} AS role,
+                {},
+                {},
+                {},
+                {},
+                {},
+                {},
+                {},
+                {},
+                {}
          FROM {token_usage_from_sql}
-         {where_sql}
-         GROUP BY tu.day_id
-         ORDER BY tu.day_id",
-        user_count_sql = count_role("user"),
-        assistant_count_sql = count_role("assistant"),
-        tool_calls_sql = sum_or_zero("tu.tool_call_count", has_tool_call_count),
-        input_sql = sum_or_zero("tu.input_tokens", has_input_tokens),
-        output_sql = sum_or_zero("tu.output_tokens", has_output_tokens),
-        cache_read_sql = sum_or_zero("tu.cache_read_tokens", has_cache_read_tokens),
-        cache_creation_sql = sum_or_zero("tu.cache_creation_tokens", has_cache_creation_tokens),
-        thinking_sql = sum_or_zero("tu.thinking_tokens", has_thinking_tokens),
-        total_sql = sum_or_zero("tu.total_tokens", true),
-        content_chars_sql = sum_or_zero("tu.content_chars", has_content_chars),
-        estimated_cost_sql = if has_estimated_cost {
-            "SUM(COALESCE(tu.estimated_cost_usd, 0.0))".to_string()
+         {where_sql}",
+        token_usage_time_sql.as_deref().unwrap_or("tu.day_id"),
+        if has_role { "tu.role" } else { "''" },
+        if has_tool_call_count {
+            "COALESCE(tu.tool_call_count, 0)"
         } else {
-            "0.0".to_string()
+            "0"
+        },
+        if has_input_tokens {
+            "COALESCE(tu.input_tokens, 0)"
+        } else {
+            "0"
+        },
+        if has_output_tokens {
+            "COALESCE(tu.output_tokens, 0)"
+        } else {
+            "0"
+        },
+        if has_cache_read_tokens {
+            "COALESCE(tu.cache_read_tokens, 0)"
+        } else {
+            "0"
+        },
+        if has_cache_creation_tokens {
+            "COALESCE(tu.cache_creation_tokens, 0)"
+        } else {
+            "0"
+        },
+        if has_thinking_tokens {
+            "COALESCE(tu.thinking_tokens, 0)"
+        } else {
+            "0"
+        },
+        "COALESCE(tu.total_tokens, 0)",
+        if has_content_chars {
+            "COALESCE(tu.content_chars, 0)"
+        } else {
+            "0"
+        },
+        if has_estimated_cost {
+            "COALESCE(tu.estimated_cost_usd, 0.0)"
+        } else {
+            "0.0"
         },
     );
 
-    let raw_buckets: Vec<(i64, UsageBucket)> = conn
+    let raw_rows: Vec<(i64, UsageBucket)> = conn
         .query_map_collect(&sql, &params, |row: &Row| {
-            let day_id: i64 = row.get_typed(0)?;
-            let message_count: i64 = row.get_typed(1)?;
-            let user_msg: i64 = row.get_typed(2)?;
-            let asst_msg: i64 = row.get_typed(3)?;
-            let tool_calls: i64 = row.get_typed(4)?;
-            let input_tok: i64 = row.get_typed(5)?;
-            let output_tok: i64 = row.get_typed(6)?;
-            let cache_read: i64 = row.get_typed(7)?;
-            let cache_create: i64 = row.get_typed(8)?;
-            let thinking: i64 = row.get_typed(9)?;
-            let grand_total: i64 = row.get_typed(10)?;
-            let content_chars: i64 = row.get_typed(11)?;
-            let cost: f64 = row.get_typed(12)?;
+            let raw_time_value: i64 = row.get_typed(0)?;
+            let role: String = row.get_typed(1)?;
+            let tool_calls: i64 = row.get_typed(2)?;
+            let input_tok: i64 = row.get_typed(3)?;
+            let output_tok: i64 = row.get_typed(4)?;
+            let cache_read: i64 = row.get_typed(5)?;
+            let cache_create: i64 = row.get_typed(6)?;
+            let thinking: i64 = row.get_typed(7)?;
+            let grand_total: i64 = row.get_typed(8)?;
+            let content_chars: i64 = row.get_typed(9)?;
+            let cost: f64 = row.get_typed(10)?;
+
+            let bucket_id = if has_exact_time {
+                let normalized_created_at_ms = normalize_epoch_millis(raw_time_value);
+                match group_by {
+                    GroupBy::Hour => crate::storage::sqlite::FrankenStorage::hour_id_from_millis(
+                        normalized_created_at_ms,
+                    ),
+                    GroupBy::Day | GroupBy::Week | GroupBy::Month => {
+                        crate::storage::sqlite::FrankenStorage::day_id_from_millis(
+                            normalized_created_at_ms,
+                        )
+                    }
+                }
+            } else {
+                raw_time_value
+            };
+
             Ok((
-                day_id,
+                bucket_id,
                 UsageBucket {
-                    message_count,
-                    user_message_count: user_msg,
-                    assistant_message_count: asst_msg,
+                    message_count: 1,
+                    user_message_count: i64::from(role == "user"),
+                    assistant_message_count: i64::from(role == "assistant"),
                     tool_call_count: tool_calls,
-                    api_coverage_message_count: message_count,
+                    api_coverage_message_count: 1,
                     content_tokens_est_total: content_chars / 4,
                     api_tokens_total: grand_total,
                     api_input_tokens_total: input_tok,
@@ -1559,7 +1825,17 @@ fn query_cost_timeseries_from_token_usage(
         })
         .map_err(|e| AnalyticsError::Db(format!("Cost timeseries query failed: {e}")))?;
 
+    let mut grouped_buckets: BTreeMap<i64, UsageBucket> = BTreeMap::new();
+    for (bucket_id, bucket) in raw_rows {
+        grouped_buckets.entry(bucket_id).or_default().merge(&bucket);
+    }
+
+    let raw_buckets: Vec<(i64, UsageBucket)> = grouped_buckets.into_iter().collect();
     let final_buckets: Vec<(String, UsageBucket)> = match group_by {
+        GroupBy::Hour if has_exact_time => raw_buckets
+            .into_iter()
+            .map(|(id, row)| (bucketing::hour_id_to_iso(id), row))
+            .collect(),
         GroupBy::Hour | GroupBy::Day => raw_buckets
             .into_iter()
             .map(|(id, row)| (bucketing::day_id_to_iso(id), row))
@@ -1593,7 +1869,7 @@ fn query_cost_timeseries_from_token_usage(
         source_table: "token_usage".into(),
         group_by,
         elapsed_ms: query_start.elapsed().as_millis() as u64,
-        path: "rollup".into(),
+        path: "raw".into(),
     })
 }
 
@@ -1606,7 +1882,7 @@ pub fn query_cost_timeseries(
 
     let table = "token_daily_stats";
 
-    if track_b_requires_token_usage_fallback(filter)
+    if track_b_cost_timeseries_requires_token_usage_fallback(filter, group_by)
         && token_usage_supports_track_b_metric(conn, Metric::ApiTotal)
         && token_usage_supports_track_b_metric(conn, Metric::EstimatedCostUsd)
     {
@@ -1855,12 +2131,17 @@ fn query_track_b_breakdown_from_token_usage(
         Metric::EstimatedCostUsd => estimated_cost_sql.clone(),
     };
 
+    let token_usage_time_sql = token_usage_time_sql(conn);
+    let time_column = token_usage_time_sql
+        .as_deref()
+        .map(AnalyticsTimeColumn::TimestampMs)
+        .unwrap_or(AnalyticsTimeColumn::Day("tu.day_id"));
     let (where_sql, params) = build_filtered_where_sql(
         filter,
         Some("tu.workspace_id"),
         Some(token_usage_agent_sql.clone()),
         token_usage_source_sql,
-        Some(AnalyticsTimeColumn::Day("tu.day_id")),
+        Some(time_column),
     );
 
     let sql = format!(
@@ -1973,15 +2254,19 @@ fn query_track_a_breakdown_from_raw(
 ) -> AnalyticsResult<BreakdownResult> {
     let has_agents = table_exists(conn, "agents");
     let has_origin_host = table_has_column(conn, "conversations", "origin_host");
-    let join_message_metrics = !matches!(metric, Metric::MessageCount);
+    let canonical_message_metrics_sql = canonical_message_metrics_from_sql(conn);
+    let join_message_metrics =
+        !matches!(metric, Metric::MessageCount) && canonical_message_metrics_sql.is_some();
+    let message_metrics_has_message_id = table_exists(conn, "message_metrics")
+        && table_has_column(conn, "message_metrics", "message_id");
     let has_api_data_source =
         join_message_metrics && table_has_column(conn, "message_metrics", "api_data_source");
     let has_tool_call_count =
         join_message_metrics && table_has_column(conn, "message_metrics", "tool_call_count");
     let has_has_plan =
         join_message_metrics && table_has_column(conn, "message_metrics", "has_plan");
-    let has_message_metrics_created_at =
-        join_message_metrics && table_has_column(conn, "message_metrics", "created_at_ms");
+    let has_message_metrics_created_at = message_metrics_has_message_id
+        && table_has_column(conn, "message_metrics", "created_at_ms");
 
     let conversation_sql = if has_origin_host {
         "SELECT id, TRIM(COALESCE(source_id, '')), TRIM(COALESCE(origin_host, '')) FROM conversations"
@@ -2003,8 +2288,10 @@ fn query_track_a_breakdown_from_raw(
     if has_agents {
         from_sql.push_str(" LEFT JOIN agents a ON a.id = c.agent_id");
     }
-    if join_message_metrics {
-        from_sql.push_str(" LEFT JOIN message_metrics mm ON mm.message_id = m.id");
+    if let Some(message_metrics_sql) = &canonical_message_metrics_sql {
+        from_sql.push_str(" LEFT JOIN ");
+        from_sql.push_str(message_metrics_sql);
+        from_sql.push_str(" ON mm.message_id = m.id");
     }
 
     let filter_for_sql = AnalyticsFilter {
@@ -2012,9 +2299,13 @@ fn query_track_a_breakdown_from_raw(
         ..filter.clone()
     };
     let message_time_sql = if has_message_metrics_created_at {
-        "COALESCE(m.created_at, mm.created_at_ms, 0)"
+        if join_message_metrics {
+            "COALESCE(m.created_at, mm.created_at_ms, c.started_at, 0)"
+        } else {
+            "COALESCE(m.created_at, (SELECT MAX(message_metrics.created_at_ms) FROM message_metrics WHERE message_metrics.message_id = m.id), c.started_at, 0)"
+        }
     } else {
-        "COALESCE(m.created_at, 0)"
+        "COALESCE(m.created_at, c.started_at, 0)"
     };
     let (where_sql, params) = build_filtered_where_sql(
         &filter_for_sql,
@@ -2026,9 +2317,13 @@ fn query_track_a_breakdown_from_raw(
 
     let dim_key_expr = match dim {
         Dim::Source => "''".to_string(),
-        Dim::Agent => has_agents
-            .then(|| normalized_analytics_agent_sql_expr("a.slug"))
-            .unwrap_or_else(|| "'unknown'".to_string()),
+        Dim::Agent => {
+            if has_agents {
+                normalized_analytics_agent_sql_expr("a.slug")
+            } else {
+                "'unknown'".to_string()
+            }
+        }
         Dim::Workspace => "CAST(COALESCE(c.workspace_id, 0) AS TEXT)".to_string(),
         Dim::Model => unreachable!("track A raw breakdown does not support model dimension"),
     };
@@ -2228,7 +2523,7 @@ pub fn query_breakdown(
     let (table, dim_col, use_track_b) = breakdown_route(dim, metric);
     if use_track_b
         && token_usage_supports_track_b_metric(conn, metric)
-        && (track_b_requires_token_usage_fallback(filter) || matches!(dim, Dim::Source))
+        && track_b_breakdown_requires_token_usage_fallback(filter, dim)
     {
         return query_track_b_breakdown_from_token_usage(
             conn,
@@ -2241,9 +2536,7 @@ pub fn query_breakdown(
     }
     if !use_track_b
         && track_a_breakdown_supports_raw_metric(conn, metric)
-        && (matches!(dim, Dim::Source)
-            || (matches!(dim, Dim::Agent | Dim::Workspace)
-                && track_a_timeseries_requires_source_fallback(filter)))
+        && track_a_breakdown_requires_raw_fallback(filter, dim)
     {
         return query_track_a_breakdown_from_raw(conn, filter, dim, metric, limit, query_start);
     }
@@ -2309,9 +2602,16 @@ pub fn query_breakdown(
 
     // For Track A (usage_daily), we can select the full bucket.
     // For Track B (token_daily_stats), column names differ — map accordingly.
+    // Source breakdowns normalize/filter source ids in Rust after the SQL rows are read,
+    // so applying LIMIT in SQL first can drop the matching source entirely.
+    let sql_limit = if matches!(dim, Dim::Source) && !matches!(filter.source, SourceFilter::All) {
+        None
+    } else {
+        Some(limit)
+    };
     let sql = if use_track_b {
         // Track B: token_daily_stats columns map to different names.
-        build_breakdown_sql_track_b(&dim_col_sql, &metric, &where_clause, limit)
+        build_breakdown_sql_track_b(&dim_col_sql, &metric, &where_clause, sql_limit)
     } else {
         // Track A: usage_daily — full UsageBucket columns available.
         let has_plan_token_rollups = table_has_plan_token_rollups(conn, "usage_daily");
@@ -2319,7 +2619,7 @@ pub fn query_breakdown(
             &dim_col_sql,
             &metric,
             &where_clause,
-            limit,
+            sql_limit,
             has_plan_token_rollups,
         )
     };
@@ -2353,10 +2653,23 @@ fn build_breakdown_sql_track_a(
     dim_col: &str,
     metric: &Metric,
     where_clause: &str,
-    limit: usize,
+    limit: Option<usize>,
     has_plan_token_rollups: bool,
 ) -> String {
-    let order_col = metric.rollup_column().unwrap_or("api_tokens_total");
+    let (sort_value_sql, order_by_expr) = match metric {
+        Metric::CoveragePct => (
+            "SUM(api_coverage_message_count)".to_string(),
+            "CASE
+                WHEN SUM(message_count) = 0 THEN 0.0
+                ELSE CAST(SUM(api_coverage_message_count) AS REAL) / CAST(SUM(message_count) AS REAL)
+             END"
+                .to_string(),
+        ),
+        _ => {
+            let order_col = metric.rollup_column().unwrap_or("api_tokens_total");
+            (format!("SUM({order_col})"), format!("SUM({order_col})"))
+        }
+    };
     let plan_content_expr = if has_plan_token_rollups {
         "SUM(plan_content_tokens_est_total)"
     } else {
@@ -2369,6 +2682,14 @@ fn build_breakdown_sql_track_a(
     } else {
         "SUM(0)"
     };
+    let limit_clause = limit
+        .map(|limit| {
+            format!(
+                "
+         LIMIT {limit}"
+            )
+        })
+        .unwrap_or_default();
     format!(
         "SELECT CAST({dim_col} AS TEXT),
                 SUM(message_count),
@@ -2388,14 +2709,13 @@ fn build_breakdown_sql_track_a(
                 SUM(api_cache_read_tokens_total),
                 SUM(api_cache_creation_tokens_total),
                 SUM(api_thinking_tokens_total),
-                SUM({order_col})
+                {sort_value_sql}
          FROM (
              SELECT * FROM usage_daily
              {where_clause}
          ) filtered_usage_daily
          GROUP BY CAST({dim_col} AS TEXT)
-         ORDER BY SUM({order_col}) DESC
-         LIMIT {limit}"
+         ORDER BY {order_by_expr} DESC, CAST({dim_col} AS TEXT) ASC{limit_clause}"
     )
 }
 
@@ -2404,7 +2724,7 @@ fn build_breakdown_sql_track_b(
     dim_col: &str,
     metric: &Metric,
     where_clause: &str,
-    limit: usize,
+    limit: Option<usize>,
 ) -> String {
     // Map Metric to the Track B column name.
     let order_col = match metric {
@@ -2424,6 +2744,14 @@ fn build_breakdown_sql_track_b(
         Metric::MessageCount => "api_call_count",
         Metric::EstimatedCostUsd => "estimated_cost_usd",
     };
+    let limit_clause = limit
+        .map(|limit| {
+            format!(
+                "
+         LIMIT {limit}"
+            )
+        })
+        .unwrap_or_default();
     format!(
         "SELECT {dim_col},
                 SUM(api_call_count),
@@ -2444,8 +2772,7 @@ fn build_breakdown_sql_track_b(
              {where_clause}
          ) filtered_token_daily_stats
          GROUP BY {dim_col}
-         ORDER BY SUM({order_col}) DESC
-         LIMIT {limit}"
+         ORDER BY SUM({order_col}) DESC{limit_clause}"
     )
 }
 
@@ -2598,7 +2925,9 @@ fn query_tools_from_raw(
 ) -> AnalyticsResult<ToolReport> {
     let has_agents = table_exists(conn, "agents");
     let has_origin_host = table_has_column(conn, "conversations", "origin_host");
-    let has_message_metrics_created_at = table_has_column(conn, "message_metrics", "created_at_ms");
+    let canonical_message_metrics_sql = canonical_message_metrics_from_sql(conn);
+    let has_message_metrics_created_at = canonical_message_metrics_sql.is_some()
+        && table_has_column(conn, "message_metrics", "created_at_ms");
     let has_content_tokens_est = table_has_column(conn, "message_metrics", "content_tokens_est");
     let has_api_input_tokens = table_has_column(conn, "message_metrics", "api_input_tokens");
     let has_api_output_tokens = table_has_column(conn, "message_metrics", "api_output_tokens");
@@ -2628,16 +2957,20 @@ fn query_tools_from_raw(
     if has_agents {
         from_sql.push_str(" LEFT JOIN agents a ON a.id = c.agent_id");
     }
-    from_sql.push_str(" LEFT JOIN message_metrics mm ON mm.message_id = m.id");
+    if let Some(message_metrics_sql) = &canonical_message_metrics_sql {
+        from_sql.push_str(" LEFT JOIN ");
+        from_sql.push_str(message_metrics_sql);
+        from_sql.push_str(" ON mm.message_id = m.id");
+    }
 
     let filter_for_sql = AnalyticsFilter {
         source: SourceFilter::All,
         ..filter.clone()
     };
     let message_time_sql = if has_message_metrics_created_at {
-        "COALESCE(m.created_at, mm.created_at_ms, 0)"
+        "COALESCE(m.created_at, mm.created_at_ms, c.started_at, 0)"
     } else {
-        "COALESCE(m.created_at, 0)"
+        "COALESCE(m.created_at, c.started_at, 0)"
     };
     let (where_sql, params) = build_filtered_where_sql(
         &filter_for_sql,
@@ -2768,11 +3101,12 @@ fn query_tools_from_raw(
             .cmp(&a.tool_call_count)
             .then_with(|| a.key.cmp(&b.key))
     });
-    rows.truncate(limit);
 
     let total_tool_calls = rows.iter().map(|row| row.tool_call_count).sum();
     let total_messages = rows.iter().map(|row| row.message_count).sum();
     let total_api_tokens = rows.iter().map(|row| row.api_tokens_total).sum();
+
+    rows.truncate(limit);
 
     Ok(ToolReport {
         rows,
@@ -2792,7 +3126,7 @@ pub fn query_tools(
 ) -> AnalyticsResult<ToolReport> {
     let query_start = std::time::Instant::now();
 
-    if track_a_timeseries_requires_source_fallback(filter)
+    if track_a_timeseries_requires_raw_fallback(filter)
         && track_a_tools_supports_raw_source_fallback(conn)
     {
         return query_tools_from_raw(conn, filter, query_start, limit);
@@ -2863,8 +3197,7 @@ pub fn query_tools(
              {where_clause}
          ) filtered_tool_usage
          GROUP BY {tool_agent_sql}
-         ORDER BY SUM(tool_call_count) DESC
-         LIMIT {limit}"
+         ORDER BY SUM(tool_call_count) DESC"
     );
 
     let param_values: Vec<ParamValue> = bind_values.clone();
@@ -2910,6 +3243,7 @@ pub fn query_tools(
         total_api_tokens += r.api_tokens_total;
         rows.push(r);
     }
+    rows.truncate(limit);
 
     let elapsed_ms = query_start.elapsed().as_millis() as u64;
 
@@ -2938,15 +3272,24 @@ pub fn query_session_scatter(
     filter: &AnalyticsFilter,
     limit: usize,
 ) -> AnalyticsResult<Vec<SessionScatterPoint>> {
-    if !table_exists(conn, "conversations")
-        || !table_exists(conn, "messages")
-        || !table_exists(conn, "agents")
-    {
+    if !table_exists(conn, "conversations") || !table_exists(conn, "messages") {
+        return Ok(Vec::new());
+    }
+
+    let has_agents = table_exists(conn, "agents");
+    if !has_agents && !filter.agents.is_empty() {
         return Ok(Vec::new());
     }
 
     let mut where_parts: Vec<String> = Vec::new();
     let mut bind_values: Vec<ParamValue> = Vec::new();
+
+    let canonical_message_metrics_sql = canonical_message_metrics_from_sql(conn);
+    let has_message_metrics = canonical_message_metrics_sql.is_some();
+    let has_token_usage = table_exists(conn, "token_usage");
+    let has_mm_created_at =
+        has_message_metrics && table_has_column(conn, "message_metrics", "created_at_ms");
+    let has_tu_timestamp = has_token_usage && table_has_column(conn, "token_usage", "timestamp_ms");
 
     // Agent filters.
     if !filter.agents.is_empty() {
@@ -2992,19 +3335,26 @@ pub fn query_session_scatter(
     }
 
     // Time filters use message timestamp (or conversation started_at fallback),
-    // normalized to milliseconds for legacy second-based values.
-    let timestamp_expr = "CASE \
-            WHEN COALESCE(m.created_at, c.started_at, 0) BETWEEN 0 AND 100000000000 \
-            THEN COALESCE(m.created_at, c.started_at, 0) * 1000 \
-            ELSE COALESCE(m.created_at, c.started_at, 0) \
-        END";
+    // Time filters prefer the best available raw event timestamp, with
+    // message_metrics/token_usage fallback for legacy rows where messages.created_at is missing.
+    let raw_timestamp_expr = match (has_mm_created_at, has_tu_timestamp) {
+        (true, true) => {
+            "COALESCE(m.created_at, mm.created_at_ms, tu.timestamp_ms, c.started_at, 0)"
+        }
+        (true, false) => "COALESCE(m.created_at, mm.created_at_ms, c.started_at, 0)",
+        (false, true) => "COALESCE(m.created_at, tu.timestamp_ms, c.started_at, 0)",
+        (false, false) => "COALESCE(m.created_at, c.started_at, 0)",
+    };
+    let timestamp_expr = format!(
+        "CASE WHEN {raw_timestamp_expr} BETWEEN 0 AND 100000000000 THEN {raw_timestamp_expr} * 1000 ELSE {raw_timestamp_expr} END"
+    );
     if let Some(min) = filter.since_ms {
         bind_values.push(ParamValue::from(min));
-        where_parts.push(format!("{timestamp_expr} >= ?{}", bind_values.len()));
+        where_parts.push(format!("{} >= ?{}", timestamp_expr, bind_values.len()));
     }
     if let Some(max) = filter.until_ms {
         bind_values.push(ParamValue::from(max));
-        where_parts.push(format!("{timestamp_expr} <= ?{}", bind_values.len()));
+        where_parts.push(format!("{} <= ?{}", timestamp_expr, bind_values.len()));
     }
 
     let where_clause = if where_parts.is_empty() {
@@ -3013,19 +3363,22 @@ pub fn query_session_scatter(
         format!(" WHERE {}", where_parts.join(" AND "))
     };
 
-    let has_message_metrics = table_exists(conn, "message_metrics");
-    let has_token_usage = table_exists(conn, "token_usage");
     let has_conv_rollup = table_has_column(conn, "conversations", "grand_total_tokens");
     let has_mm_api_source =
         has_message_metrics && table_has_column(conn, "message_metrics", "api_data_source");
 
-    let message_metrics_join = if has_message_metrics {
-        " LEFT JOIN message_metrics mm ON mm.message_id = m.id"
-    } else {
-        ""
-    };
+    let message_metrics_join = canonical_message_metrics_sql
+        .as_deref()
+        .map(|message_metrics_sql| {
+            format!(" LEFT JOIN {message_metrics_sql} ON mm.message_id = m.id")
+        })
+        .unwrap_or_default();
     let token_usage_join = if has_token_usage {
-        " LEFT JOIN token_usage tu ON tu.message_id = m.id"
+        if has_tu_timestamp {
+            " LEFT JOIN (SELECT message_id, MAX(COALESCE(total_tokens, 0)) AS total_tokens, MAX(timestamp_ms) AS timestamp_ms FROM token_usage GROUP BY message_id) tu ON tu.message_id = m.id"
+        } else {
+            " LEFT JOIN (SELECT message_id, MAX(COALESCE(total_tokens, 0)) AS total_tokens FROM token_usage GROUP BY message_id) tu ON tu.message_id = m.id"
+        }
     } else {
         ""
     };
@@ -3044,7 +3397,7 @@ pub fn query_session_scatter(
         ) IS NOT NULL";
     let mm_api_source_is_api_or_legacy =
         "LOWER(TRIM(COALESCE(mm.api_data_source, 'api'))) != 'estimated'";
-    let token_expr = if has_message_metrics && has_token_usage {
+    let detailed_token_expr = if has_message_metrics && has_token_usage {
         if has_mm_api_source {
             format!(
                 "SUM(CASE
@@ -3069,12 +3422,27 @@ pub fn query_session_scatter(
         format!("SUM({mm_api_sum})")
     } else if has_token_usage {
         "SUM(COALESCE(tu.total_tokens, 0))".to_string()
-    } else if has_conv_rollup {
-        "MAX(COALESCE(c.grand_total_tokens, 0))".to_string()
     } else {
         // Use SUM(0) instead of bare 0 — frankensqlite requires all non-GROUP-BY
         // columns in a grouped query to be aggregate expressions.
         "SUM(0)".to_string()
+    };
+    let token_expr = if has_conv_rollup {
+        format!(
+            "CASE
+                WHEN MAX(COALESCE(c.grand_total_tokens, 0)) > ({detailed_token_expr})
+                THEN MAX(COALESCE(c.grand_total_tokens, 0))
+                ELSE ({detailed_token_expr})
+             END"
+        )
+    } else {
+        detailed_token_expr
+    };
+
+    let agents_join = if has_agents {
+        "LEFT JOIN agents a ON a.id = c.agent_id"
+    } else {
+        ""
     };
 
     let sql = format!(
@@ -3084,7 +3452,7 @@ pub fn query_session_scatter(
                 {token_expr} AS api_tokens_total
          FROM conversations c
          JOIN messages m ON m.conversation_id = c.id
-         JOIN agents a ON a.id = c.agent_id
+         {agents_join}
          {message_metrics_join}
          {token_usage_join}
          {where_clause}
@@ -3121,7 +3489,10 @@ pub fn query_unpriced_models(
     conn: &Connection,
     limit: usize,
 ) -> AnalyticsResult<UnpricedModelsReport> {
-    if !table_exists(conn, "token_usage") {
+    if !table_exists(conn, "token_usage")
+        || !table_has_column(conn, "token_usage", "total_tokens")
+        || !table_has_column(conn, "token_usage", "estimated_cost_usd")
+    {
         return Ok(UnpricedModelsReport {
             models: Vec::new(),
             total_unpriced_tokens: 0,
@@ -3129,17 +3500,37 @@ pub fn query_unpriced_models(
         });
     }
 
-    // Unpriced models
-    let models: Vec<UnpricedModel> = conn
-        .query_map_collect(
-            "SELECT COALESCE(model_name, '(none)') AS model,
-                    SUM(COALESCE(total_tokens, 0)) AS tot,
+    let has_model_name = table_has_column(conn, "token_usage", "model_name");
+    let (from_sql, _, _) = token_usage_from_sql_agent_and_source_sql(conn);
+    let models_sql = if has_model_name {
+        format!(
+            "SELECT CASE
+                        WHEN TRIM(COALESCE(tu.model_name, '')) = '' THEN '(none)'
+                        ELSE TRIM(COALESCE(tu.model_name, ''))
+                    END AS model,
+                    SUM(COALESCE(tu.total_tokens, 0)) AS tot,
                     COUNT(*) AS cnt
-             FROM token_usage
-             WHERE estimated_cost_usd IS NULL
+             FROM {from_sql}
+             WHERE tu.estimated_cost_usd IS NULL
              GROUP BY model
              ORDER BY tot DESC
-             LIMIT ?1",
+             LIMIT ?1"
+        )
+    } else {
+        format!(
+            "SELECT '(none)' AS model,
+                    SUM(COALESCE(tu.total_tokens, 0)) AS tot,
+                    COUNT(*) AS cnt
+             FROM {from_sql}
+             WHERE tu.estimated_cost_usd IS NULL
+             HAVING COUNT(*) > 0
+             LIMIT ?1"
+        )
+    };
+
+    let models: Vec<UnpricedModel> = conn
+        .query_map_collect(
+            &models_sql,
             &[ParamValue::from(limit as i64)],
             |row: &Row| {
                 Ok(UnpricedModel {
@@ -3151,14 +3542,25 @@ pub fn query_unpriced_models(
         )
         .map_err(|e| AnalyticsError::Db(e.to_string()))?;
 
-    let total_unpriced_tokens: i64 = models.iter().map(|m| m.total_tokens).sum();
+    let total_unpriced_tokens: i64 = conn
+        .query_row_map(
+            &format!(
+                "SELECT SUM(COALESCE(tu.total_tokens, 0))
+                 FROM {from_sql}
+                 WHERE tu.estimated_cost_usd IS NULL"
+            ),
+            &[],
+            |r: &Row| Ok(r.get_typed::<Option<i64>>(0)?.unwrap_or(0)),
+        )
+        .unwrap_or(0);
 
-    // Total priced tokens for context
     let total_priced_tokens: i64 = conn
         .query_row_map(
-            "SELECT SUM(COALESCE(total_tokens, 0))
-             FROM token_usage
-             WHERE estimated_cost_usd IS NOT NULL",
+            &format!(
+                "SELECT SUM(COALESCE(tu.total_tokens, 0))
+                 FROM {from_sql}
+                 WHERE tu.estimated_cost_usd IS NOT NULL"
+            ),
             &[],
             |r: &Row| Ok(r.get_typed::<Option<i64>>(0)?.unwrap_or(0)),
         )
@@ -3922,6 +4324,81 @@ mod tests {
         conn
     }
 
+    fn setup_duplicate_message_metrics_raw_db() -> Connection {
+        let conn = Connection::open(":memory:").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE agents (
+                id INTEGER PRIMARY KEY,
+                slug TEXT NOT NULL
+            );
+             CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY,
+                agent_id INTEGER NOT NULL,
+                workspace_id INTEGER,
+                source_id TEXT NOT NULL,
+                origin_host TEXT,
+                source_path TEXT NOT NULL,
+                started_at INTEGER,
+                grand_total_tokens INTEGER
+            );
+             CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER NOT NULL,
+                idx INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                created_at INTEGER,
+                content TEXT NOT NULL
+            );
+             CREATE TABLE message_metrics (
+                id INTEGER PRIMARY KEY,
+                message_id INTEGER NOT NULL,
+                created_at_ms INTEGER,
+                tool_call_count INTEGER,
+                content_tokens_est INTEGER,
+                api_input_tokens INTEGER,
+                api_output_tokens INTEGER,
+                api_cache_read_tokens INTEGER,
+                api_cache_creation_tokens INTEGER,
+                api_thinking_tokens INTEGER,
+                api_data_source TEXT,
+                has_plan INTEGER
+            );",
+        )
+        .unwrap();
+
+        conn.execute("INSERT INTO agents (id, slug) VALUES (1, 'codex')")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO conversations
+             (id, agent_id, workspace_id, source_id, source_path, started_at, grand_total_tokens)
+             VALUES (1, 1, 10, 'local', '/sessions/dup.jsonl', 1700000000000, 1200)",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, conversation_id, idx, role, created_at, content)
+             VALUES (11, 1, 0, 'user', 1700000001000, 'dup-a')",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, conversation_id, idx, role, created_at, content)
+             VALUES (12, 1, 1, 'assistant', 1700000002000, 'dup-b')",
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO message_metrics
+                 (id, message_id, created_at_ms, tool_call_count, content_tokens_est,
+                  api_input_tokens, api_output_tokens, api_cache_read_tokens,
+                  api_cache_creation_tokens, api_thinking_tokens, api_data_source, has_plan)
+             VALUES
+                 (1, 11, 1700000001000, 3, 100, 200, 300, 0, 0, 0, 'api', 1),
+                 (2, 11, 1700000001000, 3, 100, 200, 300, 0, 0, 0, 'api', 1),
+                 (3, 12, 1700000002000, 4, 120, 250, 450, 0, 0, 0, 'api', 0);",
+        )
+        .unwrap();
+
+        conn
+    }
+
     fn setup_status_filter_db() -> Connection {
         let conn = Connection::open(":memory:").unwrap();
         let now_ms = std::time::SystemTime::now()
@@ -4138,6 +4615,215 @@ mod tests {
         assert_eq!(normalize_epoch_millis(1_700_000_000), 1_700_000_000_000);
     }
 
+    fn setup_legacy_status_filter_db_without_message_metrics_created_at() -> Connection {
+        let conn = Connection::open(":memory:").unwrap();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let day10_ms = crate::storage::sqlite::FrankenStorage::millis_from_day_id(10);
+        conn.execute_batch(
+            "CREATE TABLE agents (
+                id INTEGER PRIMARY KEY,
+                slug TEXT NOT NULL
+            );
+             CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY,
+                agent_id INTEGER NOT NULL,
+                workspace_id INTEGER,
+                source_id TEXT NOT NULL,
+                source_path TEXT NOT NULL,
+                started_at INTEGER
+            );
+             CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER NOT NULL,
+                idx INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                created_at INTEGER,
+                content TEXT NOT NULL
+            );
+             CREATE TABLE message_metrics (
+                message_id INTEGER PRIMARY KEY,
+                hour_id INTEGER NOT NULL,
+                day_id INTEGER NOT NULL,
+                agent_slug TEXT NOT NULL,
+                workspace_id INTEGER NOT NULL DEFAULT 0,
+                source_id TEXT NOT NULL DEFAULT 'local',
+                role TEXT NOT NULL,
+                content_chars INTEGER NOT NULL,
+                content_tokens_est INTEGER NOT NULL,
+                api_input_tokens INTEGER,
+                api_output_tokens INTEGER,
+                api_cache_read_tokens INTEGER,
+                api_cache_creation_tokens INTEGER,
+                api_thinking_tokens INTEGER,
+                api_data_source TEXT NOT NULL DEFAULT 'estimated'
+            );
+             CREATE TABLE usage_hourly (
+                hour_id INTEGER NOT NULL,
+                agent_slug TEXT NOT NULL,
+                workspace_id INTEGER NOT NULL DEFAULT 0,
+                source_id TEXT NOT NULL DEFAULT 'local',
+                message_count INTEGER NOT NULL DEFAULT 0,
+                user_message_count INTEGER NOT NULL DEFAULT 0,
+                assistant_message_count INTEGER NOT NULL DEFAULT 0,
+                tool_call_count INTEGER NOT NULL DEFAULT 0,
+                plan_message_count INTEGER NOT NULL DEFAULT 0,
+                api_coverage_message_count INTEGER NOT NULL DEFAULT 0,
+                content_tokens_est_total INTEGER NOT NULL DEFAULT 0,
+                content_tokens_est_user INTEGER NOT NULL DEFAULT 0,
+                content_tokens_est_assistant INTEGER NOT NULL DEFAULT 0,
+                api_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_input_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_output_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_cache_read_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_cache_creation_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_thinking_tokens_total INTEGER NOT NULL DEFAULT 0,
+                last_updated INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (hour_id, agent_slug, workspace_id, source_id)
+            );
+             CREATE TABLE usage_daily (
+                day_id INTEGER NOT NULL,
+                agent_slug TEXT NOT NULL,
+                workspace_id INTEGER NOT NULL DEFAULT 0,
+                source_id TEXT NOT NULL DEFAULT 'local',
+                message_count INTEGER NOT NULL DEFAULT 0,
+                user_message_count INTEGER NOT NULL DEFAULT 0,
+                assistant_message_count INTEGER NOT NULL DEFAULT 0,
+                tool_call_count INTEGER NOT NULL DEFAULT 0,
+                plan_message_count INTEGER NOT NULL DEFAULT 0,
+                api_coverage_message_count INTEGER NOT NULL DEFAULT 0,
+                content_tokens_est_total INTEGER NOT NULL DEFAULT 0,
+                content_tokens_est_user INTEGER NOT NULL DEFAULT 0,
+                content_tokens_est_assistant INTEGER NOT NULL DEFAULT 0,
+                api_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_input_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_output_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_cache_read_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_cache_creation_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_thinking_tokens_total INTEGER NOT NULL DEFAULT 0,
+                last_updated INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (day_id, agent_slug, workspace_id, source_id)
+            );",
+        )
+        .unwrap();
+
+        conn.execute("INSERT INTO agents (id, slug) VALUES (1, 'codex')")
+            .unwrap();
+        conn.execute(&format!(
+            "INSERT INTO conversations (id, agent_id, workspace_id, source_id, source_path, started_at)
+             VALUES (1, 1, 1, 'local', '/sessions/legacy-a.jsonl', {day10_ms})"
+        ))
+        .unwrap();
+        conn.execute(&format!(
+            "INSERT INTO messages (id, conversation_id, idx, role, created_at, content)
+             VALUES (11, 1, 0, 'user', {}, 'legacy-a1')",
+            day10_ms + 100,
+        ))
+        .unwrap();
+        conn.execute(&format!(
+            "INSERT INTO messages (id, conversation_id, idx, role, created_at, content)
+             VALUES (12, 1, 1, 'assistant', {}, 'legacy-a2')",
+            day10_ms + 200,
+        ))
+        .unwrap();
+
+        conn.execute_batch(
+            &format!(
+                "INSERT INTO message_metrics
+                    (message_id, hour_id, day_id, agent_slug, workspace_id, source_id,
+                     role, content_chars, content_tokens_est, api_input_tokens, api_output_tokens,
+                     api_cache_read_tokens, api_cache_creation_tokens, api_thinking_tokens, api_data_source)
+                 VALUES
+                    (11, 240, 10, 'codex', 1, 'local', 'user', 10, 3, 5, 7, 0, 0, 0, 'api'),
+                    (12, 240, 10, 'codex', 1, 'local', 'assistant', 12, 4, 8, 9, 0, 0, 0, 'api');
+                 INSERT INTO usage_hourly
+                    (hour_id, agent_slug, workspace_id, source_id, message_count, user_message_count,
+                     assistant_message_count, api_coverage_message_count, api_tokens_total, last_updated)
+                 VALUES
+                    (240, 'codex', 1, 'local', 2, 1, 1, 2, 29, {now_ms});
+                 INSERT INTO usage_daily
+                    (day_id, agent_slug, workspace_id, source_id, message_count, user_message_count,
+                     assistant_message_count, api_coverage_message_count, api_tokens_total, last_updated)
+                 VALUES
+                    (10, 'codex', 1, 'local', 2, 1, 1, 2, 29, {now_ms});"
+            ),
+        )
+        .unwrap();
+
+        conn
+    }
+
+    fn setup_legacy_track_b_filter_db_without_token_usage_timestamp() -> Connection {
+        let conn = setup_legacy_status_filter_db_without_message_metrics_created_at();
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let day10_ms = crate::storage::sqlite::FrankenStorage::millis_from_day_id(10);
+
+        conn.execute_batch(
+            "CREATE TABLE token_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id INTEGER NOT NULL,
+                conversation_id INTEGER NOT NULL,
+                agent_id INTEGER NOT NULL,
+                workspace_id INTEGER,
+                source_id TEXT NOT NULL DEFAULT 'local',
+                day_id INTEGER NOT NULL,
+                model_name TEXT,
+                model_family TEXT,
+                total_tokens INTEGER,
+                estimated_cost_usd REAL NOT NULL DEFAULT 0.0,
+                data_source TEXT NOT NULL DEFAULT 'api'
+            );
+             CREATE TABLE token_daily_stats (
+                day_id INTEGER NOT NULL,
+                agent_slug TEXT NOT NULL,
+                source_id TEXT NOT NULL DEFAULT 'all',
+                model_family TEXT NOT NULL DEFAULT 'all',
+                api_call_count INTEGER NOT NULL DEFAULT 0,
+                user_message_count INTEGER NOT NULL DEFAULT 0,
+                assistant_message_count INTEGER NOT NULL DEFAULT 0,
+                tool_message_count INTEGER NOT NULL DEFAULT 0,
+                total_input_tokens INTEGER NOT NULL DEFAULT 0,
+                total_output_tokens INTEGER NOT NULL DEFAULT 0,
+                total_cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                total_cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                total_thinking_tokens INTEGER NOT NULL DEFAULT 0,
+                grand_total_tokens INTEGER NOT NULL DEFAULT 0,
+                total_content_chars INTEGER NOT NULL DEFAULT 0,
+                total_tool_calls INTEGER NOT NULL DEFAULT 0,
+                estimated_cost_usd REAL NOT NULL DEFAULT 0.0,
+                session_count INTEGER NOT NULL DEFAULT 0,
+                last_updated INTEGER NOT NULL,
+                PRIMARY KEY (day_id, agent_slug, source_id, model_family)
+            );",
+        )
+        .unwrap();
+
+        conn.execute_batch(
+            &format!(
+                "INSERT INTO token_usage
+                    (message_id, conversation_id, agent_id, workspace_id, source_id, day_id,
+                     model_name, model_family, total_tokens, estimated_cost_usd, data_source)
+                 VALUES
+                    (11, 1, 1, 1, 'local', 10, 'gpt-4o-mini', 'gpt-4o', 12, 0.12, 'api'),
+                    (12, 1, 1, 1, 'local', 10, 'gpt-4o-mini', 'gpt-4o', 17, 0.17, 'api');
+                 INSERT INTO token_daily_stats
+                    (day_id, agent_slug, source_id, model_family, api_call_count, user_message_count,
+                     assistant_message_count, grand_total_tokens, estimated_cost_usd, session_count, last_updated)
+                 VALUES
+                    (10, 'codex', 'local', 'gpt-4o', 2, 1, 1, 29, 0.29, 1, {now_ms});
+                 UPDATE conversations SET started_at = {day10_ms} + 100 WHERE id = 1;"
+            ),
+        )
+        .unwrap();
+
+        conn
+    }
+
     #[test]
     fn query_status_treats_millisecond_timestamps_as_fresh() {
         let now_ms = std::time::SystemTime::now()
@@ -4190,6 +4876,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn query_status_deduplicates_duplicate_token_usage_rows_in_coverage() {
+        let conn = setup_status_filter_db();
+        let day10_ms = crate::storage::sqlite::FrankenStorage::millis_from_day_id(10);
+        conn.execute(&format!(
+            "INSERT INTO token_usage
+                (message_id, conversation_id, agent_id, workspace_id, source_id, timestamp_ms, day_id,
+                 model_name, model_family, total_tokens, data_source)
+             VALUES
+                (11, 1, 1, 1, 'local', {}, 10, NULL, 'gpt-4o', 12, 'estimated')",
+            day10_ms + 100
+        ))
+        .unwrap();
+
+        let filter = AnalyticsFilter {
+            since_ms: Some(day10_ms),
+            until_ms: Some(day10_ms + 1_000),
+            agents: vec!["codex".into()],
+            source: SourceFilter::Local,
+            workspace_ids: vec![1],
+        };
+
+        let result = query_status(&conn, &filter).unwrap();
+
+        assert_eq!(status_table_row_count(&result, "token_usage"), 2);
+        assert_eq!(result.coverage.model_name_coverage_pct, 100.0);
+        assert_eq!(result.coverage.estimate_only_pct, 0.0);
+    }
+
+    #[test]
+    fn query_status_blank_duplicate_token_usage_data_source_does_not_override_estimated() {
+        let conn = setup_status_filter_db();
+        let day11_ms = crate::storage::sqlite::FrankenStorage::millis_from_day_id(11);
+        conn.execute("UPDATE token_usage SET data_source = 'estimated' WHERE message_id = 21")
+            .unwrap();
+        conn.execute(&format!(
+            "INSERT INTO token_usage
+                (message_id, conversation_id, agent_id, workspace_id, source_id, timestamp_ms, day_id,
+                 model_name, model_family, total_tokens, data_source)
+             VALUES
+                (21, 2, 2, 2, 'remote-ci', {}, 11, NULL, 'claude', 11, '   ')",
+            day11_ms + 100
+        ))
+        .unwrap();
+
+        let filter = AnalyticsFilter {
+            agents: vec!["claude_code".into()],
+            source: SourceFilter::Specific("remote-ci".into()),
+            workspace_ids: vec![2],
+            ..Default::default()
+        };
+
+        let result = query_status(&conn, &filter).unwrap();
+
+        assert_eq!(status_table_row_count(&result, "token_usage"), 1);
+        assert_eq!(result.coverage.total_messages, 1);
+        assert_eq!(result.coverage.estimate_only_pct, 100.0);
+    }
+
     fn status_table_row_count(result: &StatusResult, table: &str) -> i64 {
         result
             .tables
@@ -4225,6 +4970,241 @@ mod tests {
         assert_eq!(result.coverage.model_name_coverage_pct, 100.0);
         assert_eq!(result.coverage.estimate_only_pct, 0.0);
         assert_eq!(result.recommended_action, "none");
+    }
+
+    #[test]
+    fn query_status_subday_filter_excludes_same_day_rollup_rows_without_raw_matches() {
+        let conn = setup_status_filter_db();
+        let day10_ms = crate::storage::sqlite::FrankenStorage::millis_from_day_id(10);
+        conn.execute(&format!(
+            "UPDATE messages SET created_at = {} WHERE conversation_id = 1",
+            day10_ms + 10_000
+        ))
+        .unwrap();
+        conn.execute(&format!(
+            "UPDATE message_metrics SET created_at_ms = {} WHERE agent_slug = 'codex'",
+            day10_ms + 10_000
+        ))
+        .unwrap();
+        conn.execute(&format!(
+            "UPDATE token_usage SET timestamp_ms = {} WHERE agent_id = 1",
+            day10_ms + 10_000
+        ))
+        .unwrap();
+
+        let filter = AnalyticsFilter {
+            since_ms: Some(day10_ms),
+            until_ms: Some(day10_ms + 500),
+            agents: vec!["codex".into()],
+            ..Default::default()
+        };
+
+        let result = query_status(&conn, &filter).unwrap();
+
+        assert_eq!(result.coverage.total_messages, 0);
+        assert_eq!(status_table_row_count(&result, "message_metrics"), 0);
+        assert_eq!(status_table_row_count(&result, "usage_hourly"), 0);
+        assert_eq!(status_table_row_count(&result, "usage_daily"), 0);
+        assert_eq!(status_table_row_count(&result, "token_usage"), 0);
+        assert_eq!(status_table_row_count(&result, "token_daily_stats"), 0);
+        assert_eq!(result.recommended_action, "none");
+    }
+
+    #[test]
+    fn query_status_uses_exact_raw_timestamps_for_subday_coverage_counts() {
+        let conn = setup_status_filter_db();
+        let day10_ms = crate::storage::sqlite::FrankenStorage::millis_from_day_id(10);
+        conn.execute(&format!(
+            "UPDATE messages SET created_at = {} WHERE id = 12",
+            day10_ms + 10_000
+        ))
+        .unwrap();
+        conn.execute(&format!(
+            "UPDATE message_metrics SET created_at_ms = {} WHERE message_id = 12",
+            day10_ms + 10_000
+        ))
+        .unwrap();
+        conn.execute(&format!(
+            "UPDATE token_usage SET timestamp_ms = {}, model_name = NULL, data_source = 'estimated' WHERE message_id = 12",
+            day10_ms + 10_000
+        ))
+        .unwrap();
+
+        let filter = AnalyticsFilter {
+            since_ms: Some(day10_ms),
+            until_ms: Some(day10_ms + 500),
+            agents: vec!["codex".into()],
+            source: SourceFilter::Local,
+            workspace_ids: vec![1],
+        };
+
+        let result = query_status(&conn, &filter).unwrap();
+
+        assert_eq!(result.coverage.total_messages, 1);
+        assert_eq!(status_table_row_count(&result, "message_metrics"), 1);
+        assert_eq!(status_table_row_count(&result, "token_usage"), 1);
+        assert_eq!(result.coverage.message_metrics_coverage_pct, 100.0);
+        assert_eq!(result.coverage.api_token_coverage_pct, 100.0);
+        assert_eq!(result.coverage.model_name_coverage_pct, 100.0);
+        assert_eq!(result.coverage.estimate_only_pct, 0.0);
+    }
+
+    #[test]
+    fn query_status_uses_message_metrics_timestamp_when_message_created_at_missing() {
+        let conn = setup_status_filter_db();
+        conn.execute("UPDATE messages SET created_at = NULL WHERE conversation_id = 1")
+            .unwrap();
+
+        let day10_ms = crate::storage::sqlite::FrankenStorage::millis_from_day_id(10);
+        let filter = AnalyticsFilter {
+            since_ms: Some(day10_ms),
+            until_ms: Some(day10_ms + 86_399_999),
+            agents: vec!["codex".into()],
+            source: SourceFilter::Local,
+            workspace_ids: vec![1],
+        };
+
+        let result = query_status(&conn, &filter).unwrap();
+
+        assert_eq!(result.coverage.total_messages, 2);
+        assert_eq!(status_table_row_count(&result, "message_metrics"), 2);
+        assert_eq!(result.coverage.message_metrics_coverage_pct, 100.0);
+    }
+
+    #[test]
+    fn query_status_uses_message_created_at_when_message_metrics_timestamp_column_is_missing() {
+        let conn = setup_legacy_status_filter_db_without_message_metrics_created_at();
+        let day10_ms = crate::storage::sqlite::FrankenStorage::millis_from_day_id(10);
+        conn.execute(&format!(
+            "UPDATE messages SET created_at = {} WHERE conversation_id = 1",
+            day10_ms + 10_000
+        ))
+        .unwrap();
+
+        let filter = AnalyticsFilter {
+            since_ms: Some(day10_ms),
+            until_ms: Some(day10_ms + 500),
+            agents: vec!["codex".into()],
+            source: SourceFilter::Local,
+            workspace_ids: vec![1],
+        };
+
+        let result = query_status(&conn, &filter).unwrap();
+
+        assert_eq!(result.coverage.total_messages, 0);
+        assert_eq!(status_table_row_count(&result, "message_metrics"), 0);
+        assert_eq!(status_table_row_count(&result, "usage_hourly"), 0);
+        assert_eq!(status_table_row_count(&result, "usage_daily"), 0);
+        assert_eq!(result.recommended_action, "none");
+    }
+
+    #[test]
+    fn query_status_uses_conversation_started_at_when_message_metrics_timestamp_column_is_missing()
+    {
+        let conn = setup_legacy_status_filter_db_without_message_metrics_created_at();
+        let day10_ms = crate::storage::sqlite::FrankenStorage::millis_from_day_id(10);
+        conn.execute("UPDATE messages SET created_at = NULL WHERE conversation_id = 1")
+            .unwrap();
+        conn.execute(&format!(
+            "UPDATE conversations SET started_at = {} WHERE id = 1",
+            day10_ms + 10_000
+        ))
+        .unwrap();
+
+        let filter = AnalyticsFilter {
+            since_ms: Some(day10_ms),
+            until_ms: Some(day10_ms + 500),
+            agents: vec!["codex".into()],
+            source: SourceFilter::Local,
+            workspace_ids: vec![1],
+        };
+
+        let result = query_status(&conn, &filter).unwrap();
+
+        assert_eq!(result.coverage.total_messages, 0);
+        assert_eq!(status_table_row_count(&result, "message_metrics"), 0);
+        assert_eq!(status_table_row_count(&result, "usage_hourly"), 0);
+        assert_eq!(status_table_row_count(&result, "usage_daily"), 0);
+        assert_eq!(result.recommended_action, "none");
+    }
+
+    #[test]
+    fn query_status_uses_conversation_started_at_when_token_usage_timestamp_column_is_missing() {
+        let conn = setup_legacy_track_b_filter_db_without_token_usage_timestamp();
+        let day10_ms = crate::storage::sqlite::FrankenStorage::millis_from_day_id(10);
+        conn.execute(&format!(
+            "UPDATE conversations SET started_at = {} WHERE id = 1",
+            day10_ms + 10_000
+        ))
+        .unwrap();
+
+        let filter = AnalyticsFilter {
+            since_ms: Some(day10_ms),
+            until_ms: Some(day10_ms + 500),
+            agents: vec!["codex".into()],
+            source: SourceFilter::Local,
+            workspace_ids: vec![1],
+        };
+
+        let result = query_status(&conn, &filter).unwrap();
+
+        assert_eq!(status_table_row_count(&result, "token_usage"), 0);
+        assert_eq!(status_table_row_count(&result, "token_daily_stats"), 0);
+        assert_eq!(result.coverage.model_name_coverage_pct, 0.0);
+        assert_eq!(result.coverage.estimate_only_pct, 0.0);
+        assert_eq!(result.recommended_action, "rebuild_track_b");
+    }
+
+    #[test]
+    fn query_cost_timeseries_uses_conversation_started_at_when_token_usage_timestamp_column_is_missing()
+     {
+        let conn = setup_legacy_track_b_filter_db_without_token_usage_timestamp();
+        let day10_ms = crate::storage::sqlite::FrankenStorage::millis_from_day_id(10);
+        conn.execute(&format!(
+            "UPDATE conversations SET started_at = {} WHERE id = 1",
+            day10_ms + 10_000
+        ))
+        .unwrap();
+
+        let filter = AnalyticsFilter {
+            since_ms: Some(day10_ms),
+            until_ms: Some(day10_ms + 500),
+            agents: vec!["codex".into()],
+            source: SourceFilter::Local,
+            workspace_ids: vec![1],
+        };
+
+        let result = query_cost_timeseries(&conn, &filter, GroupBy::Hour).unwrap();
+
+        assert_eq!(result.source_table, "token_usage");
+        assert!(result.buckets.is_empty());
+        assert_eq!(result.totals.api_tokens_total, 0);
+        assert_eq!(result.totals.estimated_cost_usd, 0.0);
+    }
+
+    #[test]
+    fn query_breakdown_model_api_total_uses_conversation_started_at_when_token_usage_timestamp_column_is_missing()
+     {
+        let conn = setup_legacy_track_b_filter_db_without_token_usage_timestamp();
+        let day10_ms = crate::storage::sqlite::FrankenStorage::millis_from_day_id(10);
+        conn.execute(&format!(
+            "UPDATE conversations SET started_at = {} WHERE id = 1",
+            day10_ms + 10_000
+        ))
+        .unwrap();
+
+        let filter = AnalyticsFilter {
+            since_ms: Some(day10_ms),
+            until_ms: Some(day10_ms + 500),
+            agents: vec!["codex".into()],
+            source: SourceFilter::Local,
+            workspace_ids: vec![1],
+        };
+
+        let result = query_breakdown(&conn, &filter, Dim::Model, Metric::ApiTotal, 10).unwrap();
+
+        assert_eq!(result.source_table, "token_usage");
+        assert!(result.rows.is_empty());
     }
 
     #[test]
@@ -4328,6 +5308,34 @@ mod tests {
     }
 
     #[test]
+    fn query_breakdown_by_agent_coverage_pct_orders_by_coverage_before_limit() {
+        let conn = setup_usage_daily_db();
+        conn.execute(
+            "UPDATE usage_daily
+             SET api_coverage_message_count = CASE agent_slug
+                 WHEN 'claude_code' THEN 10
+                 WHEN 'codex' THEN message_count
+                 ELSE api_coverage_message_count
+             END",
+        )
+        .unwrap();
+
+        let result = query_breakdown(
+            &conn,
+            &AnalyticsFilter::default(),
+            Dim::Agent,
+            Metric::CoveragePct,
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(result.source_table, "usage_daily");
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].key, "codex");
+        assert_eq!(result.rows[0].value, 100);
+    }
+
+    #[test]
     fn query_breakdown_by_source_filters_correctly() {
         let conn = setup_usage_daily_db();
         let filter = AnalyticsFilter {
@@ -4340,6 +5348,21 @@ mod tests {
         // Only "local" source should appear
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0].key, "local");
+    }
+
+    #[test]
+    fn query_breakdown_by_source_specific_filter_applies_before_limit_on_track_a_rollup() {
+        let conn = setup_usage_daily_db();
+        let filter = AnalyticsFilter {
+            source: SourceFilter::Specific("remote".into()),
+            ..Default::default()
+        };
+        let result = query_breakdown(&conn, &filter, Dim::Source, Metric::MessageCount, 1).unwrap();
+
+        assert_eq!(result.source_table, "usage_daily");
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].key, "remote");
+        assert_eq!(result.rows[0].value, 30);
     }
 
     #[test]
@@ -4421,6 +5444,32 @@ mod tests {
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0].key, "local");
         assert_eq!(result.rows[0].value, 3);
+    }
+
+    #[test]
+    fn query_breakdown_by_source_specific_filter_applies_before_limit_on_track_b_rollup() {
+        let conn = setup_token_daily_stats_db();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        conn.execute_compat(
+            "INSERT INTO token_daily_stats VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+            frankensqlite::params![20250, "claude_code", "remote-ci", "sonnet", 5, 2, 3, 1, 1200, 900, 0, 0, 0, 2100, 6000, 1, 0.6, 1, now],
+        )
+        .unwrap();
+
+        let filter = AnalyticsFilter {
+            source: SourceFilter::Specific("remote-ci".into()),
+            ..Default::default()
+        };
+        let result =
+            query_breakdown(&conn, &filter, Dim::Source, Metric::EstimatedCostUsd, 1).unwrap();
+
+        assert_eq!(result.source_table, "token_daily_stats");
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].key, "remote-ci");
+        assert_eq!(result.rows[0].value, 1);
     }
 
     #[test]
@@ -4658,6 +5707,28 @@ mod tests {
     }
 
     #[test]
+    fn query_breakdown_by_agent_message_count_uses_message_metrics_timestamp_when_message_created_at_missing()
+     {
+        let conn = setup_tools_remote_source_fallback_db();
+        conn.execute("UPDATE messages SET created_at = NULL WHERE id = 21")
+            .unwrap();
+        let filter = AnalyticsFilter {
+            source: SourceFilter::Specific("remote-ci".into()),
+            since_ms: Some(1_700_000_000_500),
+            until_ms: Some(1_700_000_001_500),
+            ..Default::default()
+        };
+
+        let result = query_breakdown(&conn, &filter, Dim::Agent, Metric::MessageCount, 10).unwrap();
+
+        assert_eq!(result.source_table, "messages");
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].key, "claude_code");
+        assert_eq!(result.rows[0].value, 1);
+        assert_eq!(result.rows[0].message_count, 1);
+    }
+
+    #[test]
     fn query_breakdown_by_agent_api_total_uses_message_metrics_timestamp_when_message_created_at_missing()
      {
         let conn = setup_tools_remote_source_fallback_db();
@@ -4677,6 +5748,63 @@ mod tests {
         assert_eq!(result.rows[0].key, "claude_code");
         assert_eq!(result.rows[0].value, 100);
         assert_eq!(result.rows[0].bucket.api_tokens_total, 100);
+    }
+
+    #[test]
+    fn query_breakdown_by_agent_api_total_subday_filter_excludes_same_day_rollup_rows_without_raw_matches()
+     {
+        let conn = setup_status_filter_db();
+        let day10_ms = crate::storage::sqlite::FrankenStorage::millis_from_day_id(10);
+        let later_ms = day10_ms + (12 * 60 * 60 * 1000);
+
+        conn.execute(&format!(
+            "UPDATE messages SET created_at = {later_ms} WHERE conversation_id = 1"
+        ))
+        .unwrap();
+        conn.execute(&format!(
+            "UPDATE message_metrics SET created_at_ms = {later_ms} WHERE agent_slug = 'codex'"
+        ))
+        .unwrap();
+
+        let filter = AnalyticsFilter {
+            since_ms: Some(day10_ms),
+            until_ms: Some(day10_ms + 500),
+            agents: vec!["codex".into()],
+            ..Default::default()
+        };
+        let result = query_breakdown(&conn, &filter, Dim::Agent, Metric::ApiTotal, 10).unwrap();
+
+        assert_eq!(result.source_table, "message_metrics");
+        assert!(result.rows.is_empty());
+    }
+
+    #[test]
+    fn query_breakdown_model_api_total_deduplicates_duplicate_token_usage_rows() {
+        let conn = setup_status_filter_db();
+        let day10_ms = crate::storage::sqlite::FrankenStorage::millis_from_day_id(10);
+        conn.execute(&format!(
+            "INSERT INTO token_usage
+                (message_id, conversation_id, agent_id, workspace_id, source_id, timestamp_ms, day_id,
+                 model_name, model_family, total_tokens, data_source)
+             VALUES
+                (11, 1, 1, 1, 'local', {}, 10, 'gpt-4o-mini', 'gpt-4o', 12, 'api')",
+            day10_ms + 100
+        ))
+        .unwrap();
+
+        let filter = AnalyticsFilter {
+            workspace_ids: vec![1],
+            agents: vec!["codex".into()],
+            source: SourceFilter::Local,
+            ..Default::default()
+        };
+        let result = query_breakdown(&conn, &filter, Dim::Model, Metric::ApiTotal, 10).unwrap();
+
+        assert_eq!(result.source_table, "token_usage");
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].message_count, 2);
+        assert_eq!(result.rows[0].value, 29);
+        assert_eq!(result.rows[0].bucket.api_tokens_total, 29);
     }
 
     #[test]
@@ -4734,6 +5862,30 @@ mod tests {
         assert_eq!(result.rows[0].message_count, 2);
         assert_eq!(result.rows[0].value, 29);
         assert_eq!(result.rows[0].bucket.api_tokens_total, 29);
+    }
+
+    #[test]
+    fn query_breakdown_model_api_total_subday_filter_excludes_same_day_rollup_rows_without_raw_matches()
+     {
+        let conn = setup_status_filter_db();
+        let day10_ms = crate::storage::sqlite::FrankenStorage::millis_from_day_id(10);
+        let later_ms = day10_ms + (12 * 60 * 60 * 1000);
+
+        conn.execute(&format!(
+            "UPDATE token_usage SET timestamp_ms = {later_ms} WHERE conversation_id = 1"
+        ))
+        .unwrap();
+
+        let filter = AnalyticsFilter {
+            since_ms: Some(day10_ms),
+            until_ms: Some(day10_ms + 500),
+            agents: vec!["codex".into()],
+            ..Default::default()
+        };
+        let result = query_breakdown(&conn, &filter, Dim::Model, Metric::ApiTotal, 10).unwrap();
+
+        assert_eq!(result.source_table, "token_usage");
+        assert!(result.rows.is_empty());
     }
 
     #[test]
@@ -4858,6 +6010,137 @@ mod tests {
     }
 
     #[test]
+    fn query_unpriced_models_totals_include_hidden_models_beyond_limit() {
+        let conn = Connection::open(":memory:").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE token_usage (
+                model_name TEXT,
+                total_tokens INTEGER,
+                estimated_cost_usd REAL
+            );
+             INSERT INTO token_usage (model_name, total_tokens, estimated_cost_usd) VALUES
+                ('model-a', 100, NULL),
+                ('model-b', 40, NULL),
+                ('model-c', 10, NULL),
+                ('model-priced', 25, 0.5);",
+        )
+        .unwrap();
+
+        let result = query_unpriced_models(&conn, 1).unwrap();
+
+        assert_eq!(result.models.len(), 1);
+        assert_eq!(result.models[0].model_name, "model-a");
+        assert_eq!(result.models[0].total_tokens, 100);
+        assert_eq!(result.total_unpriced_tokens, 150);
+        assert_eq!(result.total_priced_tokens, 25);
+    }
+
+    #[test]
+    fn query_unpriced_models_deduplicates_duplicate_token_usage_rows() {
+        let conn = Connection::open(":memory:").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE token_usage (
+                message_id INTEGER,
+                model_name TEXT,
+                total_tokens INTEGER,
+                estimated_cost_usd REAL
+            );
+             INSERT INTO token_usage (message_id, model_name, total_tokens, estimated_cost_usd) VALUES
+                (1, 'model-a', 100, NULL),
+                (1, 'model-a', 100, NULL),
+                (2, 'model-b', 40, NULL),
+                (3, 'model-priced', 25, 0.5),
+                (3, 'model-priced', 25, 0.5);",
+        )
+        .unwrap();
+
+        let result = query_unpriced_models(&conn, 10).unwrap();
+
+        assert_eq!(result.models.len(), 2);
+        assert_eq!(result.models[0].model_name, "model-a");
+        assert_eq!(result.models[0].total_tokens, 100);
+        assert_eq!(result.models[0].row_count, 1);
+        assert_eq!(result.models[1].model_name, "model-b");
+        assert_eq!(result.models[1].total_tokens, 40);
+        assert_eq!(result.models[1].row_count, 1);
+        assert_eq!(result.total_unpriced_tokens, 140);
+        assert_eq!(result.total_priced_tokens, 25);
+    }
+
+    #[test]
+    fn query_unpriced_models_coalesces_blank_model_names_into_none_bucket() {
+        let conn = Connection::open(":memory:").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE token_usage (
+                model_name TEXT,
+                total_tokens INTEGER,
+                estimated_cost_usd REAL
+            );
+             INSERT INTO token_usage (model_name, total_tokens, estimated_cost_usd) VALUES
+                (NULL, 100, NULL),
+                ('   ', 40, NULL),
+                (' model-a ', 10, NULL);",
+        )
+        .unwrap();
+
+        let result = query_unpriced_models(&conn, 10).unwrap();
+
+        assert_eq!(result.models.len(), 2);
+        assert_eq!(result.models[0].model_name, "(none)");
+        assert_eq!(result.models[0].total_tokens, 140);
+        assert_eq!(result.models[0].row_count, 2);
+        assert_eq!(result.models[1].model_name, "model-a");
+        assert_eq!(result.models[1].total_tokens, 10);
+        assert_eq!(result.total_unpriced_tokens, 150);
+    }
+
+    #[test]
+    fn query_unpriced_models_missing_estimated_cost_column_returns_empty_report() {
+        let conn = Connection::open(":memory:").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE token_usage (
+                model_name TEXT,
+                total_tokens INTEGER
+            );
+             INSERT INTO token_usage (model_name, total_tokens) VALUES
+                ('model-a', 100),
+                ('model-b', 40);",
+        )
+        .unwrap();
+
+        let result = query_unpriced_models(&conn, 10).unwrap();
+
+        assert!(result.models.is_empty());
+        assert_eq!(result.total_unpriced_tokens, 0);
+        assert_eq!(result.total_priced_tokens, 0);
+    }
+
+    #[test]
+    fn query_unpriced_models_without_model_name_column_uses_none_bucket() {
+        let conn = Connection::open(":memory:").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE token_usage (
+                total_tokens INTEGER,
+                estimated_cost_usd REAL
+            );
+             INSERT INTO token_usage (total_tokens, estimated_cost_usd) VALUES
+                (100, NULL),
+                (40, NULL),
+                (25, 0.5);",
+        )
+        .unwrap();
+
+        let result = query_unpriced_models(&conn, 10).unwrap();
+
+        assert_eq!(result.models.len(), 1);
+        assert_eq!(result.models[0].model_name, "(none)");
+        assert_eq!(result.models[0].total_tokens, 140);
+        assert_eq!(result.models[0].row_count, 2);
+        assert_eq!(result.total_unpriced_tokens, 140);
+        assert_eq!(result.total_priced_tokens, 25);
+    }
+
+    #[test]
     fn query_tools_returns_agent_breakdown() {
         let conn = setup_usage_daily_db();
         let filter = AnalyticsFilter::default();
@@ -4904,6 +6187,38 @@ mod tests {
     }
 
     #[test]
+    fn query_tools_totals_include_hidden_rows_beyond_limit() {
+        let conn = setup_usage_daily_db();
+        let result = query_tools(&conn, &AnalyticsFilter::default(), GroupBy::Day, 1).unwrap();
+
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].key, "claude_code");
+        assert_eq!(result.rows[0].tool_call_count, 45);
+        assert_eq!(result.total_tool_calls, 75);
+        assert_eq!(result.total_messages, 360);
+        assert_eq!(result.total_api_tokens, 210_000);
+    }
+
+    #[test]
+    fn query_tools_raw_totals_include_hidden_rows_beyond_limit() {
+        let conn = setup_tools_remote_source_fallback_db();
+        let filter = AnalyticsFilter {
+            since_ms: Some(1_700_000_000_000),
+            until_ms: Some(1_700_000_002_000),
+            ..Default::default()
+        };
+        let result = query_tools(&conn, &filter, GroupBy::Day, 1).unwrap();
+
+        assert_eq!(result.source_table, "message_metrics");
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].key, "claude_code");
+        assert_eq!(result.rows[0].tool_call_count, 7);
+        assert_eq!(result.total_tool_calls, 9);
+        assert_eq!(result.total_messages, 2);
+        assert_eq!(result.total_api_tokens, 130);
+    }
+
+    #[test]
     fn query_tools_source_filter_matches_blank_remote_usage_daily_source_via_origin_host() {
         let conn = setup_tools_remote_source_fallback_db();
         let filter = AnalyticsFilter {
@@ -4922,6 +6237,35 @@ mod tests {
         assert_eq!(result.total_tool_calls, 7);
         assert_eq!(result.total_messages, 1);
         assert_eq!(result.total_api_tokens, 100);
+    }
+
+    #[test]
+    fn query_tools_subday_filter_excludes_same_day_rollup_rows_without_raw_matches() {
+        let conn = setup_tools_remote_source_fallback_db();
+        let day_ms = crate::storage::sqlite::FrankenStorage::millis_from_day_id(20250);
+        let later_ms = day_ms + (12 * 60 * 60 * 1000);
+        conn.execute(&format!(
+            "UPDATE messages SET created_at = {later_ms} WHERE conversation_id = 1"
+        ))
+        .unwrap();
+        conn.execute(&format!(
+            "UPDATE message_metrics SET created_at_ms = {later_ms} WHERE message_id = 11"
+        ))
+        .unwrap();
+
+        let filter = AnalyticsFilter {
+            since_ms: Some(day_ms),
+            until_ms: Some(day_ms + 500),
+            agents: vec!["codex".into()],
+            ..Default::default()
+        };
+        let result = query_tools(&conn, &filter, GroupBy::Day, 10).unwrap();
+
+        assert_eq!(result.source_table, "message_metrics");
+        assert!(result.rows.is_empty());
+        assert_eq!(result.total_tool_calls, 0);
+        assert_eq!(result.total_messages, 0);
+        assert_eq!(result.total_api_tokens, 0);
     }
 
     #[test]
@@ -4974,6 +6318,160 @@ mod tests {
     }
 
     #[test]
+    fn query_total_messages_filtered_deduplicates_duplicate_message_metrics_rows() {
+        let conn = setup_duplicate_message_metrics_raw_db();
+        let filter = AnalyticsFilter {
+            since_ms: Some(1_700_000_000_000),
+            until_ms: Some(1_700_000_003_000),
+            ..Default::default()
+        };
+
+        assert_eq!(query_total_messages_filtered(&conn, &filter), 2);
+    }
+
+    #[test]
+    fn query_total_messages_filtered_uses_conversation_started_at_when_message_timestamps_missing()
+    {
+        let conn = setup_duplicate_message_metrics_raw_db();
+        conn.execute("UPDATE messages SET created_at = NULL")
+            .unwrap();
+        conn.execute("UPDATE message_metrics SET created_at_ms = NULL")
+            .unwrap();
+        let filter = AnalyticsFilter {
+            since_ms: Some(1_700_000_000_000),
+            until_ms: Some(1_700_000_000_500),
+            ..Default::default()
+        };
+
+        assert_eq!(query_total_messages_filtered(&conn, &filter), 2);
+    }
+
+    #[test]
+    fn query_tokens_timeseries_deduplicates_duplicate_message_metrics_rows() {
+        let conn = setup_duplicate_message_metrics_raw_db();
+        let filter = AnalyticsFilter {
+            since_ms: Some(1_700_000_000_000),
+            until_ms: Some(1_700_000_003_000),
+            ..Default::default()
+        };
+        let result = query_tokens_timeseries(&conn, &filter, GroupBy::Day).unwrap();
+
+        assert_eq!(result.source_table, "message_metrics");
+        assert_eq!(result.path, "raw");
+        assert_eq!(result.totals.message_count, 2);
+        assert_eq!(result.totals.tool_call_count, 7);
+        assert_eq!(result.totals.api_tokens_total, 1_200);
+    }
+
+    #[test]
+    fn query_tokens_timeseries_uses_conversation_started_at_when_message_timestamps_missing() {
+        let conn = setup_duplicate_message_metrics_raw_db();
+        conn.execute("UPDATE messages SET created_at = NULL")
+            .unwrap();
+        conn.execute("UPDATE message_metrics SET created_at_ms = NULL")
+            .unwrap();
+        let filter = AnalyticsFilter {
+            since_ms: Some(1_700_000_000_000),
+            until_ms: Some(1_700_000_000_500),
+            ..Default::default()
+        };
+        let result = query_tokens_timeseries(&conn, &filter, GroupBy::Day).unwrap();
+
+        assert_eq!(result.source_table, "message_metrics");
+        assert_eq!(result.path, "raw");
+        assert_eq!(result.totals.message_count, 2);
+        assert_eq!(result.totals.api_tokens_total, 1_200);
+    }
+
+    #[test]
+    fn query_breakdown_by_agent_api_total_deduplicates_duplicate_message_metrics_rows() {
+        let conn = setup_duplicate_message_metrics_raw_db();
+        let filter = AnalyticsFilter {
+            since_ms: Some(1_700_000_000_000),
+            until_ms: Some(1_700_000_003_000),
+            ..Default::default()
+        };
+        let result = query_breakdown(&conn, &filter, Dim::Agent, Metric::ApiTotal, 10).unwrap();
+
+        assert_eq!(result.source_table, "message_metrics");
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].key, "codex");
+        assert_eq!(result.rows[0].message_count, 2);
+        assert_eq!(result.rows[0].value, 1_200);
+    }
+
+    #[test]
+    fn query_breakdown_by_agent_message_count_uses_conversation_started_at_when_message_timestamps_missing()
+     {
+        let conn = setup_duplicate_message_metrics_raw_db();
+        conn.execute("UPDATE messages SET created_at = NULL")
+            .unwrap();
+        conn.execute("UPDATE message_metrics SET created_at_ms = NULL")
+            .unwrap();
+        let filter = AnalyticsFilter {
+            since_ms: Some(1_700_000_000_000),
+            until_ms: Some(1_700_000_000_500),
+            ..Default::default()
+        };
+        let result = query_breakdown(&conn, &filter, Dim::Agent, Metric::MessageCount, 10).unwrap();
+
+        assert_eq!(result.source_table, "messages");
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].key, "codex");
+        assert_eq!(result.rows[0].value, 2);
+    }
+
+    #[test]
+    fn query_tools_deduplicates_duplicate_message_metrics_rows() {
+        let conn = setup_duplicate_message_metrics_raw_db();
+        let filter = AnalyticsFilter {
+            since_ms: Some(1_700_000_000_000),
+            until_ms: Some(1_700_000_003_000),
+            ..Default::default()
+        };
+        let result = query_tools(&conn, &filter, GroupBy::Day, 10).unwrap();
+
+        assert_eq!(result.source_table, "message_metrics");
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].key, "codex");
+        assert_eq!(result.rows[0].tool_call_count, 7);
+        assert_eq!(result.rows[0].message_count, 2);
+        assert_eq!(result.rows[0].api_tokens_total, 1_200);
+    }
+
+    #[test]
+    fn query_tools_uses_conversation_started_at_when_message_timestamps_missing() {
+        let conn = setup_duplicate_message_metrics_raw_db();
+        conn.execute("UPDATE messages SET created_at = NULL")
+            .unwrap();
+        conn.execute("UPDATE message_metrics SET created_at_ms = NULL")
+            .unwrap();
+        let filter = AnalyticsFilter {
+            since_ms: Some(1_700_000_000_000),
+            until_ms: Some(1_700_000_000_500),
+            ..Default::default()
+        };
+        let result = query_tools(&conn, &filter, GroupBy::Day, 10).unwrap();
+
+        assert_eq!(result.source_table, "message_metrics");
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].key, "codex");
+        assert_eq!(result.rows[0].message_count, 2);
+        assert_eq!(result.rows[0].tool_call_count, 7);
+    }
+
+    #[test]
+    fn query_session_scatter_deduplicates_duplicate_message_metrics_rows() {
+        let conn = setup_duplicate_message_metrics_raw_db();
+        let points = query_session_scatter(&conn, &AnalyticsFilter::default(), 10).unwrap();
+
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].source_path, "/sessions/dup.jsonl");
+        assert_eq!(points[0].message_count, 2);
+        assert_eq!(points[0].api_tokens_total, 1_200);
+    }
+
+    #[test]
     fn query_session_scatter_returns_sorted_points() {
         let conn = setup_session_scatter_db();
         let points = query_session_scatter(&conn, &AnalyticsFilter::default(), 10).unwrap();
@@ -5003,6 +6501,28 @@ mod tests {
         assert_eq!(points[0].source_path, "/sessions/a.jsonl");
         assert_eq!(points[0].message_count, 2);
         assert_eq!(points[0].api_tokens_total, 1000);
+    }
+
+    #[test]
+    fn query_session_scatter_without_agents_table_still_returns_points() {
+        let conn = setup_session_scatter_db();
+        conn.execute_batch("DROP TABLE agents;").unwrap();
+
+        let points = query_session_scatter(&conn, &AnalyticsFilter::default(), 10).unwrap();
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0].source_path, "/sessions/b.jsonl");
+        assert_eq!(points[1].source_path, "/sessions/a.jsonl");
+    }
+
+    #[test]
+    fn query_session_scatter_with_missing_agent_row_keeps_session_without_filter() {
+        let conn = setup_session_scatter_db();
+        conn.execute("DELETE FROM agents WHERE id = 2").unwrap();
+
+        let points = query_session_scatter(&conn, &AnalyticsFilter::default(), 10).unwrap();
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0].source_path, "/sessions/b.jsonl");
+        assert_eq!(points[0].api_tokens_total, 2300);
     }
 
     #[test]
@@ -5077,6 +6597,216 @@ mod tests {
         // Message 11: 500 from message_metrics (preferred over token_usage=999).
         // Message 12: 900 from token_usage (message_metrics fields are NULL).
         assert_eq!(points[0].api_tokens_total, 1400);
+    }
+
+    #[test]
+    fn query_session_scatter_aggregates_duplicate_token_usage_rows_per_message() {
+        let conn = setup_session_scatter_db();
+        conn.execute_batch(
+            "CREATE TABLE token_usage (
+                id INTEGER PRIMARY KEY,
+                message_id INTEGER NOT NULL,
+                total_tokens INTEGER
+            );",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO token_usage (id, message_id, total_tokens) VALUES (1, 11, 600)")
+            .unwrap();
+        conn.execute("INSERT INTO token_usage (id, message_id, total_tokens) VALUES (2, 11, 700)")
+            .unwrap();
+
+        let filter = AnalyticsFilter {
+            agents: vec!["codex".into()],
+            source: SourceFilter::Local,
+            ..Default::default()
+        };
+
+        let points = query_session_scatter(&conn, &filter, 10).unwrap();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].source_path, "/sessions/a.jsonl");
+        assert_eq!(points[0].message_count, 2);
+        // Message 11 still prefers its single message_metrics row (500) even if
+        // dirty token_usage data contains multiple rows for the same message.
+        assert_eq!(points[0].api_tokens_total, 1000);
+    }
+
+    #[test]
+    fn query_session_scatter_uses_max_token_usage_total_for_duplicate_rows_per_message() {
+        let conn = setup_session_scatter_db();
+        conn.execute_batch(
+            "CREATE TABLE token_usage (
+                id INTEGER PRIMARY KEY,
+                message_id INTEGER NOT NULL,
+                total_tokens INTEGER
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE message_metrics
+             SET api_input_tokens = NULL,
+                 api_output_tokens = NULL,
+                 api_cache_read_tokens = NULL,
+                 api_cache_creation_tokens = NULL,
+                 api_thinking_tokens = NULL
+             WHERE message_id = 12",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO token_usage (id, message_id, total_tokens) VALUES (1, 12, 400)")
+            .unwrap();
+        conn.execute("INSERT INTO token_usage (id, message_id, total_tokens) VALUES (2, 12, 900)")
+            .unwrap();
+
+        let filter = AnalyticsFilter {
+            agents: vec!["codex".into()],
+            source: SourceFilter::Local,
+            ..Default::default()
+        };
+
+        let points = query_session_scatter(&conn, &filter, 10).unwrap();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].source_path, "/sessions/a.jsonl");
+        assert_eq!(points[0].message_count, 2);
+        // Message 12 uses token_usage fallback, but duplicate dirty rows must
+        // still resolve to one per-message total rather than summing both.
+        assert_eq!(points[0].api_tokens_total, 1400);
+    }
+
+    #[test]
+    fn query_session_scatter_falls_back_to_conversation_rollup_when_detailed_tokens_are_sparse() {
+        let conn = setup_session_scatter_db();
+        conn.execute(
+            "UPDATE message_metrics
+             SET api_input_tokens = NULL,
+                 api_output_tokens = NULL,
+                 api_cache_read_tokens = NULL,
+                 api_cache_creation_tokens = NULL,
+                 api_thinking_tokens = NULL
+             WHERE message_id = 12",
+        )
+        .unwrap();
+
+        let filter = AnalyticsFilter {
+            agents: vec!["codex".into()],
+            source: SourceFilter::Local,
+            ..Default::default()
+        };
+
+        let points = query_session_scatter(&conn, &filter, 10).unwrap();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].source_path, "/sessions/a.jsonl");
+        assert_eq!(points[0].message_count, 2);
+        // Detailed per-message API rows only account for message 11 (500), so
+        // scatter must fall back to the conversation rollup total (1000).
+        assert_eq!(points[0].api_tokens_total, 1000);
+    }
+
+    #[test]
+    fn query_session_scatter_uses_message_metrics_timestamp_when_message_created_at_missing() {
+        let conn = setup_session_scatter_db();
+        conn.execute("ALTER TABLE message_metrics ADD COLUMN created_at_ms INTEGER")
+            .unwrap();
+        conn.execute(
+            "UPDATE message_metrics
+             SET created_at_ms = CASE message_id
+                 WHEN 11 THEN 1700000001000
+                 WHEN 12 THEN 1700000002000
+                 WHEN 21 THEN 1700000001000
+                 WHEN 22 THEN 1700000002000
+                 WHEN 23 THEN 1700000003000
+                 ELSE 0
+             END",
+        )
+        .unwrap();
+        conn.execute("UPDATE messages SET created_at = NULL WHERE conversation_id = 2")
+            .unwrap();
+
+        let filter = AnalyticsFilter {
+            source: SourceFilter::Specific("remote-ci".into()),
+            since_ms: Some(1_700_000_000_500),
+            until_ms: Some(1_700_000_003_500),
+            ..Default::default()
+        };
+
+        let points = query_session_scatter(&conn, &filter, 10).unwrap();
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].source_path, "/sessions/b.jsonl");
+        assert_eq!(points[0].api_tokens_total, 2300);
+    }
+
+    #[test]
+    fn query_session_scatter_uses_token_usage_timestamp_when_message_created_at_missing() {
+        let conn = setup_session_scatter_with_token_usage_fallback_db();
+        conn.execute("ALTER TABLE token_usage ADD COLUMN timestamp_ms INTEGER")
+            .unwrap();
+        conn.execute(
+            "UPDATE token_usage
+             SET timestamp_ms = CASE message_id
+                 WHEN 11 THEN 1700000001000
+                 WHEN 12 THEN 1700000002000
+                 ELSE 0
+             END",
+        )
+        .unwrap();
+        conn.execute("UPDATE messages SET created_at = NULL WHERE conversation_id = 1")
+            .unwrap();
+
+        let filter = AnalyticsFilter {
+            agents: vec!["codex".into()],
+            source: SourceFilter::Local,
+            since_ms: Some(1_700_000_000_500),
+            until_ms: Some(1_700_000_002_500),
+            ..Default::default()
+        };
+
+        let points = query_session_scatter(&conn, &filter, 10).unwrap();
+
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].source_path, "/sessions/a.jsonl");
+        assert_eq!(points[0].api_tokens_total, 1400);
+    }
+
+    #[test]
+    fn query_cost_timeseries_deduplicates_duplicate_token_usage_rows() {
+        let conn = setup_status_filter_db();
+        let day10_ms = crate::storage::sqlite::FrankenStorage::millis_from_day_id(10);
+        conn.execute("ALTER TABLE token_usage ADD COLUMN estimated_cost_usd REAL")
+            .unwrap();
+        conn.execute(
+            "UPDATE token_usage
+             SET estimated_cost_usd = CASE message_id
+                 WHEN 11 THEN 0.2
+                 WHEN 12 THEN 0.3
+                 WHEN 21 THEN 0.4
+                 ELSE 0.0
+             END",
+        )
+        .unwrap();
+        conn.execute(&format!(
+            "INSERT INTO token_usage
+                (message_id, conversation_id, agent_id, workspace_id, source_id, timestamp_ms, day_id,
+                 model_name, model_family, total_tokens, data_source, estimated_cost_usd)
+             VALUES
+                (11, 1, 1, 1, 'local', {}, 10, 'gpt-4o-mini', 'gpt-4o', 12, 'api', 0.2)",
+            day10_ms + 100
+        ))
+        .unwrap();
+
+        let filter = AnalyticsFilter {
+            workspace_ids: vec![1],
+            agents: vec!["codex".into()],
+            source: SourceFilter::Local,
+            ..Default::default()
+        };
+        let result = query_cost_timeseries(&conn, &filter, GroupBy::Day).unwrap();
+
+        assert_eq!(result.source_table, "token_usage");
+        assert_eq!(result.path, "raw");
+        assert_eq!(result.buckets.len(), 1);
+        assert_eq!(result.buckets[0].1.message_count, 2);
+        assert_eq!(result.buckets[0].1.api_tokens_total, 29);
+        assert!((result.buckets[0].1.estimated_cost_usd - 0.5).abs() < 0.001);
+        assert_eq!(result.totals.api_tokens_total, 29);
+        assert!((result.totals.estimated_cost_usd - 0.5).abs() < 0.001);
     }
 
     #[test]
@@ -5211,6 +6941,66 @@ mod tests {
     }
 
     #[test]
+    fn query_tokens_timeseries_subday_filter_excludes_same_day_rollup_rows_without_raw_matches() {
+        let conn = setup_status_filter_db();
+        let day10_ms = crate::storage::sqlite::FrankenStorage::millis_from_day_id(10);
+        let later_ms = day10_ms + (12 * 60 * 60 * 1000);
+
+        conn.execute(&format!(
+            "UPDATE messages SET created_at = {later_ms} WHERE conversation_id = 1"
+        ))
+        .unwrap();
+        conn.execute(&format!(
+            "UPDATE message_metrics SET created_at_ms = {later_ms} WHERE agent_slug = 'codex'"
+        ))
+        .unwrap();
+
+        let filter = AnalyticsFilter {
+            since_ms: Some(day10_ms),
+            until_ms: Some(day10_ms + 500),
+            agents: vec!["codex".into()],
+            ..Default::default()
+        };
+        let result = query_tokens_timeseries(&conn, &filter, GroupBy::Day).unwrap();
+
+        assert_eq!(result.source_table, "message_metrics");
+        assert_eq!(result.path, "raw");
+        assert!(result.buckets.is_empty());
+        assert_eq!(result.totals.message_count, 0);
+        assert_eq!(result.totals.api_tokens_total, 0);
+    }
+
+    #[test]
+    fn query_tokens_timeseries_uses_legacy_second_message_metrics_timestamps_for_exact_filters() {
+        let conn = setup_status_filter_db();
+        let day10_ms = crate::storage::sqlite::FrankenStorage::millis_from_day_id(10);
+        let second_ts = (day10_ms + 100) / 1000;
+
+        conn.execute("UPDATE messages SET created_at = NULL WHERE conversation_id = 1")
+            .unwrap();
+        conn.execute(&format!(
+            "UPDATE message_metrics SET created_at_ms = {second_ts} WHERE agent_slug = 'codex'"
+        ))
+        .unwrap();
+
+        let filter = AnalyticsFilter {
+            since_ms: Some(day10_ms),
+            until_ms: Some(day10_ms + 500),
+            agents: vec!["codex".into()],
+            ..Default::default()
+        };
+        let result = query_tokens_timeseries(&conn, &filter, GroupBy::Day).unwrap();
+
+        assert_eq!(result.source_table, "message_metrics");
+        assert_eq!(result.path, "raw");
+        assert_eq!(result.buckets.len(), 1);
+        assert_eq!(result.buckets[0].1.message_count, 2);
+        assert_eq!(result.buckets[0].1.api_tokens_total, 29);
+        assert_eq!(result.totals.message_count, 2);
+        assert_eq!(result.totals.api_tokens_total, 29);
+    }
+
+    #[test]
     fn query_cost_timeseries_source_filter_matches_blank_remote_token_daily_stats_source_via_origin_host()
      {
         let conn = setup_status_filter_db();
@@ -5241,6 +7031,114 @@ mod tests {
         assert!((result.buckets[0].1.estimated_cost_usd - 0.4).abs() < 0.001);
         assert_eq!(result.totals.api_tokens_total, 11);
         assert!((result.totals.estimated_cost_usd - 0.4).abs() < 0.001);
+    }
+
+    #[test]
+    fn query_cost_timeseries_subday_filter_excludes_same_day_rollup_rows_without_raw_matches() {
+        let conn = setup_status_filter_db();
+        let day10_ms = crate::storage::sqlite::FrankenStorage::millis_from_day_id(10);
+        let later_ms = day10_ms + (12 * 60 * 60 * 1000);
+        conn.execute("ALTER TABLE token_usage ADD COLUMN estimated_cost_usd REAL")
+            .unwrap();
+        conn.execute(
+            "UPDATE token_usage
+             SET estimated_cost_usd = CASE message_id
+                 WHEN 11 THEN 0.2
+                 WHEN 12 THEN 0.3
+                 WHEN 21 THEN 0.4
+                 ELSE 0.0
+             END",
+        )
+        .unwrap();
+        conn.execute(&format!(
+            "UPDATE token_usage SET timestamp_ms = {later_ms} WHERE conversation_id = 1"
+        ))
+        .unwrap();
+
+        let filter = AnalyticsFilter {
+            since_ms: Some(day10_ms),
+            until_ms: Some(day10_ms + 500),
+            agents: vec!["codex".into()],
+            ..Default::default()
+        };
+        let result = query_cost_timeseries(&conn, &filter, GroupBy::Day).unwrap();
+
+        assert_eq!(result.source_table, "token_usage");
+        assert_eq!(result.path, "raw");
+        assert!(result.buckets.is_empty());
+        assert_eq!(result.totals.api_tokens_total, 0);
+        assert!((result.totals.estimated_cost_usd - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn query_cost_timeseries_uses_legacy_second_token_usage_timestamps_for_exact_filters() {
+        let conn = setup_status_filter_db();
+        let day10_ms = crate::storage::sqlite::FrankenStorage::millis_from_day_id(10);
+        let second_ts = (day10_ms + 100) / 1000;
+        conn.execute("ALTER TABLE token_usage ADD COLUMN estimated_cost_usd REAL")
+            .unwrap();
+        conn.execute(
+            "UPDATE token_usage
+             SET estimated_cost_usd = CASE message_id
+                 WHEN 11 THEN 0.2
+                 WHEN 12 THEN 0.3
+                 WHEN 21 THEN 0.4
+                 ELSE 0.0
+             END",
+        )
+        .unwrap();
+        conn.execute(&format!(
+            "UPDATE token_usage SET timestamp_ms = {second_ts} WHERE conversation_id = 1"
+        ))
+        .unwrap();
+
+        let filter = AnalyticsFilter {
+            since_ms: Some(day10_ms),
+            until_ms: Some(day10_ms + 500),
+            agents: vec!["codex".into()],
+            ..Default::default()
+        };
+        let result = query_cost_timeseries(&conn, &filter, GroupBy::Day).unwrap();
+
+        assert_eq!(result.source_table, "token_usage");
+        assert_eq!(result.path, "raw");
+        assert_eq!(result.buckets.len(), 1);
+        assert_eq!(result.buckets[0].1.api_tokens_total, 29);
+        assert!((result.buckets[0].1.estimated_cost_usd - 0.5).abs() < 0.001);
+        assert_eq!(result.totals.api_tokens_total, 29);
+        assert!((result.totals.estimated_cost_usd - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn query_cost_timeseries_hour_group_uses_token_usage_hour_buckets() {
+        let conn = setup_status_filter_db();
+        conn.execute("ALTER TABLE token_usage ADD COLUMN estimated_cost_usd REAL")
+            .unwrap();
+        conn.execute(
+            "UPDATE token_usage
+             SET estimated_cost_usd = CASE message_id
+                 WHEN 11 THEN 0.2
+                 WHEN 12 THEN 0.3
+                 WHEN 21 THEN 0.4
+                 ELSE 0.0
+             END",
+        )
+        .unwrap();
+
+        let result =
+            query_cost_timeseries(&conn, &AnalyticsFilter::default(), GroupBy::Hour).unwrap();
+
+        assert_eq!(result.source_table, "token_usage");
+        assert_eq!(result.path, "raw");
+        assert_eq!(result.buckets.len(), 2);
+        assert!(
+            result
+                .buckets
+                .iter()
+                .all(|(bucket, _)| bucket.contains('T'))
+        );
+        assert_eq!(result.totals.api_tokens_total, 40);
+        assert!((result.totals.estimated_cost_usd - 0.9).abs() < 0.001);
     }
 
     #[test]
