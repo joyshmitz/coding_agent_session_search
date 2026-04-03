@@ -1432,7 +1432,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::io::{Read, Write};
-    use std::net::{TcpListener, TcpStream};
+    use std::net::{Shutdown, TcpListener, TcpStream};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -1494,7 +1494,9 @@ mod tests {
     impl Drop for MirrorFixtureServer {
         fn drop(&mut self) {
             self.stop.store(true, Ordering::SeqCst);
-            let _ = TcpStream::connect(&self.wake_addr);
+            if let Ok(stream) = TcpStream::connect(&self.wake_addr) {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
             if let Some(handle) = self.handle.take() {
                 let _ = handle.join();
             }

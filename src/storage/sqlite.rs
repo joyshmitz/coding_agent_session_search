@@ -2675,6 +2675,11 @@ impl FrankenStorage {
         // Try both namespace variants for compatibility across fsqlite builds.
         let _ = self.conn.execute("PRAGMA fsqlite.concurrent_mode = ON;");
         let _ = self.conn.execute("PRAGMA concurrent_mode = ON;");
+        // Frankensqlite retained autocommit currently mis-serves same-connection
+        // read-after-write queries on cass's storage paths; keep it off here
+        // until the upstream visibility bug is fixed.
+        let _ = self.conn.execute("PRAGMA fsqlite.autocommit_retain = OFF;");
+        let _ = self.conn.execute("PRAGMA autocommit_retain = OFF;");
 
         Ok(())
     }
@@ -4172,8 +4177,7 @@ impl FrankenStorage {
 
     /// Fetch messages for a conversation.
     pub fn fetch_messages(&self, conversation_id: i64) -> Result<Vec<Message>> {
-        let hinted_sql =
-            "SELECT id, idx, role, author, created_at, content, extra_json, extra_bin \
+        let hinted_sql = "SELECT id, idx, role, author, created_at, content, extra_json, extra_bin \
              FROM messages INDEXED BY sqlite_autoindex_messages_1 \
              WHERE conversation_id = ?1 ORDER BY idx";
         let fallback_sql = "SELECT id, idx, role, author, created_at, content, extra_json, extra_bin \
@@ -4201,7 +4205,10 @@ impl FrankenStorage {
                 })
             })
             .or_else(|err| {
-                if err.to_string().contains("no such index: sqlite_autoindex_messages_1") {
+                if err
+                    .to_string()
+                    .contains("no such index: sqlite_autoindex_messages_1")
+                {
                     return self.conn.query_map_collect(
                         fallback_sql,
                         fparams![conversation_id],
@@ -4265,7 +4272,10 @@ impl FrankenStorage {
                 })
             })
             .or_else(|err| {
-                if err.to_string().contains("no such index: sqlite_autoindex_messages_1") {
+                if err
+                    .to_string()
+                    .contains("no such index: sqlite_autoindex_messages_1")
+                {
                     return self.conn.query_map_collect(
                         fallback_sql,
                         fparams![conversation_id],
@@ -12957,6 +12967,42 @@ mod tests {
             message.contains("content-byte guardrail"),
             "expected guardrail reason in error, got {message}"
         );
+    }
+
+    #[test]
+    fn fetch_messages_handles_manual_rows_inserted_via_raw_connection() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("manual-rows.db");
+        let storage = FrankenStorage::open(&db_path).unwrap();
+        let conn = storage.raw();
+
+        conn.execute(
+            "INSERT INTO agents (id, slug, name, kind, created_at, updated_at)
+             VALUES (1, 'claude_code', 'Claude Code', 'local', 0, 0)",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO conversations
+             (id, agent_id, external_id, title, source_path, source_id, started_at)
+             VALUES (1, 1, 'manual-ext', 'Manual Session', '/tmp/manual.jsonl', 'local', 200)",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages
+             (id, conversation_id, idx, role, author, created_at, content, extra_json, extra_bin)
+             VALUES (1, 1, 0, 'user', 'tester', 1700000000000, 'manual body', '{\"k\":1}', NULL)",
+        )
+        .unwrap();
+
+        let lexical = storage.fetch_messages_for_lexical_rebuild(1).unwrap();
+        assert_eq!(lexical.len(), 1);
+        assert_eq!(lexical[0].content, "manual body");
+
+        let full = storage.fetch_messages(1).unwrap();
+        assert_eq!(full.len(), 1);
+        assert_eq!(full[0].content, "manual body");
+        assert_eq!(full[0].author.as_deref(), Some("tester"));
+        assert_eq!(full[0].extra_json, serde_json::json!({ "k": 1 }));
     }
 
     #[test]
