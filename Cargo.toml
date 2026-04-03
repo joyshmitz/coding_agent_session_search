@@ -160,9 +160,9 @@ strip = false
 # franken-decision = { path = "../asupersync/franken_decision" }
 # franken-evidence = { path = "../asupersync/franken_evidence" }
 # franken-kernel = { path = "../asupersync/franken_kernel" }
-# [patch."https://github.com/Dicklesworthstone/frankensqlite"]
-# fsqlite = { path = "../frankensqlite/crates/fsqlite" }
-# fsqlite-types = { path = "../frankensqlite/crates/fsqlite-types" }
+[patch."https://github.com/Dicklesworthstone/frankensqlite"]
+fsqlite = { path = "../frankensqlite/crates/fsqlite" }
+fsqlite-types = { path = "../frankensqlite/crates/fsqlite-types" }
 # [patch."https://github.com/Dicklesworthstone/franken_agent_detection"]
 # franken-agent-detection = { path = "../franken_agent_detection" }
 

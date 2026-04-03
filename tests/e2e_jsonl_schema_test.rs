@@ -99,11 +99,10 @@ fn validate_event(json: &Value) -> Result<(), String> {
 
     // Validate nested object structure for known events
     match event {
-        "test_start" => {
-            if json["test"].get("name").and_then(|v| v.as_str()).is_none() {
-                return Err(format!("Event '{event}' missing 'test.name' string"));
-            }
+        "test_start" if json["test"].get("name").and_then(|v| v.as_str()).is_none() => {
+            return Err(format!("Event '{event}' missing 'test.name' string"));
         }
+        "test_start" => {}
         "test_end" => {
             if json["test"].get("name").and_then(|v| v.as_str()).is_none() {
                 return Err(format!("Event '{event}' missing 'test.name' string"));
@@ -116,11 +115,10 @@ fn validate_event(json: &Value) -> Result<(), String> {
                 return Err("Event 'test_end' missing 'result.status' string".to_string());
             }
         }
-        "phase_start" => {
-            if json["phase"].get("name").and_then(|v| v.as_str()).is_none() {
-                return Err(format!("Event '{event}' missing 'phase.name' string"));
-            }
+        "phase_start" if json["phase"].get("name").and_then(|v| v.as_str()).is_none() => {
+            return Err(format!("Event '{event}' missing 'phase.name' string"));
         }
+        "phase_start" => {}
         "phase_end" => {
             if json["phase"].get("name").and_then(|v| v.as_str()).is_none() {
                 return Err(format!("Event '{event}' missing 'phase.name' string"));

@@ -744,6 +744,31 @@ fn lexical_rebuild_commit_interval_message_bytes() -> usize {
         .unwrap_or(64 * 1024 * 1024)
 }
 
+fn lexical_rebuild_batch_fetch_conversation_limit(page_size: i64) -> usize {
+    dotenvy::var("CASS_TANTIVY_REBUILD_BATCH_FETCH_CONVERSATIONS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(16)
+        .min(usize::try_from(page_size.max(1)).unwrap_or(usize::MAX))
+}
+
+fn lexical_rebuild_batch_fetch_message_limit() -> usize {
+    dotenvy::var("CASS_TANTIVY_REBUILD_BATCH_FETCH_MESSAGES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(50_000)
+}
+
+fn lexical_rebuild_batch_fetch_message_bytes_limit() -> usize {
+    dotenvy::var("CASS_TANTIVY_REBUILD_BATCH_FETCH_MESSAGE_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(16 * 1024 * 1024)
+}
+
 fn should_commit_lexical_rebuild(
     conversations_since_commit: usize,
     messages_since_commit: usize,
@@ -3538,6 +3563,9 @@ pub(crate) fn rebuild_tantivy_from_db(
 
     let mut offset = rebuild_state.committed_offset;
     let page_size = LEXICAL_REBUILD_PAGE_SIZE;
+    let batch_fetch_conversation_limit = lexical_rebuild_batch_fetch_conversation_limit(page_size);
+    let batch_fetch_message_limit = lexical_rebuild_batch_fetch_message_limit();
+    let batch_fetch_message_bytes_limit = lexical_rebuild_batch_fetch_message_bytes_limit();
     let commit_interval_conversations = lexical_rebuild_commit_interval_conversations();
     let commit_interval_messages = lexical_rebuild_commit_interval_messages();
     let commit_interval_message_bytes = lexical_rebuild_commit_interval_message_bytes();
@@ -3564,6 +3592,41 @@ pub(crate) fn rebuild_tantivy_from_db(
         persist_lexical_rebuild_state(&index_path, rebuild_state)?;
         Ok(())
     };
+    let normalize_lexical_messages = |messages: Vec<crate::model::types::Message>| {
+        let mut conversation_message_count = 0usize;
+        let mut conversation_message_bytes = 0usize;
+        let normalized_messages: Vec<NormalizedMessage> = messages
+            .into_iter()
+            .map(|msg| {
+                conversation_message_count = conversation_message_count.saturating_add(1);
+                conversation_message_bytes =
+                    conversation_message_bytes.saturating_add(msg.content.len());
+                let role = match msg.role {
+                    MessageRole::User => "user".to_string(),
+                    MessageRole::Agent => "assistant".to_string(),
+                    MessageRole::Tool => "tool".to_string(),
+                    MessageRole::System => "system".to_string(),
+                    MessageRole::Other(other) => other,
+                };
+
+                NormalizedMessage {
+                    idx: msg.idx,
+                    role,
+                    author: msg.author,
+                    created_at: msg.created_at,
+                    content: msg.content,
+                    extra: msg.extra_json,
+                    snippets: Vec::new(),
+                    invocations: Vec::new(),
+                }
+            })
+            .collect();
+        (
+            normalized_messages,
+            conversation_message_count,
+            conversation_message_bytes,
+        )
+    };
 
     loop {
         let batch = storage.list_conversations_for_lexical_rebuild(page_size, offset)?;
@@ -3571,112 +3634,132 @@ pub(crate) fn rebuild_tantivy_from_db(
             break;
         }
 
-        for conv in batch {
-            offset = offset.saturating_add(1);
-            processed_conversations = processed_conversations.saturating_add(1);
-            conversations_since_commit = conversations_since_commit.saturating_add(1);
+        for conv_chunk in batch.chunks(batch_fetch_conversation_limit) {
+            let mut conv_ids = Vec::with_capacity(conv_chunk.len());
+            for conv in conv_chunk {
+                offset = offset.saturating_add(1);
+                processed_conversations = processed_conversations.saturating_add(1);
+                conversations_since_commit = conversations_since_commit.saturating_add(1);
+                if let Some(conv_id) = conv.id {
+                    conv_ids.push(conv_id);
+                }
+            }
 
-            let Some(conv_id) = conv.id else {
+            let mut batch_messages_by_conversation = if conv_ids.is_empty() {
+                Ok(HashMap::new())
+            } else {
+                storage.fetch_messages_for_lexical_rebuild_batch(
+                    &conv_ids,
+                    Some(batch_fetch_message_limit),
+                    Some(batch_fetch_message_bytes_limit),
+                )
+            };
+            let using_batched_fetch = batch_messages_by_conversation.is_ok();
+            if let Err(error) = &batch_messages_by_conversation {
+                tracing::warn!(
+                    page_size,
+                    chunk_conversations = conv_ids.len(),
+                    chunk_message_limit = batch_fetch_message_limit,
+                    chunk_message_bytes_limit = batch_fetch_message_bytes_limit,
+                    error = %error,
+                    "lexical rebuild batched message fetch failed; falling back to per-conversation fetches"
+                );
+            }
+
+            let mut chunk_message_count = 0usize;
+            let mut chunk_message_bytes = 0usize;
+            for conv in conv_chunk.iter().cloned() {
+                let Some(conv_id) = conv.id else {
+                    if let Some(p) = &progress {
+                        p.current.fetch_add(1, Ordering::Relaxed);
+                    }
+                    continue;
+                };
+
+                let messages = match batch_messages_by_conversation.as_mut() {
+                    Ok(grouped) => grouped.remove(&conv_id).unwrap_or_default(),
+                    Err(_) => storage.fetch_messages_for_lexical_rebuild(conv_id)?,
+                };
+
+                let (kind, host_label) =
+                    source_map.get(&conv.source_id).cloned().unwrap_or_else(|| {
+                        let fallback_kind = if conv.source_id == LOCAL_SOURCE_ID {
+                            SourceKind::Local
+                        } else {
+                            SourceKind::Ssh
+                        };
+                        (fallback_kind, None)
+                    });
+                let host = conv.origin_host.as_deref().or(host_label.as_deref());
+                let mut metadata = serde_json::Value::Object(serde_json::Map::new());
+                ensure_cass_origin(&mut metadata, &conv.source_id, kind, host);
+
+                let (normalized_messages, conversation_message_count, conversation_message_bytes) =
+                    normalize_lexical_messages(messages);
+
+                let normalized = NormalizedConversation {
+                    agent_slug: conv.agent_slug,
+                    external_id: conv.external_id,
+                    title: conv.title,
+                    workspace: conv.workspace,
+                    source_path: conv.source_path,
+                    started_at: conv.started_at,
+                    ended_at: conv.ended_at,
+                    metadata,
+                    messages: normalized_messages,
+                };
+
+                indexed_docs += normalized.messages.len();
+                t_index.add_messages_with_conversation_id(
+                    &normalized,
+                    &normalized.messages,
+                    Some(conv_id),
+                )?;
+                messages_since_commit =
+                    messages_since_commit.saturating_add(conversation_message_count);
+                message_bytes_since_commit =
+                    message_bytes_since_commit.saturating_add(conversation_message_bytes);
+                chunk_message_count =
+                    chunk_message_count.saturating_add(conversation_message_count);
+                chunk_message_bytes =
+                    chunk_message_bytes.saturating_add(conversation_message_bytes);
+
                 if let Some(p) = &progress {
                     p.current.fetch_add(1, Ordering::Relaxed);
                 }
-                continue;
-            };
-            // Querying each conversation separately avoids a pathological
-            // frankensqlite execution path for the batched `IN (...) ORDER BY`
-            // rebuild query that can consume enormous heap before the first
-            // lexical checkpoint is committed. The per-conversation fetch is
-            // forced onto the named messages(conversation_id, idx) index so the
-            // rebuild does not devolve into a full table scan per conversation.
-            let messages = storage.fetch_messages_for_lexical_rebuild(conv_id)?;
 
-            let (kind, host_label) =
-                source_map.get(&conv.source_id).cloned().unwrap_or_else(|| {
-                    let fallback_kind = if conv.source_id == LOCAL_SOURCE_ID {
-                        SourceKind::Local
-                    } else {
-                        SourceKind::Ssh
-                    };
-                    (fallback_kind, None)
-                });
-            let host = conv.origin_host.as_deref().or(host_label.as_deref());
-            let mut metadata = serde_json::Value::Object(serde_json::Map::new());
-            ensure_cass_origin(&mut metadata, &conv.source_id, kind, host);
-
-            let mut conversation_message_count = 0usize;
-            let mut conversation_message_bytes = 0usize;
-            let normalized_messages: Vec<NormalizedMessage> = messages
-                .into_iter()
-                .map(|msg| {
-                    conversation_message_count = conversation_message_count.saturating_add(1);
-                    conversation_message_bytes =
-                        conversation_message_bytes.saturating_add(msg.content.len());
-                    let role = match msg.role {
-                        MessageRole::User => "user".to_string(),
-                        MessageRole::Agent => "assistant".to_string(),
-                        MessageRole::Tool => "tool".to_string(),
-                        MessageRole::System => "system".to_string(),
-                        MessageRole::Other(other) => other,
-                    };
-
-                    NormalizedMessage {
-                        idx: msg.idx,
-                        role,
-                        author: msg.author,
-                        created_at: msg.created_at,
-                        content: msg.content,
-                        extra: msg.extra_json,
-                        snippets: Vec::new(),
-                        invocations: Vec::new(),
-                    }
-                })
-                .collect();
-
-            let normalized = NormalizedConversation {
-                agent_slug: conv.agent_slug,
-                external_id: conv.external_id,
-                title: conv.title,
-                workspace: conv.workspace,
-                source_path: conv.source_path,
-                started_at: conv.started_at,
-                ended_at: conv.ended_at,
-                metadata,
-                messages: normalized_messages,
-            };
-
-            indexed_docs += normalized.messages.len();
-            t_index.add_messages_with_conversation_id(
-                &normalized,
-                &normalized.messages,
-                Some(conv_id),
-            )?;
-            messages_since_commit =
-                messages_since_commit.saturating_add(conversation_message_count);
-            message_bytes_since_commit =
-                message_bytes_since_commit.saturating_add(conversation_message_bytes);
-
-            if let Some(p) = &progress {
-                p.current.fetch_add(1, Ordering::Relaxed);
+                if should_commit_lexical_rebuild(
+                    conversations_since_commit,
+                    messages_since_commit,
+                    message_bytes_since_commit,
+                    commit_interval_conversations,
+                    commit_interval_messages,
+                    commit_interval_message_bytes,
+                ) {
+                    commit_rebuild_progress(
+                        offset,
+                        processed_conversations,
+                        indexed_docs,
+                        &mut rebuild_state,
+                        &mut t_index,
+                    )?;
+                    conversations_since_commit = 0;
+                    messages_since_commit = 0;
+                    message_bytes_since_commit = 0;
+                }
             }
 
-            if should_commit_lexical_rebuild(
-                conversations_since_commit,
-                messages_since_commit,
-                message_bytes_since_commit,
-                commit_interval_conversations,
-                commit_interval_messages,
-                commit_interval_message_bytes,
-            ) {
-                commit_rebuild_progress(
-                    offset,
-                    processed_conversations,
-                    indexed_docs,
-                    &mut rebuild_state,
-                    &mut t_index,
-                )?;
-                conversations_since_commit = 0;
-                messages_since_commit = 0;
-                message_bytes_since_commit = 0;
+            if using_batched_fetch && !conv_ids.is_empty() {
+                tracing::info!(
+                    page_size,
+                    chunk_conversations = conv_ids.len(),
+                    chunk_messages = chunk_message_count,
+                    chunk_message_bytes = chunk_message_bytes,
+                    chunk_limit = batch_fetch_conversation_limit,
+                    chunk_message_limit = batch_fetch_message_limit,
+                    chunk_message_bytes_limit = batch_fetch_message_bytes_limit,
+                    "lexical rebuild processed a batched message fetch chunk"
+                );
             }
         }
         if should_commit_lexical_rebuild(
@@ -6233,6 +6316,7 @@ mod tests {
     use crate::connectors::{
         Connector, DetectionResult, NormalizedConversation, NormalizedMessage,
     };
+    use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
     use crate::sources::provenance::SourceKind;
     use frankensqlite::compat::{ConnectionExt, ParamValue, RowExt};
     use fsqlite_types::value::SqliteValue;
@@ -6268,6 +6352,48 @@ mod tests {
             std::env::set_var(key, "1");
         }
         EnvGuard { key, previous }
+    }
+
+    fn set_env(key: &'static str, value: &str) -> EnvGuard {
+        let previous = dotenvy::var(key).ok();
+        // SAFETY: test helper toggles a process-local env var for isolation.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        EnvGuard { key, previous }
+    }
+
+    #[derive(Clone, Default)]
+    struct LogBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log buffer lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_logs<F: FnOnce()>(f: F) -> String {
+        let writer = LogBuffer::default();
+        let drain = writer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_target(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, f);
+
+        let bytes = drain.0.lock().expect("log buffer lock").clone();
+        String::from_utf8_lossy(&bytes).to_string()
     }
 
     fn ensure_fts_schema(storage: &FrankenStorage) {
@@ -6310,6 +6436,71 @@ mod tests {
             metadata: serde_json::json!({}),
             messages: msgs,
         }
+    }
+
+    fn seed_lexical_rebuild_fixture(storage: &FrankenStorage) {
+        let agent = Agent {
+            id: None,
+            slug: "codex".into(),
+            name: "Codex".into(),
+            version: Some("0.2.3".into()),
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).unwrap();
+
+        for (external_id, base_ts) in [
+            ("lexical-fixture-1", 1_700_000_000_000_i64),
+            ("lexical-fixture-2", 1_700_000_001_000_i64),
+        ] {
+            let conversation = Conversation {
+                id: None,
+                agent_slug: "codex".into(),
+                workspace: Some(PathBuf::from("/tmp/workspace")),
+                external_id: Some(external_id.to_string()),
+                title: Some("Lexical rebuild fixture".into()),
+                source_path: PathBuf::from(format!("/tmp/{external_id}.jsonl")),
+                started_at: Some(base_ts),
+                ended_at: Some(base_ts + 100),
+                approx_tokens: Some(64),
+                metadata_json: serde_json::Value::Null,
+                messages: vec![
+                    Message {
+                        id: None,
+                        idx: 0,
+                        role: MessageRole::User,
+                        author: Some("user".into()),
+                        created_at: Some(base_ts + 10),
+                        content: format!("{external_id}-first"),
+                        extra_json: serde_json::json!({"opaque": true}),
+                        snippets: Vec::new(),
+                    },
+                    Message {
+                        id: None,
+                        idx: 1,
+                        role: MessageRole::Agent,
+                        author: Some("assistant".into()),
+                        created_at: Some(base_ts + 20),
+                        content: format!("{external_id}-second"),
+                        extra_json: serde_json::json!({"opaque": true}),
+                        snippets: Vec::new(),
+                    },
+                ],
+                source_id: LOCAL_SOURCE_ID.into(),
+                origin_host: None,
+            };
+            storage
+                .insert_conversation_tree(agent_id, None, &conversation)
+                .unwrap();
+        }
+    }
+
+    fn tantivy_doc_count_for_data_dir(data_dir: &Path) -> u64 {
+        let index_path = index_dir(data_dir).unwrap();
+        let mut index = TantivyIndex::open_or_create(&index_path).unwrap();
+        index.commit().unwrap();
+        let reader = index.reader().unwrap();
+        reader.reload().unwrap();
+        reader.searcher().num_docs()
     }
 
     fn token_usage_extra(input_tokens: i64, output_tokens: i64) -> serde_json::Value {
@@ -7717,6 +7908,91 @@ mod tests {
         let reader = index.reader().unwrap();
         reader.reload().unwrap();
         assert_eq!(reader.searcher().num_docs(), 3);
+    }
+
+    #[test]
+    #[serial]
+    fn rebuild_tantivy_from_db_logs_batched_chunk_stats() {
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let db_path = data_dir.join("db.sqlite");
+        let storage = FrankenStorage::open(&db_path).unwrap();
+        ensure_fts_schema(&storage);
+        seed_lexical_rebuild_fixture(&storage);
+
+        let _conversation_limit = set_env("CASS_TANTIVY_REBUILD_BATCH_FETCH_CONVERSATIONS", "2");
+        let _message_limit = set_env("CASS_TANTIVY_REBUILD_BATCH_FETCH_MESSAGES", "16");
+        let _message_bytes_limit =
+            set_env("CASS_TANTIVY_REBUILD_BATCH_FETCH_MESSAGE_BYTES", "4096");
+
+        let logs = capture_logs(|| {
+            let indexed = rebuild_tantivy_from_db(&db_path, &data_dir, 2, None).unwrap();
+            assert_eq!(indexed, 4);
+        });
+
+        assert!(
+            logs.contains("lexical rebuild processed a batched message fetch chunk"),
+            "expected batched chunk log, got:\n{logs}"
+        );
+        assert!(
+            logs.contains("page_size=200"),
+            "expected page_size in logs, got:\n{logs}"
+        );
+        assert!(
+            logs.contains("chunk_conversations=2"),
+            "expected chunk_conversations in logs, got:\n{logs}"
+        );
+        assert!(
+            logs.contains("chunk_messages=4"),
+            "expected chunk_messages in logs, got:\n{logs}"
+        );
+        assert!(
+            logs.contains("chunk_message_bytes="),
+            "expected chunk_message_bytes in logs, got:\n{logs}"
+        );
+        assert_eq!(tantivy_doc_count_for_data_dir(&data_dir), 4);
+    }
+
+    #[test]
+    #[serial]
+    fn rebuild_tantivy_from_db_falls_back_when_batch_guardrail_trips() {
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let db_path = data_dir.join("db.sqlite");
+        let storage = FrankenStorage::open(&db_path).unwrap();
+        ensure_fts_schema(&storage);
+        seed_lexical_rebuild_fixture(&storage);
+
+        let _conversation_limit = set_env("CASS_TANTIVY_REBUILD_BATCH_FETCH_CONVERSATIONS", "2");
+        let _message_limit = set_env("CASS_TANTIVY_REBUILD_BATCH_FETCH_MESSAGES", "1");
+        let _message_bytes_limit = set_env("CASS_TANTIVY_REBUILD_BATCH_FETCH_MESSAGE_BYTES", "16");
+
+        let logs = capture_logs(|| {
+            let indexed = rebuild_tantivy_from_db(&db_path, &data_dir, 2, None).unwrap();
+            assert_eq!(indexed, 4);
+        });
+
+        assert!(
+            logs.contains("lexical rebuild batched message fetch failed; falling back to per-conversation fetches"),
+            "expected fallback warning log, got:\n{logs}"
+        );
+        assert!(
+            logs.contains("page_size=200"),
+            "expected page_size in logs, got:\n{logs}"
+        );
+        assert!(
+            logs.contains("chunk_message_limit=1"),
+            "expected chunk_message_limit in logs, got:\n{logs}"
+        );
+        assert!(
+            logs.contains("chunk_message_bytes_limit=16"),
+            "expected chunk_message_bytes_limit in logs, got:\n{logs}"
+        );
+        assert_eq!(tantivy_doc_count_for_data_dir(&data_dir), 4);
     }
 
     #[test]

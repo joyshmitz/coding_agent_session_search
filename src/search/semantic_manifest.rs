@@ -909,17 +909,19 @@ mod tests {
     #[test]
     fn manifest_round_trip_via_disk() {
         let temp = tempfile::tempdir().unwrap();
-        let mut manifest = SemanticManifest::default();
-        manifest.fast_tier = Some(test_artifact(TierKind::Fast, true));
-        manifest.quality_tier = Some(test_artifact(TierKind::Quality, true));
-        manifest.hnsw = Some(test_hnsw());
-        manifest.checkpoint = Some(test_checkpoint(TierKind::Quality));
-        manifest.backlog = BacklogLedger {
-            total_conversations: 2000,
-            fast_tier_processed: 1000,
-            quality_tier_processed: 500,
-            db_fingerprint: "fp-1234".to_owned(),
-            computed_at_ms: 1_700_000_000_000,
+        let mut manifest = SemanticManifest {
+            fast_tier: Some(test_artifact(TierKind::Fast, true)),
+            quality_tier: Some(test_artifact(TierKind::Quality, true)),
+            hnsw: Some(test_hnsw()),
+            checkpoint: Some(test_checkpoint(TierKind::Quality)),
+            backlog: BacklogLedger {
+                total_conversations: 2000,
+                fast_tier_processed: 1000,
+                quality_tier_processed: 500,
+                db_fingerprint: "fp-1234".to_owned(),
+                computed_at_ms: 1_700_000_000_000,
+            },
+            ..Default::default()
         };
 
         manifest.save(temp.path()).unwrap();
@@ -937,18 +939,22 @@ mod tests {
     #[test]
     fn manifest_save_overwrites_existing_file() {
         let temp = tempfile::tempdir().unwrap();
-        let mut first = SemanticManifest::default();
-        first.fast_tier = Some(test_artifact(TierKind::Fast, true));
+        let mut first = SemanticManifest {
+            fast_tier: Some(test_artifact(TierKind::Fast, true)),
+            ..Default::default()
+        };
         first.save(temp.path()).unwrap();
 
-        let mut second = SemanticManifest::default();
-        second.quality_tier = Some(test_artifact(TierKind::Quality, true));
-        second.backlog = BacklogLedger {
-            total_conversations: 99,
-            fast_tier_processed: 0,
-            quality_tier_processed: 99,
-            db_fingerprint: "fp-overwrite".to_owned(),
-            computed_at_ms: 1_700_000_000_123,
+        let mut second = SemanticManifest {
+            quality_tier: Some(test_artifact(TierKind::Quality, true)),
+            backlog: BacklogLedger {
+                total_conversations: 99,
+                fast_tier_processed: 0,
+                quality_tier_processed: 99,
+                db_fingerprint: "fp-overwrite".to_owned(),
+                computed_at_ms: 1_700_000_000_123,
+            },
+            ..Default::default()
         };
         second.save(temp.path()).unwrap();
 
@@ -991,8 +997,10 @@ mod tests {
         let path = SemanticManifest::path(temp.path());
         fs::create_dir_all(path.parent().unwrap()).unwrap();
 
-        let mut manifest = SemanticManifest::default();
-        manifest.manifest_version = MANIFEST_FORMAT_VERSION + 1;
+        let manifest = SemanticManifest {
+            manifest_version: MANIFEST_FORMAT_VERSION + 1,
+            ..Default::default()
+        };
         let json = serde_json::to_string(&manifest).unwrap();
         fs::write(&path, json).unwrap();
 
@@ -1066,8 +1074,10 @@ mod tests {
 
     #[test]
     fn manifest_tier_readiness_with_checkpoint() {
-        let mut manifest = SemanticManifest::default();
-        manifest.checkpoint = Some(test_checkpoint(TierKind::Quality));
+        let manifest = SemanticManifest {
+            checkpoint: Some(test_checkpoint(TierKind::Quality)),
+            ..Default::default()
+        };
 
         let policy = test_policy();
         // Fast tier has no checkpoint → Missing
@@ -1084,8 +1094,10 @@ mod tests {
 
     #[test]
     fn manifest_tier_readiness_checkpoint_invalid_db() {
-        let mut manifest = SemanticManifest::default();
-        manifest.checkpoint = Some(test_checkpoint(TierKind::Quality));
+        let manifest = SemanticManifest {
+            checkpoint: Some(test_checkpoint(TierKind::Quality)),
+            ..Default::default()
+        };
 
         let policy = test_policy();
         // Checkpoint DB doesn't match → Missing (checkpoint invalid)
@@ -1108,8 +1120,10 @@ mod tests {
         assert!(!manifest.can_hybrid_search(&policy, db_fp, rev));
 
         // Fast tier present → can hybrid
-        let mut manifest = SemanticManifest::default();
-        manifest.fast_tier = Some(test_artifact(TierKind::Fast, true));
+        let manifest = SemanticManifest {
+            fast_tier: Some(test_artifact(TierKind::Fast, true)),
+            ..Default::default()
+        };
         assert!(manifest.can_hybrid_search(&policy, db_fp, rev));
     }
 
@@ -1176,8 +1190,10 @@ mod tests {
 
     #[test]
     fn publish_artifact_clears_matching_checkpoint() {
-        let mut manifest = SemanticManifest::default();
-        manifest.checkpoint = Some(test_checkpoint(TierKind::Quality));
+        let mut manifest = SemanticManifest {
+            checkpoint: Some(test_checkpoint(TierKind::Quality)),
+            ..Default::default()
+        };
 
         manifest.publish_artifact(test_artifact(TierKind::Quality, true));
         assert!(manifest.checkpoint.is_none());
@@ -1186,8 +1202,10 @@ mod tests {
 
     #[test]
     fn publish_artifact_keeps_non_matching_checkpoint() {
-        let mut manifest = SemanticManifest::default();
-        manifest.checkpoint = Some(test_checkpoint(TierKind::Quality));
+        let mut manifest = SemanticManifest {
+            checkpoint: Some(test_checkpoint(TierKind::Quality)),
+            ..Default::default()
+        };
 
         manifest.publish_artifact(test_artifact(TierKind::Fast, true));
         assert!(manifest.checkpoint.is_some()); // Quality checkpoint survives
@@ -1198,9 +1216,11 @@ mod tests {
 
     #[test]
     fn refresh_backlog_computes_from_ready_artifacts() {
-        let mut manifest = SemanticManifest::default();
-        manifest.fast_tier = Some(test_artifact(TierKind::Fast, true));
-        manifest.quality_tier = Some(test_artifact(TierKind::Quality, true));
+        let mut manifest = SemanticManifest {
+            fast_tier: Some(test_artifact(TierKind::Fast, true)),
+            quality_tier: Some(test_artifact(TierKind::Quality, true)),
+            ..Default::default()
+        };
 
         manifest.refresh_backlog(2000, "fp-1234");
         assert_eq!(manifest.backlog.total_conversations, 2000);
@@ -1210,8 +1230,10 @@ mod tests {
 
     #[test]
     fn refresh_backlog_ignores_stale_artifacts() {
-        let mut manifest = SemanticManifest::default();
-        manifest.fast_tier = Some(test_artifact(TierKind::Fast, true));
+        let mut manifest = SemanticManifest {
+            fast_tier: Some(test_artifact(TierKind::Fast, true)),
+            ..Default::default()
+        };
 
         // DB fingerprint doesn't match → artifact not counted
         manifest.refresh_backlog(2000, "different-fp");
@@ -1222,11 +1244,13 @@ mod tests {
 
     #[test]
     fn invalidate_incompatible_removes_schema_mismatch() {
-        let mut manifest = SemanticManifest::default();
         let mut artifact = test_artifact(TierKind::Quality, true);
         artifact.schema_version = 0; // mismatch
-        manifest.quality_tier = Some(artifact);
-        manifest.hnsw = Some(test_hnsw()); // depends on quality tier
+        let mut manifest = SemanticManifest {
+            quality_tier: Some(artifact),
+            hnsw: Some(test_hnsw()), // depends on quality tier
+            ..Default::default()
+        };
 
         let policy = test_policy();
         let count = manifest.invalidate_incompatible(&policy, "abc123");
@@ -1238,9 +1262,11 @@ mod tests {
 
     #[test]
     fn invalidate_incompatible_keeps_compatible() {
-        let mut manifest = SemanticManifest::default();
-        manifest.fast_tier = Some(test_artifact(TierKind::Fast, true));
-        manifest.quality_tier = Some(test_artifact(TierKind::Quality, true));
+        let mut manifest = SemanticManifest {
+            fast_tier: Some(test_artifact(TierKind::Fast, true)),
+            quality_tier: Some(test_artifact(TierKind::Quality, true)),
+            ..Default::default()
+        };
 
         let policy = test_policy();
         let count = manifest.invalidate_incompatible(&policy, "abc123");
@@ -1283,10 +1309,12 @@ mod tests {
 
     #[test]
     fn total_size_accounts_for_all_artifacts() {
-        let mut manifest = SemanticManifest::default();
-        manifest.fast_tier = Some(test_artifact(TierKind::Fast, true));
-        manifest.quality_tier = Some(test_artifact(TierKind::Quality, true));
-        manifest.hnsw = Some(test_hnsw());
+        let manifest = SemanticManifest {
+            fast_tier: Some(test_artifact(TierKind::Fast, true)),
+            quality_tier: Some(test_artifact(TierKind::Quality, true)),
+            hnsw: Some(test_hnsw()),
+            ..Default::default()
+        };
 
         assert_eq!(manifest.total_size_bytes(), 150_000 + 150_000 + 50_000);
         assert_eq!(manifest.total_size_mb(), 1); // 350KB rounds up to 1MB
@@ -1303,11 +1331,13 @@ mod tests {
 
     #[test]
     fn manifest_json_round_trip() {
-        let mut manifest = SemanticManifest::default();
-        manifest.fast_tier = Some(test_artifact(TierKind::Fast, true));
-        manifest.quality_tier = Some(test_artifact(TierKind::Quality, true));
-        manifest.hnsw = Some(test_hnsw());
-        manifest.checkpoint = Some(test_checkpoint(TierKind::Quality));
+        let manifest = SemanticManifest {
+            fast_tier: Some(test_artifact(TierKind::Fast, true)),
+            quality_tier: Some(test_artifact(TierKind::Quality, true)),
+            hnsw: Some(test_hnsw()),
+            checkpoint: Some(test_checkpoint(TierKind::Quality)),
+            ..Default::default()
+        };
 
         let json = serde_json::to_string_pretty(&manifest).unwrap();
         let deser: SemanticManifest = serde_json::from_str(&json).unwrap();

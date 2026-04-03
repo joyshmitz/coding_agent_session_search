@@ -275,8 +275,10 @@ impl CorruptionInjector {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let mut manifest = SemanticManifest::default();
-        manifest.manifest_version = MANIFEST_FORMAT_VERSION + 99;
+        let manifest = SemanticManifest {
+            manifest_version: MANIFEST_FORMAT_VERSION + 99,
+            ..Default::default()
+        };
         let json = serde_json::to_string(&manifest).unwrap();
         fs::write(&path, json).expect("write future manifest");
     }
@@ -287,23 +289,25 @@ impl CorruptionInjector {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let mut manifest = SemanticManifest::default();
-        manifest.quality_tier = Some(ArtifactRecord {
-            tier: TierKind::Quality,
-            embedder_id: "minilm-384".to_owned(),
-            model_revision: "abc123".to_owned(),
-            schema_version: 0, // mismatch!
-            chunking_version: CHUNKING_STRATEGY_VERSION,
-            dimension: 384,
-            doc_count: 100,
-            conversation_count: 25,
-            db_fingerprint: "fp-test".to_owned(),
-            index_path: "vector_index/index-minilm-384.fsvi".to_owned(),
-            size_bytes: 50_000,
-            started_at_ms: 1_700_000_000_000,
-            completed_at_ms: 1_700_000_060_000,
-            ready: true,
-        });
+        let manifest = SemanticManifest {
+            quality_tier: Some(ArtifactRecord {
+                tier: TierKind::Quality,
+                embedder_id: "minilm-384".to_owned(),
+                model_revision: "abc123".to_owned(),
+                schema_version: 0, // mismatch!
+                chunking_version: CHUNKING_STRATEGY_VERSION,
+                dimension: 384,
+                doc_count: 100,
+                conversation_count: 25,
+                db_fingerprint: "fp-test".to_owned(),
+                index_path: "vector_index/index-minilm-384.fsvi".to_owned(),
+                size_bytes: 50_000,
+                started_at_ms: 1_700_000_000_000,
+                completed_at_ms: 1_700_000_060_000,
+                ready: true,
+            }),
+            ..Default::default()
+        };
         let json = serde_json::to_string_pretty(&manifest).unwrap();
         fs::write(&path, json).expect("write stale schema manifest");
     }
@@ -356,19 +360,21 @@ impl CorruptionInjector {
         fs::write(&path, b"partial-data").expect("write partial index");
 
         // Write manifest with checkpoint but artifact not ready
-        let mut manifest = SemanticManifest::default();
-        manifest.checkpoint = Some(BuildCheckpoint {
-            tier: TierKind::Quality,
-            embedder_id: embedder_id.to_owned(),
-            last_offset: 50,
-            docs_embedded: 200,
-            conversations_processed: 50,
-            total_conversations: 100,
-            db_fingerprint: "fp-partial".to_owned(),
-            schema_version: SEMANTIC_SCHEMA_VERSION,
-            chunking_version: CHUNKING_STRATEGY_VERSION,
-            saved_at_ms: now_ms(),
-        });
+        let mut manifest = SemanticManifest {
+            checkpoint: Some(BuildCheckpoint {
+                tier: TierKind::Quality,
+                embedder_id: embedder_id.to_owned(),
+                last_offset: 50,
+                docs_embedded: 200,
+                conversations_processed: 50,
+                total_conversations: 100,
+                db_fingerprint: "fp-partial".to_owned(),
+                schema_version: SEMANTIC_SCHEMA_VERSION,
+                chunking_version: CHUNKING_STRATEGY_VERSION,
+                saved_at_ms: now_ms(),
+            }),
+            ..Default::default()
+        };
         manifest
             .save(&self.data_dir)
             .expect("save partial manifest");
@@ -490,6 +496,12 @@ impl TestEnvironment {
     /// Load the current manifest (if any).
     pub fn load_manifest(&self) -> Option<SemanticManifest> {
         SemanticManifest::load(&self.data_dir).ok().flatten()
+    }
+}
+
+impl Default for TestEnvironment {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -703,7 +715,7 @@ mod tests {
         assert!(env.data_dir.exists());
         assert_eq!(env.corpus.total_conversations(), 10);
         assert_eq!(env.corpus.total_messages(), 40);
-        assert!(env.log.entries().len() > 0); // setup phase logged
+        assert!(!env.log.entries().is_empty()); // setup phase logged
     }
 
     #[test]
@@ -727,23 +739,25 @@ mod tests {
 
         // Phase 1: Write a valid manifest.
         log.phase("setup", "writing initial valid manifest");
-        let mut manifest = SemanticManifest::default();
-        manifest.fast_tier = Some(ArtifactRecord {
-            tier: TierKind::Fast,
-            embedder_id: "fnv1a-384".to_owned(),
-            model_revision: "hash".to_owned(),
-            schema_version: SEMANTIC_SCHEMA_VERSION,
-            chunking_version: CHUNKING_STRATEGY_VERSION,
-            dimension: 384,
-            doc_count: 40,
-            conversation_count: 10,
-            db_fingerprint: "fp-initial".to_owned(),
-            index_path: "vector_index/index-fnv1a-384.fsvi".to_owned(),
-            size_bytes: 1000,
-            started_at_ms: 1_700_000_000_000,
-            completed_at_ms: 1_700_000_001_000,
-            ready: true,
-        });
+        let mut manifest = SemanticManifest {
+            fast_tier: Some(ArtifactRecord {
+                tier: TierKind::Fast,
+                embedder_id: "fnv1a-384".to_owned(),
+                model_revision: "hash".to_owned(),
+                schema_version: SEMANTIC_SCHEMA_VERSION,
+                chunking_version: CHUNKING_STRATEGY_VERSION,
+                dimension: 384,
+                doc_count: 40,
+                conversation_count: 10,
+                db_fingerprint: "fp-initial".to_owned(),
+                index_path: "vector_index/index-fnv1a-384.fsvi".to_owned(),
+                size_bytes: 1000,
+                started_at_ms: 1_700_000_000_000,
+                completed_at_ms: 1_700_000_001_000,
+                ready: true,
+            }),
+            ..Default::default()
+        };
         env.write_manifest(&mut manifest);
         log.snapshot_dir("after-write", &env.data_dir.join("vector_index"));
 

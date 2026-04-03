@@ -781,8 +781,8 @@ mod tests {
         });
 
         assert_eq!(state.status, "building");
-        assert_eq!(state.stale, false);
-        assert_eq!(state.fresh, false);
+        assert!(!state.stale);
+        assert!(!state.fresh);
         assert_eq!(state.pending_sessions, 6);
         assert_eq!(state.processed_conversations, Some(4));
         assert_eq!(state.total_conversations, Some(10));

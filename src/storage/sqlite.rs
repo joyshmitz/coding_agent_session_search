@@ -4262,6 +4262,8 @@ impl FrankenStorage {
     pub fn fetch_messages_for_lexical_rebuild_batch(
         &self,
         conversation_ids: &[i64],
+        max_messages: Option<usize>,
+        max_content_bytes: Option<usize>,
     ) -> Result<HashMap<i64, Vec<Message>>> {
         if conversation_ids.is_empty() {
             return Ok(HashMap::new());
@@ -4282,29 +4284,53 @@ impl FrankenStorage {
         }
         sql.push_str(") ORDER BY conversation_id ASC, idx ASC");
 
-        let rows: Vec<(i64, Message)> = self
+        let mut grouped: HashMap<i64, Vec<Message>> =
+            HashMap::with_capacity(conversation_ids.len());
+        let mut total_messages = 0usize;
+        let mut total_content_bytes = 0usize;
+        let _: Vec<()> = self
             .conn
             .query_map_collect(&sql, &params, |row| {
                 let role: String = row.get_typed(3)?;
-                Ok((
-                    row.get_typed(0)?,
-                    Message {
-                        id: Some(row.get_typed(1)?),
-                        idx: row.get_typed(2)?,
-                        role: match role.as_str() {
-                            "user" => MessageRole::User,
-                            "agent" | "assistant" => MessageRole::Agent,
-                            "tool" => MessageRole::Tool,
-                            "system" => MessageRole::System,
-                            other => MessageRole::Other(other.to_string()),
-                        },
-                        author: row.get_typed(4)?,
-                        created_at: row.get_typed(5)?,
-                        content: row.get_typed(6)?,
-                        extra_json: serde_json::Value::Null,
-                        snippets: Vec::new(),
+                let conversation_id: i64 = row.get_typed(0)?;
+                let content: String = row.get_typed(6)?;
+                total_messages = total_messages.saturating_add(1);
+                total_content_bytes = total_content_bytes.saturating_add(content.len());
+                if let Some(limit) = max_messages
+                    && total_messages > limit
+                {
+                    return Err(frankensqlite::FrankenError::Internal(format!(
+                        "lexical rebuild batch fetch exceeded message guardrail: messages={total_messages} limit={limit} conversations={}",
+                        conversation_ids.len()
+                    )));
+                }
+                if let Some(limit) = max_content_bytes
+                    && total_content_bytes > limit
+                {
+                    return Err(frankensqlite::FrankenError::Internal(format!(
+                        "lexical rebuild batch fetch exceeded content-byte guardrail: bytes={total_content_bytes} limit={limit} conversations={}",
+                        conversation_ids.len()
+                    )));
+                }
+
+                let message = Message {
+                    id: Some(row.get_typed(1)?),
+                    idx: row.get_typed(2)?,
+                    role: match role.as_str() {
+                        "user" => MessageRole::User,
+                        "agent" | "assistant" => MessageRole::Agent,
+                        "tool" => MessageRole::Tool,
+                        "system" => MessageRole::System,
+                        other => MessageRole::Other(other.to_string()),
                     },
-                ))
+                    author: row.get_typed(4)?,
+                    created_at: row.get_typed(5)?,
+                    content,
+                    extra_json: serde_json::Value::Null,
+                    snippets: Vec::new(),
+                };
+                grouped.entry(conversation_id).or_default().push(message);
+                Ok(())
             })
             .with_context(|| {
                 format!(
@@ -4312,12 +4338,6 @@ impl FrankenStorage {
                     conversation_ids.len()
                 )
             })?;
-
-        let mut grouped: HashMap<i64, Vec<Message>> =
-            HashMap::with_capacity(conversation_ids.len());
-        for (conversation_id, message) in rows {
-            grouped.entry(conversation_id).or_default().push(message);
-        }
         Ok(grouped)
     }
 
@@ -12810,7 +12830,7 @@ mod tests {
             .conversation_id;
 
         let lexical = storage
-            .fetch_messages_for_lexical_rebuild_batch(&[second_id, first_id])
+            .fetch_messages_for_lexical_rebuild_batch(&[second_id, first_id], None, None)
             .unwrap();
 
         let first_messages = lexical.get(&first_id).expect("first conversation");
@@ -12827,6 +12847,174 @@ mod tests {
         assert_eq!(second_messages.len(), 1);
         assert_eq!(second_messages[0].content, "second-a");
         assert!(second_messages[0].extra_json.is_null());
+    }
+
+    #[test]
+    fn fetch_messages_for_lexical_rebuild_batch_enforces_content_byte_guardrail() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let agent = Agent {
+            id: None,
+            slug: "codex".into(),
+            name: "Codex".into(),
+            version: Some("0.2.3".into()),
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).unwrap();
+
+        let conversation = Conversation {
+            id: None,
+            agent_slug: "codex".into(),
+            workspace: Some(PathBuf::from("/tmp/workspace")),
+            external_id: Some("lexical-batch-guard".into()),
+            title: Some("Lexical batch guard".into()),
+            source_path: PathBuf::from("/tmp/lexical-batch-guard.jsonl"),
+            started_at: Some(1_700_000_000_000),
+            ended_at: Some(1_700_000_000_100),
+            approx_tokens: Some(42),
+            metadata_json: serde_json::Value::Null,
+            messages: vec![
+                Message {
+                    id: None,
+                    idx: 0,
+                    role: MessageRole::User,
+                    author: Some("user".into()),
+                    created_at: Some(1_700_000_000_010),
+                    content: "123456".into(),
+                    extra_json: serde_json::Value::Null,
+                    snippets: Vec::new(),
+                },
+                Message {
+                    id: None,
+                    idx: 1,
+                    role: MessageRole::Agent,
+                    author: Some("assistant".into()),
+                    created_at: Some(1_700_000_000_020),
+                    content: "abcdef".into(),
+                    extra_json: serde_json::Value::Null,
+                    snippets: Vec::new(),
+                },
+            ],
+            source_id: LOCAL_SOURCE_ID.into(),
+            origin_host: None,
+        };
+
+        let conversation_id = storage
+            .insert_conversation_tree(agent_id, None, &conversation)
+            .unwrap()
+            .conversation_id;
+
+        let error = storage
+            .fetch_messages_for_lexical_rebuild_batch(&[conversation_id], Some(10), Some(8))
+            .expect_err("guardrail should reject oversized batch content");
+
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("content-byte guardrail"),
+            "expected guardrail reason in error, got {message}"
+        );
+    }
+
+    #[test]
+    fn lexical_rebuild_batch_messages_query_avoids_sorter_temp_btrees() {
+        use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
+        use std::path::PathBuf;
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("agent_search.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let agent = Agent {
+            id: None,
+            slug: "claude_code".into(),
+            name: "Claude Code".into(),
+            version: None,
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).unwrap();
+
+        for (external_id, base_ts) in [
+            ("conv-1", 1_700_000_000_000_i64),
+            ("conv-2", 1_700_000_001_000_i64),
+        ] {
+            let conversation = Conversation {
+                id: None,
+                agent_slug: "claude_code".into(),
+                workspace: Some(PathBuf::from("/tmp/workspace")),
+                external_id: Some(external_id.to_string()),
+                title: Some("Lexical rebuild".into()),
+                source_path: PathBuf::from(format!("/tmp/{external_id}.jsonl")),
+                started_at: Some(base_ts),
+                ended_at: Some(base_ts + 100),
+                approx_tokens: None,
+                metadata_json: serde_json::Value::Null,
+                messages: vec![
+                    Message {
+                        id: None,
+                        idx: 0,
+                        role: MessageRole::User,
+                        author: Some("user".into()),
+                        created_at: Some(base_ts + 10),
+                        content: format!("{external_id}-first"),
+                        extra_json: serde_json::Value::Null,
+                        snippets: Vec::new(),
+                    },
+                    Message {
+                        id: None,
+                        idx: 1,
+                        role: MessageRole::Agent,
+                        author: Some("assistant".into()),
+                        created_at: Some(base_ts + 20),
+                        content: format!("{external_id}-second"),
+                        extra_json: serde_json::Value::Null,
+                        snippets: Vec::new(),
+                    },
+                ],
+                source_id: LOCAL_SOURCE_ID.into(),
+                origin_host: None,
+            };
+            storage
+                .insert_conversation_tree(agent_id, None, &conversation)
+                .unwrap();
+        }
+
+        let conversation_ids: Vec<i64> = storage
+            .conn
+            .query_map_collect(
+                "SELECT id FROM conversations ORDER BY id",
+                fparams![],
+                |row| row.get_typed(0),
+            )
+            .unwrap();
+        assert_eq!(conversation_ids.len(), 2);
+
+        let plan_details: Vec<String> = storage
+            .conn
+            .query_map_collect(
+                "EXPLAIN QUERY PLAN \
+                 SELECT conversation_id, id, idx, role, author, created_at, content \
+                 FROM messages \
+                 WHERE conversation_id IN (?1, ?2) \
+                 ORDER BY conversation_id ASC, idx ASC",
+                fparams![conversation_ids[0], conversation_ids[1]],
+                |row| row.get_typed(3),
+            )
+            .unwrap();
+
+        assert!(
+            plan_details
+                .iter()
+                .any(|detail| detail.contains("sqlite_autoindex_messages_1")),
+            "expected batched lexical rebuild fetch to use the conversation_id/idx composite index, got {plan_details:?}"
+        );
+        assert!(
+            !plan_details
+                .iter()
+                .any(|detail| detail.contains("TEMP B-TREE")),
+            "expected batched lexical rebuild fetch to avoid sorter temp b-trees, got {plan_details:?}"
+        );
     }
 
     #[test]
