@@ -24,11 +24,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 
 use coding_agent_search::search::policy::{
-    SemanticPolicy, CHUNKING_STRATEGY_VERSION, SEMANTIC_SCHEMA_VERSION,
+    CHUNKING_STRATEGY_VERSION, SEMANTIC_SCHEMA_VERSION, SemanticPolicy,
 };
 use coding_agent_search::search::semantic_manifest::{
-    ArtifactRecord, BuildCheckpoint, SemanticManifest, TierKind, TierReadiness,
-    MANIFEST_FORMAT_VERSION,
+    ArtifactRecord, BuildCheckpoint, MANIFEST_FORMAT_VERSION, SemanticManifest, TierKind,
+    TierReadiness,
 };
 
 // ─── Structured test logging ───────────────────────────────────────────────
@@ -230,10 +230,7 @@ impl TestCorpus {
 
     /// Total message count across all conversations.
     pub fn total_messages(&self) -> usize {
-        self.conversations
-            .iter()
-            .map(|c| c.messages.len())
-            .sum()
+        self.conversations.iter().map(|c| c.messages.len()).sum()
     }
 
     /// Total conversation count.
@@ -372,7 +369,9 @@ impl CorruptionInjector {
             chunking_version: CHUNKING_STRATEGY_VERSION,
             saved_at_ms: now_ms(),
         });
-        manifest.save(&self.data_dir).expect("save partial manifest");
+        manifest
+            .save(&self.data_dir)
+            .expect("save partial manifest");
     }
 }
 
@@ -551,7 +550,11 @@ mod tests {
             ..Default::default()
         };
         let corpus = TestCorpus::generate(config);
-        let agents: Vec<_> = corpus.conversations.iter().map(|c| c.agent.as_str()).collect();
+        let agents: Vec<_> = corpus
+            .conversations
+            .iter()
+            .map(|c| c.agent.as_str())
+            .collect();
         assert_eq!(agents, vec!["a", "b", "a", "b", "a", "b"]);
     }
 
@@ -624,7 +627,8 @@ mod tests {
     #[test]
     fn injector_legacy_layout_no_manifest() {
         let env = TestEnvironment::new();
-        env.injector.write_legacy_vector_index("fnv1a-384", b"legacy-index-data");
+        env.injector
+            .write_legacy_vector_index("fnv1a-384", b"legacy-index-data");
 
         // Manifest should be absent (legacy state).
         assert!(env.load_manifest().is_none());
@@ -666,11 +670,7 @@ mod tests {
         env.ensure_vector_dir();
 
         // Write a test file.
-        fs::write(
-            env.data_dir.join("vector_index/test.fsvi"),
-            b"test content",
-        )
-        .unwrap();
+        fs::write(env.data_dir.join("vector_index/test.fsvi"), b"test content").unwrap();
 
         let mut log = HarnessLog::new();
         log.snapshot_dir("snapshot", &env.data_dir.join("vector_index"));

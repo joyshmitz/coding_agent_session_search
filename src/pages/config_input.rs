@@ -242,6 +242,7 @@ pub struct BundleConfig {
     pub include_pwa: bool,
 
     /// Include message attachments (images, PDFs, etc.).
+    /// Not yet implemented; validation rejects this flag.
     #[serde(default)]
     pub include_attachments: bool,
 
@@ -750,6 +751,24 @@ mod tests {
         let validation = config.validate();
 
         assert!(!validation.valid);
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|err| err.contains("include_attachments is not implemented"))
+        );
+    }
+
+    #[test]
+    fn test_include_attachments_still_deserializes_before_validation_rejects_it() {
+        let json = r#"{
+            "bundle": {"include_attachments": true},
+            "encryption": {"password": "test-password-123"}
+        }"#;
+        let config: PagesConfig = serde_json::from_str(json).unwrap();
+        assert!(config.bundle.include_attachments);
+
+        let validation = config.validate();
         assert!(
             validation
                 .errors

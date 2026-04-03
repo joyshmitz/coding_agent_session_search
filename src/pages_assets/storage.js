@@ -609,8 +609,11 @@ async function migrateStorage(fromMode, toMode) {
             break;
 
         case StorageMode.OPFS:
-            // OPFS migration is more complex, skip for now
-            console.log('[Storage] OPFS migration not implemented');
+            // OPFS data lives behind async file handles; migrating it into the
+            // synchronous/local branches would require an async UX path with
+            // explicit progress/error handling. Until that exists, leave the
+            // data in OPFS and warn instead of silently pretending migration ran.
+            console.warn('[Storage] OPFS→other migration not yet supported; data remains in OPFS');
             return;
     }
 

@@ -50,6 +50,9 @@ pub mod worker;
 
 use std::path::{Path, PathBuf};
 
+// Used by daemon client/server paths in some target combinations, but not all
+// library-only builds that we verify during placeholder cleanup.
+#[allow(dead_code)]
 pub(crate) fn daemon_run_lock_path(socket_path: &Path) -> PathBuf {
     socket_path.with_extension("spawnlock")
 }

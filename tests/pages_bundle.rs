@@ -1216,6 +1216,20 @@ mod tests {
             "settings rollback paths should rerender the canonical UI after canceled or failed optimistic control changes"
         );
 
+        let storage_js = include_str!("../src/pages_assets/storage.js");
+        assert!(
+            storage_js.contains(
+                "console.warn('[Storage] OPFS→other migration not yet supported; data remains in OPFS');"
+            ),
+            "storage migration should warn truthfully when OPFS->other migration is intentionally unsupported"
+        );
+        assert!(
+            storage_js.contains(
+                "would require an async UX path with\n            // explicit progress/error handling"
+            ),
+            "storage migration warning should explain why OPFS->other migration is deferred"
+        );
+
         let viewer_js = include_str!("../src/pages_assets/viewer.js");
         assert!(
             viewer_js.contains("await initSettings(elements.settingsView, {"),

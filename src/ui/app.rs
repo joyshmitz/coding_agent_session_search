@@ -681,11 +681,6 @@ impl AnalyticsView {
     fn nav_order(self) -> i16 {
         Self::all().iter().position(|v| *v == self).unwrap_or(0) as i16
     }
-
-    /// Canonicalize legacy views that should no longer be shown in normal UX.
-    fn canonical(self) -> Self {
-        self
-    }
 }
 
 /// Metric to display in the Explorer view.
@@ -19459,7 +19454,6 @@ impl super::ftui_adapter::Model for CassApp {
                 ftui::Cmd::none()
             }
             CassMsg::AnalyticsViewChanged(view) => {
-                let view = view.canonical();
                 let previous_view = self.analytics_view;
                 let transition_cmd = if previous_view != view {
                     self.analytics_view = view;
@@ -32899,6 +32893,28 @@ not jsonl",
             transition.from_snapshot.is_some(),
             "analytics subview transition should capture previous subview snapshot"
         );
+    }
+
+    #[test]
+    fn analytics_view_changed_applies_all_variants_directly() {
+        let views = [
+            AnalyticsView::Dashboard,
+            AnalyticsView::Explorer,
+            AnalyticsView::Heatmap,
+            AnalyticsView::Breakdowns,
+            AnalyticsView::Tools,
+            AnalyticsView::Plans,
+            AnalyticsView::Coverage,
+        ];
+
+        for target in views {
+            let mut app = CassApp::default();
+            let _ = app.update(CassMsg::AnalyticsViewChanged(target));
+            assert_eq!(
+                app.analytics_view, target,
+                "{target:?} should be applied directly without canonicalization"
+            );
+        }
     }
 
     #[test]

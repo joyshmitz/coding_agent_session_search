@@ -974,7 +974,7 @@ pub struct SearchHit {
     #[serde(default = "default_source_id")]
     pub source_id: String,
     /// Origin kind ("local" or "ssh")
-    #[serde(default = "default_origin_kind")]
+    #[serde(default = "default_source_id")]
     pub origin_kind: String,
     /// Origin host label for remote sources
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -989,10 +989,6 @@ static LAZY_FIELDS_ENABLED: Lazy<bool> = Lazy::new(|| {
 });
 
 fn default_source_id() -> String {
-    "local".to_string()
-}
-
-fn default_origin_kind() -> String {
     "local".to_string()
 }
 
@@ -2005,8 +2001,6 @@ pub struct SearchClient {
     reload_epoch: Arc<AtomicU64>,
     warm_tx: Option<mpsc::Sender<WarmJob>>,
     _warm_handle: Option<std::thread::JoinHandle<()>>,
-    // Shared for warm worker to read cache/filter logic; keep Arc to avoid clones of big data
-    _shared_filters: Arc<Mutex<()>>, // placeholder lock to ensure Send/Sync; future warm prefill state
     metrics: Metrics,
     cache_namespace: String,
     semantic: Mutex<Option<SemanticSearchState>>,
@@ -2542,7 +2536,6 @@ impl SearchClient {
             return Ok(None);
         }
 
-        let shared_filters = Arc::new(Mutex::new(()));
         let reload_epoch = Arc::new(AtomicU64::new(0));
         let metrics = Metrics::default();
         let cache_namespace = format!("v{}|schema:{}", CACHE_KEY_VERSION, FS_CASS_SCHEMA_HASH);
@@ -2553,7 +2546,6 @@ impl SearchClient {
             maybe_spawn_warm_worker(
                 reader.clone(),
                 *fields,
-                Arc::downgrade(&shared_filters),
                 reload_epoch.clone(),
                 metrics.clone(),
             )
@@ -2572,7 +2564,6 @@ impl SearchClient {
             reload_epoch,
             warm_tx: warm_pair.as_ref().map(|(tx, _)| tx.clone()),
             _warm_handle: warm_pair.map(|(_, h)| h),
-            _shared_filters: shared_filters,
             metrics,
             cache_namespace,
             semantic: Mutex::new(None),
@@ -2794,6 +2785,10 @@ impl SearchClient {
                 offset = 0,
                 "search_start"
             );
+            // NOTE: This path is intentionally disabled and currently returns an empty hit set.
+            // Keep the call to exercise FTS5 transpilation and preserve one obvious hook for a
+            // future frankensqlite-native FTS implementation without misrepresenting current
+            // behavior to maintainers.
             let hits = self.search_sqlite_fts5(
                 db_path,
                 query,
@@ -4921,7 +4916,6 @@ impl Metrics {
 fn maybe_spawn_warm_worker(
     reader: IndexReader,
     fields: FsCassFields,
-    filters_guard: std::sync::Weak<Mutex<()>>,
     reload_epoch: Arc<AtomicU64>,
     metrics: Metrics,
 ) -> Option<(mpsc::Sender<WarmJob>, std::thread::JoinHandle<()>)> {
@@ -4937,9 +4931,6 @@ fn maybe_spawn_warm_worker(
                     continue;
                 }
                 last_run = now;
-                if filters_guard.upgrade().is_none() {
-                    break;
-                }
                 let reload_started = Instant::now();
                 if let Err(err) = reader.reload() {
                     tracing::warn!(error = ?err, "warm_worker_reload_failed");
@@ -5523,6 +5514,12 @@ mod tests {
         query: String,
     }
 
+    #[test]
+    fn search_client_is_send_sync_without_phantom_filters() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<SearchClient>();
+    }
+
     fn build_semantic_test_fixture() -> Result<SemanticTestFixture> {
         let dir = TempDir::new()?;
         let db_path = dir.path().join("cass.db");
@@ -5858,7 +5855,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{}|schema:{}", CACHE_KEY_VERSION, FS_CASS_SCHEMA_HASH),
             semantic: Mutex::new(None),
@@ -6530,7 +6526,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -6581,7 +6576,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -6702,7 +6696,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -7209,7 +7202,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -7289,7 +7281,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -7376,7 +7367,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -7454,7 +7444,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -7582,7 +7571,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -7728,7 +7716,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -7810,7 +7797,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -7909,7 +7895,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -8030,7 +8015,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -8099,7 +8083,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -8192,7 +8175,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -8273,7 +8255,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -8346,7 +8327,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -8434,7 +8414,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -8551,7 +8530,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -8636,7 +8614,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -8728,7 +8705,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -8810,7 +8786,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -8892,7 +8867,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -8989,7 +8963,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -9115,7 +9088,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -9174,7 +9146,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -9229,7 +9200,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -9264,7 +9234,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -9330,7 +9299,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -10300,7 +10268,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: "vtest|schema:none".into(),
             semantic: Mutex::new(None),
@@ -10393,7 +10360,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: "vtest|schema:none".into(),
             semantic: Mutex::new(None),
@@ -10438,7 +10404,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: "vtest|schema:none".into(),
             semantic: Mutex::new(None),
@@ -11219,7 +11184,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -11400,6 +11364,41 @@ mod tests {
         assert_eq!(
             transpile_to_fts5("foo NOT bar-baz"),
             Some("foo NOT \"bar-baz\"".to_string())
+        );
+    }
+
+    #[test]
+    fn search_sqlite_fts5_returns_empty_by_design() {
+        let client = SearchClient {
+            reader: None,
+            sqlite: Mutex::new(None),
+            sqlite_path: None,
+            prefix_cache: Mutex::new(CacheShards::new(*CACHE_TOTAL_CAP, *CACHE_BYTE_CAP)),
+            reload_on_search: false,
+            last_reload: Mutex::new(None),
+            last_generation: Mutex::new(None),
+            reload_epoch: Arc::new(AtomicU64::new(0)),
+            warm_tx: None,
+            _warm_handle: None,
+            metrics: Metrics::default(),
+            cache_namespace: "fts5-disabled".to_string(),
+            semantic: Mutex::new(None),
+            last_tantivy_total_count: Mutex::new(None),
+        };
+
+        let hits = client.search_sqlite_fts5(
+            Path::new("/nonexistent"),
+            "test query",
+            SearchFilters::default(),
+            10,
+            0,
+            FieldMask::FULL,
+        );
+
+        assert!(hits.is_ok(), "disabled FTS5 path should stay non-fatal");
+        assert!(
+            hits.unwrap().is_empty(),
+            "disabled FTS5 path should keep returning an empty result set"
         );
     }
 
@@ -12069,7 +12068,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),
@@ -12108,7 +12106,6 @@ mod tests {
             reload_epoch: Arc::new(AtomicU64::new(0)),
             warm_tx: None,
             _warm_handle: None,
-            _shared_filters: Arc::new(Mutex::new(())),
             metrics: Metrics::default(),
             cache_namespace: format!("v{CACHE_KEY_VERSION}|schema:test"),
             semantic: Mutex::new(None),

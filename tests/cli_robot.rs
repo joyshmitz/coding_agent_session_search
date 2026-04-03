@@ -730,6 +730,21 @@ fn search_no_match_returns_empty_hits() {
 }
 
 #[test]
+fn include_attachments_flag_hidden_from_pages_help() {
+    let cmd = Cli::command();
+    let pages_cmd = cmd
+        .find_subcommand("pages")
+        .expect("pages subcommand must exist");
+    let mut help_buf = Vec::new();
+    pages_cmd.clone().write_help(&mut help_buf).unwrap();
+    let help_text = String::from_utf8(help_buf).unwrap();
+    assert!(
+        !help_text.contains("include-attachments"),
+        "--include-attachments should stay hidden from pages help until implemented.\n{help_text}"
+    );
+}
+
+#[test]
 fn search_writes_trace_on_success() {
     // E2E test: trace file captures successful search (yln.5)
     let tmp = TempDir::new().unwrap();

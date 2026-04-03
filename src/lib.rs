@@ -735,8 +735,9 @@ pub enum Commands {
         #[arg(long)]
         i_understand_unencrypted_risks: bool,
 
-        /// Include message attachments (images, PDFs, code snapshots)
-        #[arg(long)]
+        /// Include message attachments (images, PDFs, code snapshots).
+        /// Not yet implemented; config validation rejects this flag.
+        #[arg(long, hide = true)]
         include_attachments: bool,
 
         /// Preview an existing export locally (starts HTTP server)
@@ -21808,5 +21809,60 @@ mod subcommand_robot_output_tests {
             resolve_subcommand_structured_format(&cli, json),
             Some(RobotFormat::Jsonl)
         );
+    }
+}
+
+#[cfg(test)]
+mod pages_cli_flag_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn include_attachments_flag_hidden_from_pages_help() {
+        // --include-attachments is not yet implemented (config validation rejects it).
+        // The flag is hidden from --help so users don't discover a non-functional feature.
+        // It must still parse when explicitly passed for forward-compatible config files.
+        let cmd = Cli::command();
+        let pages_cmd = cmd
+            .find_subcommand("pages")
+            .expect("pages subcommand must exist");
+        let mut help_buf = Vec::new();
+        pages_cmd.clone().write_help(&mut help_buf).unwrap();
+        let help_text = String::from_utf8(help_buf).unwrap();
+        assert!(
+            !help_text.contains("include-attachments"),
+            "--include-attachments should be hidden from pages help until implemented.\nHelp text:\n{}",
+            help_text,
+        );
+    }
+
+    #[test]
+    fn include_attachments_still_accepted_when_explicitly_passed() {
+        // Even though hidden, the CLI must still accept the flag without a parse error.
+        // Config validation (not CLI parsing) is responsible for rejecting it.
+        let cli = Cli::try_parse_from([
+            "cass",
+            "pages",
+            "--include-attachments",
+            "--export-only",
+            "/tmp/test",
+            "--dry-run",
+        ]);
+        assert!(
+            cli.is_ok(),
+            "--include-attachments must parse even when hidden: {:?}",
+            cli.err()
+        );
+        if let Ok(ref parsed) = cli {
+            if let Some(Commands::Pages {
+                include_attachments,
+                ..
+            }) = &parsed.command
+            {
+                assert!(include_attachments, "flag should be true when passed");
+            } else {
+                panic!("expected Pages command");
+            }
+        }
     }
 }
