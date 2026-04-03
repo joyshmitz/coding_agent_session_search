@@ -1,4 +1,8 @@
-//! TUI entrypoint and layout.
+//! FTUI application surface and supporting UI modules.
+//!
+//! [`app`] is the canonical runtime entrypoint. [`tui`] is a retained
+//! comment-only legacy shell kept in-tree by policy until file deletion is
+//! explicitly authorized.
 pub mod analytics_charts;
 pub mod app;
 pub mod components;
@@ -9,6 +13,20 @@ pub mod style_system;
 pub mod theme;
 pub mod time_parser;
 pub mod tui;
+
+#[cfg(test)]
+mod legacy_shell_tests {
+    use super::app::CassApp;
+    use super::ftui_adapter::Rect;
+    use super::theme::CassTheme;
+
+    #[test]
+    fn canonical_ui_runtime_types_live_outside_legacy_tui_shell() {
+        let _ = std::mem::size_of::<CassApp>();
+        let _ = std::mem::size_of::<CassTheme>();
+        let _ = std::mem::size_of::<Rect>();
+    }
+}
 
 /// Structured test logging for unit/E2E scenario diagnostics (2dccg.11.6).
 ///

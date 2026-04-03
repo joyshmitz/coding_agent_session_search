@@ -218,13 +218,6 @@ pub fn skip_version(version: &str) -> Result<()> {
     state.save()
 }
 
-/// Dismiss update banner for this session (doesn't persist skip)
-/// Returns true if there was an update to dismiss
-pub fn dismiss_update() -> bool {
-    // This is handled in-memory by the TUI, not persisted
-    true
-}
-
 /// Open a URL in the system's default browser
 pub fn open_in_browser(url: &str) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
@@ -529,6 +522,20 @@ mod tests {
 
         state.clear_skip();
         assert!(!state.is_skipped("1.0.0"));
+    }
+
+    #[test]
+    #[serial]
+    fn update_check_state_remains_functional_without_session_dismiss_stub() {
+        let state = UpdateState::default();
+        assert!(
+            state.should_check(),
+            "fresh state should still trigger checks"
+        );
+        assert!(
+            !state.is_skipped("9.9.9"),
+            "default state should not invent skipped versions"
+        );
     }
 
     #[test]

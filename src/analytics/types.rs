@@ -340,7 +340,7 @@ pub struct TimeseriesResult {
     pub buckets: Vec<(String, UsageBucket)>,
     /// Grand totals across all buckets.
     pub totals: UsageBucket,
-    /// Which rollup table was queried.
+    /// Which rollup or raw table backed the query.
     pub source_table: String,
     /// Granularity that was used.
     pub group_by: GroupBy,

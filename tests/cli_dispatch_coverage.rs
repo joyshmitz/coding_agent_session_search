@@ -456,6 +456,58 @@ fn seed_analytics_remote_source_tokens_fixture(temp_home: &TempDir) {
     .unwrap();
 }
 
+fn seed_analytics_remote_source_tools_fixture(temp_home: &TempDir) {
+    let (_workspace_a, workspace_b) = seed_analytics_workspace_fixture(temp_home);
+    let db_path = temp_home
+        .path()
+        .join(".local/share/coding-agent-search/agent_search.db");
+    let conn = FrankenConnection::open(db_path.to_string_lossy().to_string()).unwrap();
+    conn.execute("ALTER TABLE conversations ADD COLUMN origin_host TEXT")
+        .unwrap();
+
+    let workspace_rows = conn
+        .query_map_collect(
+            "SELECT path, id FROM workspaces",
+            &[],
+            |row: &frankensqlite::Row| Ok((row.get_typed::<String>(0)?, row.get_typed::<i64>(1)?)),
+        )
+        .unwrap();
+    let workspace_b_id = workspace_rows
+        .into_iter()
+        .find(|(path, _)| path == &workspace_b.to_string_lossy())
+        .map(|(_, id)| id)
+        .expect("workspace-b id");
+
+    conn.execute(&format!(
+        "UPDATE conversations SET source_id = '   ', origin_host = 'remote-ci' WHERE workspace_id = {workspace_b_id}"
+    ))
+    .unwrap();
+    conn.execute(&format!(
+        "UPDATE message_metrics
+         SET source_id = '   ', tool_call_count = 7, content_tokens_est = 90,
+             api_input_tokens = 30, api_output_tokens = 70,
+             api_cache_read_tokens = 0, api_cache_creation_tokens = 0, api_thinking_tokens = 0
+         WHERE workspace_id = {workspace_b_id}"
+    ))
+    .unwrap();
+    conn.execute(&format!(
+        "UPDATE usage_hourly
+         SET source_id = '   ', tool_call_count = 7, message_count = 1,
+             api_tokens_total = 100, content_tokens_est_total = 90,
+             content_tokens_est_assistant = 90, assistant_message_count = 1
+         WHERE workspace_id = {workspace_b_id}"
+    ))
+    .unwrap();
+    conn.execute(&format!(
+        "UPDATE usage_daily
+         SET source_id = '   ', tool_call_count = 7, message_count = 1,
+             api_tokens_total = 100, content_tokens_est_total = 90,
+             content_tokens_est_assistant = 90, assistant_message_count = 1
+         WHERE workspace_id = {workspace_b_id}"
+    ))
+    .unwrap();
+}
+
 // =============================================================================
 // Completions command tests
 // =============================================================================
@@ -2583,6 +2635,36 @@ fn analytics_tokens_source_filter_matches_blank_remote_usage_rollups_via_origin_
     assert_eq!(json["data"]["bucket_count"], 1);
     assert_eq!(json["data"]["totals"]["counts"]["message_count"], 1);
     assert_eq!(json["data"]["totals"]["counts"]["user_message_count"], 1);
+
+    let filters: Vec<String> = json["_meta"]["filters_applied"]
+        .as_array()
+        .expect("filters_applied array")
+        .iter()
+        .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+        .collect();
+    assert!(filters.iter().any(|value| value == "source=remote-ci"));
+}
+
+#[test]
+fn analytics_tools_source_filter_matches_blank_remote_usage_rollups_via_origin_host() {
+    let tmp = TempDir::new().unwrap();
+    seed_analytics_remote_source_tools_fixture(&tmp);
+
+    let mut cmd = base_cmd(tmp.path());
+    cmd.args(["analytics", "tools", "--source", "remote-ci", "--json"]);
+    let output = cmd.assert().success().get_output().clone();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("invalid JSON: {e}\nstdout={stdout}"));
+
+    assert_eq!(json["data"]["_meta"]["source_table"], "message_metrics");
+    assert_eq!(json["data"]["row_count"], 1);
+    assert_eq!(json["data"]["rows"][0]["key"], "codex");
+    assert_eq!(json["data"]["rows"][0]["tool_call_count"], 7);
+    assert_eq!(json["data"]["totals"]["tool_call_count"], 7);
+    assert_eq!(json["data"]["totals"]["message_count"], 1);
+    assert_eq!(json["data"]["totals"]["api_tokens_total"], 100);
 
     let filters: Vec<String> = json["_meta"]["filters_applied"]
         .as_array()

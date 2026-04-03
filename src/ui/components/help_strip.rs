@@ -1,4 +1,5 @@
-//! Contextual help strip types.
+//! Retained legacy help-strip shell module.
 //!
-//! Legacy ratatui rendering has been removed.
-//! The ftui equivalent lives in `src/ui/app.rs`.
+//! The active FTUI help and hint surfaces live in [`crate::ui::app`] and the
+//! upstream `ftui` widgets it composes. This file is intentionally comment-only
+//! while file deletion remains gated by project policy.

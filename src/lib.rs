@@ -5956,6 +5956,7 @@ fn render_analytics_docs() -> Vec<String> {
         "  data.totals: { tool_call_count, message_count, api_tokens_total,".into(),
         "                 overall_per_1k_api_tokens }".into(),
         "  data.row_count: int".into(),
+        "  data._meta.source_table: (\'usage_daily\' | \'usage_hourly\' | \'message_metrics\')".into(),
         "  --limit N (default 20): caps returned rows".into(),
         String::new(),
         "### analytics models".into(),

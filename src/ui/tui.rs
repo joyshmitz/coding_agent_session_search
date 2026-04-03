@@ -1,4 +1,5 @@
-//! Legacy ratatui-based TUI.
+//! Retained legacy UI shell module.
 //!
-//! All rendering has been migrated to the ftui framework in `app.rs`.
-//! This module is retained as a stub to avoid breaking `mod.rs` declarations.
+//! The production FTUI application lives in [`crate::ui::app`]. This file is
+//! intentionally comment-only and remains in-tree only because file deletion is
+//! gated by project policy. It is not a pending implementation surface.

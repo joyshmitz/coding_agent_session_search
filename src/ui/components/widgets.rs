@@ -1,4 +1,5 @@
-//! Premium UI widgets.
+//! Retained legacy widget shell module.
 //!
-//! Legacy ratatui rendering functions have been removed.
-//! The ftui equivalents live directly in `src/ui/app.rs`.
+//! The active FTUI-era widget behavior lives in [`crate::ui::app`] and the
+//! neighboring component modules. This file is intentionally comment-only while
+//! file deletion remains gated by project policy.

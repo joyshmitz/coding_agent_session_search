@@ -79,6 +79,22 @@ fn normalized_analytics_source_id_value(source_id: &str) -> String {
     }
 }
 
+fn normalized_analytics_source_identity_value(source_id: &str, origin_host: &str) -> String {
+    let trimmed_source_id = source_id.trim();
+    if trimmed_source_id.is_empty() {
+        let trimmed_origin_host = origin_host.trim();
+        if trimmed_origin_host.is_empty() {
+            crate::sources::provenance::LOCAL_SOURCE_ID.to_string()
+        } else {
+            trimmed_origin_host.to_string()
+        }
+    } else if trimmed_source_id.eq_ignore_ascii_case(crate::sources::provenance::LOCAL_SOURCE_ID) {
+        crate::sources::provenance::LOCAL_SOURCE_ID.to_string()
+    } else {
+        trimmed_source_id.to_string()
+    }
+}
+
 fn normalized_analytics_source_id_sql_expr(column: &str) -> String {
     format!(
         "CASE WHEN TRIM(COALESCE({column}, '')) = '' THEN '{local}'          WHEN LOWER(TRIM(COALESCE({column}, ''))) = '{local}' THEN '{local}'          ELSE TRIM(COALESCE({column}, '')) END",
@@ -605,6 +621,14 @@ fn track_a_timeseries_requires_source_fallback(filter: &AnalyticsFilter) -> bool
         }
         SourceFilter::All | SourceFilter::Local => false,
     }
+}
+
+fn track_a_tools_supports_raw_source_fallback(conn: &Connection) -> bool {
+    table_exists(conn, "messages")
+        && table_exists(conn, "conversations")
+        && table_exists(conn, "message_metrics")
+        && table_has_column(conn, "message_metrics", "message_id")
+        && table_has_column(conn, "message_metrics", "tool_call_count")
 }
 
 fn query_token_daily_stats_status(conn: &Connection, filter: &AnalyticsFilter) -> RollupStats {
@@ -1279,23 +1303,7 @@ fn query_track_a_timeseries_from_raw(
                     String::new(),
                 )
             });
-        let normalized_key = {
-            let trimmed_source_id = source_id.trim();
-            if trimmed_source_id.is_empty() {
-                let trimmed_origin_host = origin_host.trim();
-                if trimmed_origin_host.is_empty() {
-                    crate::sources::provenance::LOCAL_SOURCE_ID.to_string()
-                } else {
-                    trimmed_origin_host.to_string()
-                }
-            } else if trimmed_source_id
-                .eq_ignore_ascii_case(crate::sources::provenance::LOCAL_SOURCE_ID)
-            {
-                crate::sources::provenance::LOCAL_SOURCE_ID.to_string()
-            } else {
-                trimmed_source_id.to_string()
-            }
-        };
+        let normalized_key = normalized_analytics_source_identity_value(&source_id, &origin_host);
         if !analytics_source_filter_matches_key(&filter.source, &normalized_key) {
             continue;
         }
@@ -2038,23 +2046,7 @@ fn query_track_a_source_breakdown_from_raw(
                     String::new(),
                 )
             });
-        let normalized_key = {
-            let trimmed_source_id = source_id.trim();
-            if trimmed_source_id.is_empty() {
-                let trimmed_origin_host = origin_host.trim();
-                if trimmed_origin_host.is_empty() {
-                    crate::sources::provenance::LOCAL_SOURCE_ID.to_string()
-                } else {
-                    trimmed_origin_host.to_string()
-                }
-            } else if trimmed_source_id
-                .eq_ignore_ascii_case(crate::sources::provenance::LOCAL_SOURCE_ID)
-            {
-                crate::sources::provenance::LOCAL_SOURCE_ID.to_string()
-            } else {
-                trimmed_source_id.to_string()
-            }
-        };
+        let normalized_key = normalized_analytics_source_identity_value(&source_id, &origin_host);
         if !analytics_source_filter_matches_key(&filter.source, &normalized_key) {
             continue;
         }
@@ -2485,6 +2477,200 @@ fn read_breakdown_rows_track_b(
 ///
 /// Uses `usage_daily` (Track A) which has reliable `tool_call_count`.
 /// Returns rows ordered by tool_call_count descending, capped at `limit`.
+fn query_tools_from_raw(
+    conn: &Connection,
+    filter: &AnalyticsFilter,
+    query_start: std::time::Instant,
+    limit: usize,
+) -> AnalyticsResult<ToolReport> {
+    let has_agents = table_exists(conn, "agents");
+    let has_origin_host = table_has_column(conn, "conversations", "origin_host");
+    let has_message_metrics_created_at = table_has_column(conn, "message_metrics", "created_at_ms");
+    let has_content_tokens_est = table_has_column(conn, "message_metrics", "content_tokens_est");
+    let has_api_input_tokens = table_has_column(conn, "message_metrics", "api_input_tokens");
+    let has_api_output_tokens = table_has_column(conn, "message_metrics", "api_output_tokens");
+    let has_api_cache_read_tokens =
+        table_has_column(conn, "message_metrics", "api_cache_read_tokens");
+    let has_api_cache_creation_tokens =
+        table_has_column(conn, "message_metrics", "api_cache_creation_tokens");
+    let has_api_thinking_tokens = table_has_column(conn, "message_metrics", "api_thinking_tokens");
+
+    let conversation_sql = if has_origin_host {
+        "SELECT id, TRIM(COALESCE(source_id, '')), TRIM(COALESCE(origin_host, '')) FROM conversations"
+    } else {
+        "SELECT id, TRIM(COALESCE(source_id, '')), '' FROM conversations"
+    };
+    let conversation_sources: BTreeMap<i64, (String, String)> = conn
+        .query_map_collect(conversation_sql, &[], |row: &Row| {
+            Ok((
+                row.get_typed::<i64>(0)?,
+                (row.get_typed::<String>(1)?, row.get_typed::<String>(2)?),
+            ))
+        })
+        .map_err(|e| AnalyticsError::Db(format!("Tool report query failed: {e}")))?
+        .into_iter()
+        .collect();
+
+    let mut from_sql = String::from("messages m JOIN conversations c ON c.id = m.conversation_id");
+    if has_agents {
+        from_sql.push_str(" LEFT JOIN agents a ON a.id = c.agent_id");
+    }
+    from_sql.push_str(" LEFT JOIN message_metrics mm ON mm.message_id = m.id");
+
+    let filter_for_sql = AnalyticsFilter {
+        source: SourceFilter::All,
+        ..filter.clone()
+    };
+    let message_time_sql = if has_message_metrics_created_at {
+        "COALESCE(m.created_at, mm.created_at_ms, 0)"
+    } else {
+        "COALESCE(m.created_at, 0)"
+    };
+    let (where_sql, params) = build_filtered_where_sql(
+        &filter_for_sql,
+        Some("c.workspace_id"),
+        has_agents.then(|| normalized_analytics_agent_sql_expr("a.slug")),
+        sql_string_literal("all"),
+        Some(AnalyticsTimeColumn::TimestampMs(message_time_sql)),
+    );
+
+    let agent_sql = if has_agents {
+        normalized_analytics_agent_sql_expr("a.slug")
+    } else {
+        "'unknown'".to_string()
+    };
+    let tool_call_expr = "COALESCE(mm.tool_call_count, 0)";
+    let content_tokens_expr = if has_content_tokens_est {
+        "COALESCE(mm.content_tokens_est, 0)"
+    } else {
+        "0"
+    };
+    let api_input_expr = if has_api_input_tokens {
+        "COALESCE(mm.api_input_tokens, 0)"
+    } else {
+        "0"
+    };
+    let api_output_expr = if has_api_output_tokens {
+        "COALESCE(mm.api_output_tokens, 0)"
+    } else {
+        "0"
+    };
+    let api_cache_read_expr = if has_api_cache_read_tokens {
+        "COALESCE(mm.api_cache_read_tokens, 0)"
+    } else {
+        "0"
+    };
+    let api_cache_creation_expr = if has_api_cache_creation_tokens {
+        "COALESCE(mm.api_cache_creation_tokens, 0)"
+    } else {
+        "0"
+    };
+    let api_thinking_expr = if has_api_thinking_tokens {
+        "COALESCE(mm.api_thinking_tokens, 0)"
+    } else {
+        "0"
+    };
+    let api_tokens_expr = format!(
+        "({api_input_expr} + {api_output_expr} + {api_cache_read_expr} + {api_cache_creation_expr} + {api_thinking_expr})"
+    );
+
+    let sql = format!(
+        "SELECT m.conversation_id,
+                {agent_sql},
+                {tool_call_expr},
+                {content_tokens_expr},
+                {api_tokens_expr}
+         FROM {from_sql}{where_sql}"
+    );
+
+    let raw_rows: Vec<(i64, String, i64, i64, i64)> = conn
+        .query_map_collect(&sql, &params, |row: &Row| {
+            Ok((
+                row.get_typed::<i64>(0)?,
+                row.get_typed::<String>(1)?,
+                row.get_typed::<i64>(2)?,
+                row.get_typed::<i64>(3)?,
+                row.get_typed::<i64>(4)?,
+            ))
+        })
+        .map_err(|e| AnalyticsError::Db(format!("Tool report query failed: {e}")))?;
+
+    let mut grouped_rows: BTreeMap<String, (i64, i64, i64, i64)> = BTreeMap::new();
+    for (conversation_id, key, tool_call_count, content_tokens_est_total, api_tokens_total) in
+        raw_rows
+    {
+        let (source_id, origin_host) = conversation_sources
+            .get(&conversation_id)
+            .cloned()
+            .unwrap_or_else(|| {
+                (
+                    crate::sources::provenance::LOCAL_SOURCE_ID.to_string(),
+                    String::new(),
+                )
+            });
+        let normalized_source_key =
+            normalized_analytics_source_identity_value(&source_id, &origin_host);
+        if !analytics_source_filter_matches_key(&filter.source, &normalized_source_key) {
+            continue;
+        }
+
+        let entry = grouped_rows.entry(key).or_default();
+        entry.0 += tool_call_count;
+        entry.1 += 1;
+        entry.2 += api_tokens_total;
+        entry.3 += content_tokens_est_total;
+    }
+
+    let mut rows: Vec<ToolRow> = grouped_rows
+        .into_iter()
+        .map(
+            |(
+                key,
+                (tool_call_count, message_count, api_tokens_total, content_tokens_est_total),
+            )| {
+                let tool_calls_per_1k_api_tokens = if api_tokens_total > 0 {
+                    Some(tool_call_count as f64 / (api_tokens_total as f64 / 1000.0))
+                } else {
+                    None
+                };
+                let tool_calls_per_1k_content_tokens = if content_tokens_est_total > 0 {
+                    Some(tool_call_count as f64 / (content_tokens_est_total as f64 / 1000.0))
+                } else {
+                    None
+                };
+                ToolRow {
+                    key,
+                    tool_call_count,
+                    message_count,
+                    api_tokens_total,
+                    tool_calls_per_1k_api_tokens,
+                    tool_calls_per_1k_content_tokens,
+                }
+            },
+        )
+        .collect();
+
+    rows.sort_by(|a, b| {
+        b.tool_call_count
+            .cmp(&a.tool_call_count)
+            .then_with(|| a.key.cmp(&b.key))
+    });
+    rows.truncate(limit);
+
+    let total_tool_calls = rows.iter().map(|row| row.tool_call_count).sum();
+    let total_messages = rows.iter().map(|row| row.message_count).sum();
+    let total_api_tokens = rows.iter().map(|row| row.api_tokens_total).sum();
+
+    Ok(ToolReport {
+        rows,
+        total_tool_calls,
+        total_messages,
+        total_api_tokens,
+        source_table: "message_metrics".into(),
+        elapsed_ms: query_start.elapsed().as_millis() as u64,
+    })
+}
+
 pub fn query_tools(
     conn: &Connection,
     filter: &AnalyticsFilter,
@@ -2492,6 +2678,12 @@ pub fn query_tools(
     limit: usize,
 ) -> AnalyticsResult<ToolReport> {
     let query_start = std::time::Instant::now();
+
+    if track_a_timeseries_requires_source_fallback(filter)
+        && track_a_tools_supports_raw_source_fallback(conn)
+    {
+        return query_tools_from_raw(conn, filter, query_start, limit);
+    }
 
     let (table, bucket_col) = match group_by {
         GroupBy::Hour => ("usage_hourly", "hour_id"),
@@ -3220,6 +3412,7 @@ mod tests {
             frankensqlite::params![1000_i64, 1_i64],
         )
         .unwrap();
+
         conn.execute_compat(
             "INSERT INTO usage_hourly (
                 hour_id, agent_slug, workspace_id, source_id,
@@ -3242,6 +3435,135 @@ mod tests {
             frankensqlite::params![1001_i64, 2_i64],
         )
         .unwrap();
+        conn
+    }
+
+    fn setup_tools_remote_source_fallback_db() -> Connection {
+        let conn = Connection::open(":memory:").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE agents (
+                id INTEGER PRIMARY KEY,
+                slug TEXT NOT NULL
+            );
+             CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY,
+                agent_id INTEGER NOT NULL,
+                workspace_id INTEGER,
+                source_id TEXT NOT NULL,
+                origin_host TEXT,
+                source_path TEXT NOT NULL,
+                started_at INTEGER
+            );
+             CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER NOT NULL,
+                idx INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                created_at INTEGER,
+                content TEXT NOT NULL
+            );
+             CREATE TABLE message_metrics (
+                message_id INTEGER PRIMARY KEY,
+                created_at_ms INTEGER,
+                tool_call_count INTEGER NOT NULL DEFAULT 0,
+                content_tokens_est INTEGER,
+                api_input_tokens INTEGER,
+                api_output_tokens INTEGER,
+                api_cache_read_tokens INTEGER,
+                api_cache_creation_tokens INTEGER,
+                api_thinking_tokens INTEGER
+            );
+             CREATE TABLE usage_daily (
+                day_id INTEGER NOT NULL,
+                agent_slug TEXT NOT NULL,
+                workspace_id INTEGER NOT NULL DEFAULT 0,
+                source_id TEXT NOT NULL DEFAULT 'local',
+                message_count INTEGER NOT NULL DEFAULT 0,
+                user_message_count INTEGER NOT NULL DEFAULT 0,
+                assistant_message_count INTEGER NOT NULL DEFAULT 0,
+                tool_call_count INTEGER NOT NULL DEFAULT 0,
+                plan_message_count INTEGER NOT NULL DEFAULT 0,
+                api_coverage_message_count INTEGER NOT NULL DEFAULT 0,
+                content_tokens_est_total INTEGER NOT NULL DEFAULT 0,
+                content_tokens_est_user INTEGER NOT NULL DEFAULT 0,
+                content_tokens_est_assistant INTEGER NOT NULL DEFAULT 0,
+                api_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_input_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_output_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_cache_read_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_cache_creation_tokens_total INTEGER NOT NULL DEFAULT 0,
+                api_thinking_tokens_total INTEGER NOT NULL DEFAULT 0,
+                last_updated INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (day_id, agent_slug, workspace_id, source_id)
+            );",
+        )
+        .unwrap();
+
+        conn.execute("INSERT INTO agents (id, slug) VALUES (1, 'codex')")
+            .unwrap();
+        conn.execute("INSERT INTO agents (id, slug) VALUES (2, 'claude_code')")
+            .unwrap();
+
+        conn.execute(
+            "INSERT INTO conversations
+             (id, agent_id, workspace_id, source_id, origin_host, source_path, started_at)
+             VALUES (1, 1, 1, 'local', '', '/sessions/local.jsonl', 1700000000000)",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO conversations
+             (id, agent_id, workspace_id, source_id, origin_host, source_path, started_at)
+             VALUES (2, 2, 2, '   ', 'remote-ci', '/sessions/remote.jsonl', 1700000001000)",
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO messages (id, conversation_id, idx, role, created_at, content)
+             VALUES (11, 1, 0, 'assistant', 1700000000000, 'local tool')",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, conversation_id, idx, role, created_at, content)
+             VALUES (21, 2, 0, 'assistant', 1700000001000, 'remote tool')",
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO message_metrics
+             (message_id, created_at_ms, tool_call_count, content_tokens_est,
+              api_input_tokens, api_output_tokens, api_cache_read_tokens,
+              api_cache_creation_tokens, api_thinking_tokens)
+             VALUES (11, 1700000000000, 2, 30, 10, 20, 0, 0, 0)",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message_metrics
+             (message_id, created_at_ms, tool_call_count, content_tokens_est,
+              api_input_tokens, api_output_tokens, api_cache_read_tokens,
+              api_cache_creation_tokens, api_thinking_tokens)
+             VALUES (21, 1700000001000, 7, 90, 30, 70, 0, 0, 0)",
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO usage_daily
+             (day_id, agent_slug, workspace_id, source_id, message_count,
+              assistant_message_count, tool_call_count, content_tokens_est_total,
+              content_tokens_est_assistant, api_tokens_total, api_input_tokens_total,
+              api_output_tokens_total, last_updated)
+             VALUES (20250, 'codex', 1, 'local', 1, 1, 2, 30, 30, 30, 10, 20, 1)",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO usage_daily
+             (day_id, agent_slug, workspace_id, source_id, message_count,
+              assistant_message_count, tool_call_count, content_tokens_est_total,
+              content_tokens_est_assistant, api_tokens_total, api_input_tokens_total,
+              api_output_tokens_total, last_updated)
+             VALUES (20250, 'claude_code', 2, '   ', 1, 1, 7, 90, 90, 100, 30, 70, 1)",
+        )
+        .unwrap();
+
         conn
     }
 
@@ -4357,6 +4679,27 @@ mod tests {
         assert_eq!(result.rows.len(), 1);
         assert_eq!(result.rows[0].key, "aider");
         assert_eq!(result.rows[0].tool_call_count, 5);
+    }
+
+    #[test]
+    fn query_tools_source_filter_matches_blank_remote_usage_daily_source_via_origin_host() {
+        let conn = setup_tools_remote_source_fallback_db();
+        let filter = AnalyticsFilter {
+            source: SourceFilter::Specific("remote-ci".into()),
+            ..Default::default()
+        };
+
+        let result = query_tools(&conn, &filter, GroupBy::Day, 10).unwrap();
+
+        assert_eq!(result.source_table, "message_metrics");
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0].key, "claude_code");
+        assert_eq!(result.rows[0].tool_call_count, 7);
+        assert_eq!(result.rows[0].message_count, 1);
+        assert_eq!(result.rows[0].api_tokens_total, 100);
+        assert_eq!(result.total_tool_calls, 7);
+        assert_eq!(result.total_messages, 1);
+        assert_eq!(result.total_api_tokens, 100);
     }
 
     #[test]

@@ -329,6 +329,30 @@ mod tests {
 
     #[test]
     #[cfg(feature = "encryption")]
+    fn test_encrypt_content_produces_authenticated_ciphertext() {
+        let params = EncryptionParams {
+            iterations: 1_000,
+            salt_len: 16,
+            iv_len: 12,
+        };
+        let result = encrypt_content("sensitive data", "strong-password-here", &params)
+            .expect("feature-enabled encrypt_content should produce ciphertext");
+
+        assert!(!result.salt.is_empty(), "salt must be generated");
+        assert!(!result.iv.is_empty(), "iv must be generated");
+        assert_ne!(
+            result.ciphertext, "sensitive data",
+            "ciphertext must differ from plaintext"
+        );
+        assert!(
+            result.ciphertext.len() > "sensitive data".len(),
+            "ciphertext should include authenticated-encryption overhead"
+        );
+        assert_eq!(result.iterations, params.iterations);
+    }
+
+    #[test]
+    #[cfg(feature = "encryption")]
     fn test_encrypt_rejects_empty_password() {
         let params = EncryptionParams {
             iterations: 1_000,
