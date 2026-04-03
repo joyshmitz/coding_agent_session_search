@@ -2866,6 +2866,27 @@ fn robot_docs_contracts_describes_api() {
     );
 }
 
+/// robot-docs analytics topic should describe the implemented safe repair path
+#[test]
+fn robot_docs_analytics_describes_safe_fix_mode() {
+    let mut cmd = base_cmd();
+    cmd.args(["--color=never", "robot-docs", "analytics"]);
+    let out = cmd.assert().success().get_output().clone();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "robot-docs analytics should not emit ANSI when color=never"
+    );
+    assert!(
+        stdout.contains("cass analytics validate --fix --json"),
+        "analytics topic should document the implemented safe fix path"
+    );
+    assert!(
+        !stdout.contains("not yet implemented"),
+        "analytics topic should not claim implemented fix behavior is unavailable"
+    );
+}
+
 /// robot-docs wrap topic explains text wrapping
 #[test]
 fn robot_docs_wrap_explains_wrapping() {
