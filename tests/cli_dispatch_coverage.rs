@@ -253,6 +253,26 @@ fn seed_analytics_models_workspace_fixture(temp_home: &TempDir) -> PathBuf {
                 11,
             )
         };
+        let usage_json = match role.as_str() {
+            "user" => json!({
+                "cass": {
+                    "model": model_name,
+                    "token_usage": {
+                        "input_tokens": total_tokens,
+                        "data_source": "api"
+                    }
+                }
+            }),
+            _ => json!({
+                "cass": {
+                    "model": model_name,
+                    "token_usage": {
+                        "output_tokens": total_tokens,
+                        "data_source": "api"
+                    }
+                }
+            }),
+        };
         let day_id =
             coding_agent_search::storage::sqlite::FrankenStorage::day_id_from_millis(created_at);
         conn.execute_compat(
@@ -273,6 +293,11 @@ fn seed_analytics_models_workspace_fixture(temp_home: &TempDir) -> PathBuf {
                 role,
                 content_chars,
             ],
+        )
+        .unwrap();
+        conn.execute_compat(
+            "UPDATE messages SET extra_json = ?1 WHERE id = ?2",
+            frankensqlite::params![usage_json.to_string(), message_id],
         )
         .unwrap();
     }
@@ -383,6 +408,10 @@ fn seed_analytics_models_workspace_fixture(temp_home: &TempDir) -> PathBuf {
         )
         .unwrap();
     }
+
+    drop(conn);
+    let storage = coding_agent_search::storage::sqlite::FrankenStorage::open(&db_path).unwrap();
+    storage.rebuild_analytics().unwrap();
 
     workspace_a
 }
