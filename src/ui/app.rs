@@ -5662,6 +5662,17 @@ impl CassApp {
             })
     }
 
+    fn clear_search_surface_hit_regions(&self) {
+        *self.last_search_bar_area.borrow_mut() = None;
+        *self.last_results_inner.borrow_mut() = None;
+        *self.last_detail_area.borrow_mut() = None;
+        *self.last_split_handle_area.borrow_mut() = None;
+        self.last_pill_rects.borrow_mut().clear();
+        self.last_pane_rects.borrow_mut().clear();
+        self.last_suggestion_rects.borrow_mut().clear();
+        *self.last_pane_first_index.borrow_mut() = 0;
+    }
+
     /// Determine which UI region a mouse coordinate falls in.
     fn hit_test(&self, x: u16, y: u16) -> MouseHitRegion {
         if self.show_saved_views_modal {
@@ -6586,6 +6597,13 @@ impl CassApp {
         if let Ok(mut trace) = recorder.lock() {
             trace.note_frame_rendered(self.search_generation);
         }
+    }
+
+    fn delayed_tick(delay: Duration) -> ftui::Cmd<CassMsg> {
+        ftui::Cmd::task(move || {
+            std::thread::sleep(delay);
+            CassMsg::Tick
+        })
     }
 
     fn split_content_area(
@@ -14826,8 +14844,6 @@ impl From<super::ftui_adapter::Event> for CassMsg {
 
                     // -- Match mode -----------------------------------------------
                     KeyCode::F(9) => CassMsg::MatchModeCycled,
-                    KeyCode::Char('m') if alt => CassMsg::MatchModeCycled,
-                    KeyCode::Char('M') if alt => CassMsg::MatchModeCycled,
 
                     // -- Source filter ---------------------------------------------
                     KeyCode::F(11) if shift => CassMsg::SourceFilterMenuToggled,
@@ -16019,7 +16035,7 @@ impl super::ftui_adapter::Model for CassApp {
                 self.dirty_since = Some(Instant::now());
                 self.search_dirty_since = Some(Instant::now());
                 self.history_cursor = None;
-                ftui::Cmd::tick(SEARCH_DEBOUNCE)
+                Self::delayed_tick(SEARCH_DEBOUNCE)
             }
             CassMsg::QueryCleared => {
                 self.push_undo("Clear query");
@@ -16028,7 +16044,7 @@ impl super::ftui_adapter::Model for CassApp {
                 self.dirty_since = Some(Instant::now());
                 self.search_dirty_since = Some(Instant::now());
                 self.history_cursor = None;
-                ftui::Cmd::tick(SEARCH_DEBOUNCE)
+                Self::delayed_tick(SEARCH_DEBOUNCE)
             }
             CassMsg::QueryLineKilled => {
                 // Kill text from start of line to cursor position (Unix Ctrl+U).
@@ -16038,7 +16054,7 @@ impl super::ftui_adapter::Model for CassApp {
                     self.query.drain(..pos);
                     self.cursor_pos = 0;
                     self.search_dirty_since = Some(Instant::now());
-                    return ftui::Cmd::tick(SEARCH_DEBOUNCE);
+                    return Self::delayed_tick(SEARCH_DEBOUNCE);
                 }
                 ftui::Cmd::none()
             }
@@ -16050,7 +16066,7 @@ impl super::ftui_adapter::Model for CassApp {
                     self.query.truncate(pos);
                     self.cursor_pos = pos;
                     self.search_dirty_since = Some(Instant::now());
-                    return ftui::Cmd::tick(SEARCH_DEBOUNCE);
+                    return Self::delayed_tick(SEARCH_DEBOUNCE);
                 }
                 ftui::Cmd::none()
             }
@@ -16071,7 +16087,7 @@ impl super::ftui_adapter::Model for CassApp {
                     self.dirty_since = Some(Instant::now());
                     self.search_dirty_since = Some(Instant::now());
                     self.history_cursor = None;
-                    return ftui::Cmd::tick(SEARCH_DEBOUNCE);
+                    return Self::delayed_tick(SEARCH_DEBOUNCE);
                 }
                 ftui::Cmd::none()
             }
@@ -16094,7 +16110,11 @@ impl super::ftui_adapter::Model for CassApp {
                     self.dirty_since = Some(Instant::now());
                 }
                 self.history_cursor = None;
-                self.search_dirty_since = None; // cancel pending debounce
+                // Preserve the earliest input timestamp so explicit submits can
+                // still report end-to-end typing latency in the trace.
+                if self.search_dirty_since.is_none() {
+                    self.search_dirty_since = Some(Instant::now());
+                }
                 ftui::Cmd::msg(CassMsg::SearchRequested)
             }
             CassMsg::SearchRequested => {
@@ -16209,7 +16229,7 @@ impl super::ftui_adapter::Model for CassApp {
                         if elapsed >= SEARCH_DEBOUNCE {
                             return ftui::Cmd::msg(CassMsg::SearchRequested);
                         }
-                        return ftui::Cmd::tick(SEARCH_DEBOUNCE.saturating_sub(elapsed));
+                        return Self::delayed_tick(SEARCH_DEBOUNCE.saturating_sub(elapsed));
                     }
                     return ftui::Cmd::none();
                 }
@@ -16292,7 +16312,7 @@ impl super::ftui_adapter::Model for CassApp {
                     if elapsed >= SEARCH_DEBOUNCE {
                         return ftui::Cmd::msg(CassMsg::SearchRequested);
                     }
-                    return ftui::Cmd::tick(SEARCH_DEBOUNCE.saturating_sub(elapsed));
+                    return Self::delayed_tick(SEARCH_DEBOUNCE.saturating_sub(elapsed));
                 }
                 ftui::Cmd::none()
             }
@@ -16320,7 +16340,7 @@ impl super::ftui_adapter::Model for CassApp {
                     if elapsed >= SEARCH_DEBOUNCE {
                         return ftui::Cmd::msg(CassMsg::SearchRequested);
                     }
-                    return ftui::Cmd::tick(SEARCH_DEBOUNCE.saturating_sub(elapsed));
+                    return Self::delayed_tick(SEARCH_DEBOUNCE.saturating_sub(elapsed));
                 }
                 ftui::Cmd::none()
             }
@@ -16389,7 +16409,7 @@ impl super::ftui_adapter::Model for CassApp {
                     self.query.drain(pos..next);
                     self.cursor_pos = pos;
                     self.search_dirty_since = Some(std::time::Instant::now());
-                    return ftui::Cmd::tick(SEARCH_DEBOUNCE);
+                    return Self::delayed_tick(SEARCH_DEBOUNCE);
                 }
                 ftui::Cmd::none()
             }
@@ -17278,7 +17298,7 @@ impl super::ftui_adapter::Model for CassApp {
                     }
                     1 => {
                         let selected_hits = self.selected_hits();
-                        let sources_config = SourcesConfig::load().ok();
+                        let sources_config = load_sources_config_for_actions();
                         let paths: Vec<String> = selected_hits
                             .iter()
                             .map(|hit| {
@@ -17391,7 +17411,7 @@ impl super::ftui_adapter::Model for CassApp {
             CassMsg::CopyPath => {
                 use crate::ui::components::toast::{Toast, ToastType};
                 if let Some(hit) = self.selected_hit() {
-                    let sources_config = SourcesConfig::load().ok();
+                    let sources_config = load_sources_config_for_actions();
                     let actionable_path =
                         actionable_path_for_hit_with_config(sources_config.as_ref(), hit);
                     match copy_to_clipboard(actionable_path.as_str()) {
@@ -17454,9 +17474,7 @@ impl super::ftui_adapter::Model for CassApp {
             }
             CassMsg::OpenInEditor => {
                 if let Some(hit) = self.selected_hit().cloned() {
-                    let editor_cmd = dotenvy::var("EDITOR")
-                        .or_else(|_| dotenvy::var("VISUAL"))
-                        .unwrap_or_else(|_| "code".to_string());
+                    let editor_cmd = editor_command_for_actions();
                     self.status = match open_hits_in_editor(std::slice::from_ref(&hit), &editor_cmd)
                     {
                         Ok((count, editor_bin)) => format!("Opened {count} file in {editor_bin}"),
@@ -17495,9 +17513,7 @@ impl super::ftui_adapter::Model for CassApp {
                 }
                 // Execute: open all selected items
                 let hits = self.selected_hits();
-                let editor_cmd = dotenvy::var("EDITOR")
-                    .or_else(|_| dotenvy::var("VISUAL"))
-                    .unwrap_or_else(|_| "code".to_string());
+                let editor_cmd = editor_command_for_actions();
                 self.status = match open_hits_in_editor(&hits, &editor_cmd) {
                     Ok((count, editor_bin)) => {
                         self.selected.clear();
@@ -18895,24 +18911,34 @@ impl super::ftui_adapter::Model for CassApp {
                 if let Some(info) = update_info_ready {
                     cmds.push(ftui::Cmd::msg(CassMsg::UpdateCheckCompleted(info)));
                 }
-                // Debounced search-as-you-type: fire SearchRequested once the
-                // debounce window (60ms) has elapsed since the last query change.
-                if let Some(dirty_ts) = self.search_dirty_since
-                    && dirty_ts.elapsed() >= SEARCH_DEBOUNCE
-                {
-                    // Fire the new search even if one is already in-flight.
-                    // The generation counter ensures stale results from the
-                    // previous search are safely ignored when they arrive.
-                    // This prevents the user from waiting 60+ seconds for an
-                    // initial empty-query search to finish before their typed
-                    // query starts executing.
-                    cmds.push(ftui::Cmd::msg(CassMsg::SearchRequested));
+                // Debounced search-as-you-type: if a one-shot timer fires
+                // slightly early, reschedule the remaining debounce window
+                // instead of silently dropping the search.
+                if let Some(dirty_ts) = self.search_dirty_since {
+                    let elapsed = dirty_ts.elapsed();
+                    if elapsed >= SEARCH_DEBOUNCE {
+                        // Fire the new search even if one is already in-flight.
+                        // The generation counter ensures stale results from the
+                        // previous search are safely ignored when they arrive.
+                        // This prevents the user from waiting for an initial
+                        // empty-query search to finish before their typed query
+                        // starts executing.
+                        cmds.push(ftui::Cmd::msg(CassMsg::SearchRequested));
+                    } else {
+                        cmds.push(Self::delayed_tick(SEARCH_DEBOUNCE.saturating_sub(elapsed)));
+                    }
                 }
                 if let Some(dirty_ts) = self.dirty_since
                     && !self.state_save_in_flight
-                    && dirty_ts.elapsed() >= STATE_SAVE_DEBOUNCE
                 {
-                    cmds.push(ftui::Cmd::msg(CassMsg::StateSaveRequested));
+                    let elapsed = dirty_ts.elapsed();
+                    if elapsed >= STATE_SAVE_DEBOUNCE {
+                        cmds.push(ftui::Cmd::msg(CassMsg::StateSaveRequested));
+                    } else {
+                        cmds.push(Self::delayed_tick(
+                            STATE_SAVE_DEBOUNCE.saturating_sub(elapsed),
+                        ));
+                    }
                 }
                 cmds.push(ftui::Cmd::msg(CassMsg::ToastTick));
                 // Advance macro playback and inject events as messages.
@@ -19062,7 +19088,7 @@ impl super::ftui_adapter::Model for CassApp {
                     }
                     // ── Left click on a search suggestion (Did-you-mean) ──
                     (MouseEventKind::LeftClick, MouseHitRegion::Suggestion { idx }) => {
-                        self.update(CassMsg::SuggestionApplied((idx + 1) as u8))
+                        self.update(CassMsg::SuggestionApplied(idx as u8))
                     }
                     // ── Left click on a filter pill: edit that filter ──
                     (MouseEventKind::LeftClick, MouseHitRegion::Pill { index }) => {
@@ -21014,6 +21040,8 @@ impl super::ftui_adapter::Model for CassApp {
             }
 
             AppSurface::Analytics => {
+                self.clear_search_surface_hit_regions();
+
                 // ── Analytics surface layout ─────────────────────────────
                 let atopo = breakpoint.analytics_topology();
                 let analytics_footer_rows = if self.should_show_progress_bar() {
@@ -21271,6 +21299,8 @@ impl super::ftui_adapter::Model for CassApp {
             }
 
             AppSurface::Sources => {
+                self.clear_search_surface_hit_regions();
+
                 // ── Sources surface layout ─────────────────────────────
                 let vertical = Flex::vertical()
                     .constraints([
@@ -22944,6 +22974,14 @@ static TEST_EDITOR_INVOCATIONS: std::sync::LazyLock<std::sync::Mutex<Vec<Vec<Str
     std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
 
 #[cfg(test)]
+static TEST_ACTION_SOURCES_CONFIG: std::sync::LazyLock<std::sync::Mutex<Option<SourcesConfig>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+#[cfg(test)]
+static TEST_ACTION_EDITOR_COMMAND: std::sync::LazyLock<std::sync::Mutex<Option<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+#[cfg(test)]
 fn take_test_editor_invocations() -> Vec<Vec<String>> {
     TEST_EDITOR_INVOCATIONS
         .lock()
@@ -22955,6 +22993,48 @@ fn take_test_editor_invocations() -> Vec<Vec<String>> {
 #[cfg(test)]
 fn clear_test_editor_invocations() {
     let _ = take_test_editor_invocations();
+}
+
+#[cfg(test)]
+fn swap_test_action_sources_config(
+    next: Option<SourcesConfig>,
+) -> Result<Option<SourcesConfig>, String> {
+    let mut guard = TEST_ACTION_SOURCES_CONFIG
+        .lock()
+        .map_err(|e| e.to_string())?;
+    Ok(std::mem::replace(&mut *guard, next))
+}
+
+#[cfg(test)]
+fn swap_test_action_editor_command(next: Option<String>) -> Result<Option<String>, String> {
+    let mut guard = TEST_ACTION_EDITOR_COMMAND
+        .lock()
+        .map_err(|e| e.to_string())?;
+    Ok(std::mem::replace(&mut *guard, next))
+}
+
+fn editor_command_for_actions() -> String {
+    #[cfg(test)]
+    if let Ok(guard) = TEST_ACTION_EDITOR_COMMAND.lock()
+        && let Some(editor_cmd) = guard.as_ref()
+    {
+        return editor_cmd.clone();
+    }
+
+    dotenvy::var("EDITOR")
+        .or_else(|_| dotenvy::var("VISUAL"))
+        .unwrap_or_else(|_| "code".to_string())
+}
+
+fn load_sources_config_for_actions() -> Option<SourcesConfig> {
+    #[cfg(test)]
+    if let Ok(guard) = TEST_ACTION_SOURCES_CONFIG.lock()
+        && let Some(config) = guard.as_ref()
+    {
+        return Some(config.clone());
+    }
+
+    SourcesConfig::load().ok()
 }
 
 #[cfg(not(test))]
@@ -22972,13 +23052,21 @@ fn run_editor_command(cmd: &mut StdCommand) -> Result<(), String> {
 
 /// Open one or more search hits in an editor. Returns `(count_opened, editor_binary)`.
 fn open_hits_in_editor(hits: &[SearchHit], editor_cmd: &str) -> Result<(usize, String), String> {
+    let sources_config = load_sources_config_for_actions();
+    open_hits_in_editor_with_config(hits, editor_cmd, sources_config.as_ref())
+}
+
+fn open_hits_in_editor_with_config(
+    hits: &[SearchHit],
+    editor_cmd: &str,
+    sources_config: Option<&SourcesConfig>,
+) -> Result<(usize, String), String> {
     if hits.is_empty() {
         return Ok((0, String::new()));
     }
     let (editor_bin, editor_args) = split_editor_command(editor_cmd);
-    let sources_config = SourcesConfig::load().ok();
     for hit in hits {
-        let actionable_path = actionable_path_for_hit_with_config(sources_config.as_ref(), hit);
+        let actionable_path = actionable_path_for_hit_with_config(sources_config, hit);
         let mut cmd = StdCommand::new(&editor_bin);
         cmd.args(&editor_args);
         if editor_bin == "code" {
@@ -23031,7 +23119,6 @@ mod tests {
     use crate::sources::config::{PathMapping, SourceDefinition};
     use crate::ui::components::palette::PaletteAction;
     use serial_test::serial;
-    use std::ffi::OsString;
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone)]
@@ -23069,40 +23156,31 @@ mod tests {
         String::from_utf8(sink.lock().map(|b| b.clone()).unwrap_or_default()).unwrap_or_default()
     }
 
-    struct EnvVarGuard {
-        key: &'static str,
-        previous: Option<OsString>,
+    struct ActionOverrideGuard {
+        prev_config: Option<SourcesConfig>,
+        prev_editor_command: Option<String>,
     }
 
-    impl EnvVarGuard {
-        fn set_path(key: &'static str, value: &std::path::Path) -> Self {
-            let previous = std::env::var_os(key);
-            unsafe { std::env::set_var(key, value) };
-            Self { key, previous }
-        }
-
-        fn set_str(key: &'static str, value: &str) -> Self {
-            let previous = std::env::var_os(key);
-            unsafe { std::env::set_var(key, value) };
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            if let Some(previous) = &self.previous {
-                unsafe { std::env::set_var(self.key, previous) };
-            } else {
-                unsafe { std::env::remove_var(self.key) };
+    impl ActionOverrideGuard {
+        fn install(config: Option<SourcesConfig>, editor_cmd: Option<&str>) -> Self {
+            let prev_config =
+                swap_test_action_sources_config(config).expect("set action sources config");
+            let prev_editor_command = swap_test_action_editor_command(
+                editor_cmd.map(std::string::ToString::to_string),
+            )
+            .expect("set action editor command");
+            Self {
+                prev_config,
+                prev_editor_command,
             }
         }
     }
 
-    fn write_test_sources_config(config_root: &std::path::Path, config: &SourcesConfig) {
-        let path = config_root.join("cass").join("sources.toml");
-        let parent = path.parent().expect("sources config parent");
-        std::fs::create_dir_all(parent).expect("create test sources config dir");
-        config.save_to(&path).expect("write test sources config");
+    impl Drop for ActionOverrideGuard {
+        fn drop(&mut self) {
+            let _ = swap_test_action_sources_config(self.prev_config.take());
+            let _ = swap_test_action_editor_command(self.prev_editor_command.take());
+        }
     }
 
     #[test]
@@ -26014,10 +26092,16 @@ mod tests {
         // Set search_dirty_since to just now (within debounce window)
         app.search_dirty_since = Some(Instant::now());
         let cmd = app.update(CassMsg::Tick);
-        // Should NOT have fired SearchRequested - just ToastTick
+        let msgs = extract_msgs(cmd);
+        // Should NOT have fired SearchRequested yet; the remaining debounce
+        // window should stay armed.
         assert!(
-            matches!(cmd, ftui::Cmd::Msg(_)),
-            "tick should return single Msg (ToastTick) when debounce not elapsed"
+            !msgs.iter().any(|msg| matches!(msg, CassMsg::SearchRequested)),
+            "tick should not fire SearchRequested when debounce has not elapsed"
+        );
+        assert!(
+            app.search_dirty_since.is_some(),
+            "dirty search state should remain armed until debounce elapses"
         );
     }
 
@@ -26033,9 +26117,10 @@ mod tests {
     fn query_changed_returns_tick_cmd() {
         let mut app = CassApp::default();
         let cmd = app.update(CassMsg::QueryChanged("a".into()));
+        let debug = format!("{cmd:?}");
         assert!(
-            matches!(cmd, ftui::Cmd::Tick(_)),
-            "QueryChanged should return Cmd::Tick for debounce"
+            debug.contains("Task"),
+            "QueryChanged should schedule a delayed tick task for debounce"
         );
     }
 
@@ -26045,9 +26130,10 @@ mod tests {
         app.query = "foo".to_string();
         app.cursor_pos = 3;
         let cmd = app.update(CassMsg::QueryCleared);
+        let debug = format!("{cmd:?}");
         assert!(
-            matches!(cmd, ftui::Cmd::Tick(_)),
-            "QueryCleared should return Cmd::Tick"
+            debug.contains("Task"),
+            "QueryCleared should schedule a delayed tick task"
         );
         assert_eq!(app.cursor_pos, 0);
     }
@@ -26058,9 +26144,10 @@ mod tests {
         app.query = "hello world".to_string();
         app.cursor_pos = 11;
         let cmd = app.update(CassMsg::QueryWordDeleted);
+        let debug = format!("{cmd:?}");
         assert!(
-            matches!(cmd, ftui::Cmd::Tick(_)),
-            "QueryWordDeleted should return Cmd::Tick when text was deleted"
+            debug.contains("Task"),
+            "QueryWordDeleted should schedule a delayed tick task when text was deleted"
         );
     }
 
@@ -28757,9 +28844,9 @@ mod tests {
     fn detail_find_navigation_wraps() {
         let mut app = CassApp::default();
         let _ = app.update(CassMsg::DetailFindToggled);
+        *app.detail_find_matches_cache.borrow_mut() = vec![5, 10, 20];
         if let Some(ref mut find) = app.detail_find {
             find.query = "test".to_string();
-            find.matches = vec![5, 10, 20];
             find.current = 0;
         }
         // Navigate forward
@@ -28862,6 +28949,39 @@ mod tests {
     /// Helper: populate cached_detail with messages containing a keyword for find tests.
     fn set_detail_with_keyword(app: &mut CassApp, keyword: &str) {
         let mut cv = make_test_conversation_view();
+        let (source_path, source_id, title, agent, workspace, conversation_id) = app
+            .selected_hit()
+            .map(|hit| {
+                (
+                    hit.source_path.clone(),
+                    hit_source_id_display(hit).to_string(),
+                    hit.title.clone(),
+                    hit.agent.clone(),
+                    hit.workspace.clone(),
+                    hit.conversation_id,
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    "/test/session.jsonl".to_string(),
+                    crate::sources::provenance::LOCAL_SOURCE_ID.to_string(),
+                    "Keyword Detail".to_string(),
+                    "claude_code".to_string(),
+                    "/projects/test".to_string(),
+                    None,
+                )
+            });
+        cv.convo.id = conversation_id;
+        cv.convo.source_path = std::path::PathBuf::from(&source_path);
+        cv.convo.source_id = source_id;
+        cv.convo.title = Some(title);
+        cv.convo.agent_slug = agent;
+        cv.convo.workspace = Some(std::path::PathBuf::from(&workspace));
+        cv.workspace = Some(crate::model::types::Workspace {
+            id: None,
+            path: std::path::PathBuf::from(workspace),
+            display_name: None,
+        });
         cv.messages = vec![
             crate::model::types::Message {
                 id: Some(1),
@@ -28884,7 +29004,7 @@ mod tests {
                 snippets: vec![],
             },
         ];
-        app.cached_detail = Some(("/test/session.jsonl".to_string(), cv));
+        app.cached_detail = Some((source_path, cv));
         app.focus_manager.focus(focus_ids::DETAIL_PANE);
     }
 
@@ -31472,6 +31592,7 @@ not jsonl",
         hit.snippet = "  
 	  "
         .to_string();
+        hit.content = " \n\t ".to_string();
 
         let styles = StyleContext::from_options(StyleOptions::default());
         let lines = app.build_snippets_lines(&hit, &styles);
@@ -32017,16 +32138,13 @@ not jsonl",
     #[test]
     #[serial]
     fn copy_path_rewrites_configured_remote_source_paths() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let _config_guard = EnvVarGuard::set_path("XDG_CONFIG_HOME", temp.path());
-
         let mut config = SourcesConfig::default();
         let mut source = SourceDefinition::ssh("work-laptop", "user@work-laptop");
         source
             .path_mappings
             .push(PathMapping::new("/remote/root", "/local/root"));
         config.sources.push(source);
-        write_test_sources_config(temp.path(), &config);
+        let _override_guard = ActionOverrideGuard::install(Some(config), None);
 
         let mut app = app_with_hits(1);
         app.panes[0].hits[0].source_id = "work-laptop".to_string();
@@ -32042,9 +32160,6 @@ not jsonl",
     #[test]
     #[serial]
     fn copy_path_rewrites_hyphenated_agent_mappings_for_underscored_hits() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let _config_guard = EnvVarGuard::set_path("XDG_CONFIG_HOME", temp.path());
-
         let mut config = SourcesConfig::default();
         let mut source = SourceDefinition::ssh("work-laptop", "user@work-laptop");
         source.path_mappings.push(PathMapping::with_agents(
@@ -32053,7 +32168,7 @@ not jsonl",
             vec!["claude-code".to_string()],
         ));
         config.sources.push(source);
-        write_test_sources_config(temp.path(), &config);
+        let _override_guard = ActionOverrideGuard::install(Some(config), None);
 
         let mut app = app_with_hits(1);
         app.panes[0].hits[0].agent = "claude_code".to_string();
@@ -32070,16 +32185,13 @@ not jsonl",
     #[test]
     #[serial]
     fn bulk_copy_paths_rewrites_configured_remote_source_paths() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let _config_guard = EnvVarGuard::set_path("XDG_CONFIG_HOME", temp.path());
-
         let mut config = SourcesConfig::default();
         let mut source = SourceDefinition::ssh("work-laptop", "user@work-laptop");
         source
             .path_mappings
             .push(PathMapping::new("/remote/root", "/local/root"));
         config.sources.push(source);
-        write_test_sources_config(temp.path(), &config);
+        let _override_guard = ActionOverrideGuard::install(Some(config), None);
 
         let mut app = app_with_hits(2);
         for (idx, hit) in app.panes[0].hits.iter_mut().enumerate() {
@@ -32138,9 +32250,6 @@ not jsonl",
     #[test]
     #[serial]
     fn open_in_editor_rewrites_configured_remote_source_paths() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let _config_guard = EnvVarGuard::set_path("XDG_CONFIG_HOME", temp.path());
-        let _editor_guard = EnvVarGuard::set_str("EDITOR", "code");
         clear_test_editor_invocations();
 
         let mut config = SourcesConfig::default();
@@ -32149,7 +32258,7 @@ not jsonl",
             .path_mappings
             .push(PathMapping::new("/remote/root", "/local/root"));
         config.sources.push(source);
-        write_test_sources_config(temp.path(), &config);
+        let _override_guard = ActionOverrideGuard::install(Some(config), Some("code"));
 
         let mut app = app_with_hits(1);
         app.panes[0].hits[0].source_id = "work-laptop".to_string();
@@ -39916,6 +40025,13 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
         use std::path::PathBuf;
 
         let mut app = app_with_hits(3);
+        app.panes[0].hits[0] = SearchHit {
+            source_path: "/test/session.jsonl".to_string(),
+            title: "Markdown Profiling".to_string(),
+            content: MARKDOWN_PROFILE_CONTENT.to_string(),
+            snippet: "Authentication module refactor".to_string(),
+            ..make_test_hit()
+        };
         let messages = make_markdown_messages(msg_count);
         let cv = ConversationView {
             convo: crate::model::types::Conversation {
@@ -39924,7 +40040,7 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
                 workspace: Some(PathBuf::from("/projects/test")),
                 external_id: Some("conv-md-profile".to_string()),
                 title: Some("Markdown Profiling".to_string()),
-                source_path: PathBuf::from("/test/md_session.jsonl"),
+                source_path: PathBuf::from("/test/session.jsonl"),
                 started_at: Some(1_700_000_000),
                 ended_at: Some(1_700_003_600),
                 approx_tokens: Some(4096),
@@ -39936,7 +40052,7 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
             messages,
             workspace: None,
         };
-        app.cached_detail = Some(("/test/md_session.jsonl".to_string(), cv));
+        app.cached_detail = Some(("/test/session.jsonl".to_string(), cv));
         app
     }
 
@@ -44319,40 +44435,8 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
 
     /// Shared fixture for detail-pane snapshot baselines.
     fn app_with_detail_snapshot_fixture() -> CassApp {
-        let mut app = app_with_rich_visual_fixture();
-        app.active_pane = 0;
-        if let Some(first_pane) = app.panes.first_mut() {
-            first_pane.selected = 0;
-        }
+        let mut app = app_with_cached_conversation();
         app.focus_manager.focus(focus_ids::DETAIL_PANE);
-        let mut cv = make_test_conversation_view();
-        if let Some(selected_hit) = app.selected_hit() {
-            cv.convo.id = selected_hit.conversation_id;
-            cv.convo.agent_slug = selected_hit.agent.clone();
-            cv.convo.source_path = std::path::PathBuf::from(&selected_hit.source_path);
-            cv.convo.source_id = hit_source_id_display(selected_hit).to_string();
-            cv.convo.workspace =
-                trimmed_non_empty(&selected_hit.workspace).map(std::path::PathBuf::from);
-            cv.convo.title = trimmed_non_empty(&selected_hit.title).map(ToOwned::to_owned);
-            cv.convo.origin_host = selected_hit.origin_host.clone();
-            cv.convo.metadata_json = serde_json::json!({
-                "cass": {
-                    "workspace_original": selected_hit.workspace_original,
-                }
-            });
-            cv.workspace = trimmed_non_empty(&selected_hit.workspace).map(|workspace| {
-                crate::model::types::Workspace {
-                    id: None,
-                    path: std::path::PathBuf::from(workspace),
-                    display_name: None,
-                }
-            });
-        }
-        let selected_path = app
-            .selected_hit()
-            .map(|hit| hit.source_path.clone())
-            .unwrap_or_else(|| "/test/session.jsonl".to_string());
-        app.cached_detail = Some((selected_path, cv));
         app
     }
 
@@ -44540,10 +44624,10 @@ See also: [RFC-2847](https://internal/rfc/2847) for the full design doc.
 
         let buf = render_detail_snapshot_buffer(&app, 96, 30);
         let text = ftui_harness::buffer_to_text(&buf);
-        assert!(text.contains("User"));
-        assert!(text.contains("Agent"));
-        assert!(text.contains("Tool"));
-        assert!(text.contains("System"));
+        assert!(text.contains("User intent"));
+        assert!(text.contains("Assistant response"));
+        assert!(text.contains("scan completed"));
+        assert!(text.contains("System event"));
         assert_affordance_snapshot("cassapp_baseline_role_gutters_messages", &buf);
     }
 

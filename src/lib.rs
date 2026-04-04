@@ -22,9 +22,10 @@ use anyhow::Result;
 use base64::prelude::*;
 use chrono::Utc;
 use clap::{Arg, ArgAction, Command, CommandFactory, Parser, Subcommand, ValueEnum, ValueHint};
+use frankensqlite::compat::{ConnectionExt, RowExt};
 use indexer::IndexOptions;
 use serde::Serialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -390,6 +391,10 @@ pub enum Commands {
         #[arg(long)]
         data_dir: Option<PathBuf>,
 
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
+
         /// Filter by source: 'local', 'remote', 'all', or a specific source hostname
         #[arg(long)]
         source: Option<String>,
@@ -403,6 +408,10 @@ pub enum Commands {
         #[arg(long)]
         data_dir: Option<PathBuf>,
 
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
+
         /// Include verbose information (file sizes, timestamps)
         #[arg(long, short)]
         verbose: bool,
@@ -413,6 +422,10 @@ pub enum Commands {
         #[arg(long)]
         data_dir: Option<PathBuf>,
 
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
+
         /// Include _meta block (elapsed, freshness, data_dir/db_path)
         #[arg(long, default_value_t = false)]
         robot_meta: bool,
@@ -421,12 +434,20 @@ pub enum Commands {
         stale_threshold: u64,
     },
     /// Discover available features, versions, and limits for agent introspection
-    Capabilities {},
+    Capabilities {
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
+    },
     /// Quick state/health check (alias of status)
     State {
         /// Override data dir
         #[arg(long)]
         data_dir: Option<PathBuf>,
+
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
 
         /// Include _meta block (elapsed, freshness, data_dir/db_path)
         #[arg(long, default_value_t = false)]
@@ -436,9 +457,17 @@ pub enum Commands {
         stale_threshold: u64,
     },
     /// Show API + contract version info
-    ApiVersion {},
+    ApiVersion {
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
+    },
     /// Full API schema introspection - commands, arguments, and response schemas
-    Introspect {},
+    Introspect {
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
+    },
     /// View a source file at a specific line (follow up on search results)
     View {
         /// Path to the source file
@@ -452,6 +481,9 @@ pub enum Commands {
         /// Number of context lines before/after
         #[arg(long, short = 'C', default_value_t = 5)]
         context: usize,
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
     },
     /// Minimal health check (<50ms). Exit 0=healthy, 1=unhealthy. For agent pre-flight checks.
     Health {
@@ -474,6 +506,10 @@ pub enum Commands {
         /// Override data dir
         #[arg(long)]
         data_dir: Option<PathBuf>,
+
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
 
         /// Apply safe fixes automatically (rebuilds index/db from source data)
         #[arg(long)]
@@ -499,6 +535,9 @@ pub enum Commands {
         /// Maximum results per relation type (default: 5)
         #[arg(long, default_value_t = 5)]
         limit: usize,
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
     },
     /// List recent sessions, with optional workspace/current-session filtering
     Sessions {
@@ -619,6 +658,9 @@ pub enum Commands {
         /// Number of messages before/after (default: 3)
         #[arg(long, short = 'C', default_value_t = 3)]
         context: usize,
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
     },
     /// Show activity timeline for a time range
     Timeline {
@@ -833,6 +875,9 @@ pub enum SourcesCommand {
         /// Show detailed information
         #[arg(long, short)]
         verbose: bool,
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
     },
     /// Add a new remote source
     Add {
@@ -867,6 +912,9 @@ pub enum SourcesCommand {
         /// Check only specific source (defaults to all)
         #[arg(long, short)]
         source: Option<String>,
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
     },
     /// Synchronize sessions from remote sources
     Sync {
@@ -882,6 +930,9 @@ pub enum SourcesCommand {
         /// Dry run - show what would be synced without actually syncing
         #[arg(long)]
         dry_run: bool,
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
     },
     /// Manage path mappings for a source (P6.3)
     #[command(subcommand)]
@@ -894,6 +945,9 @@ pub enum SourcesCommand {
         /// Skip hosts that are already configured as sources
         #[arg(long)]
         skip_existing: bool,
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
     },
     /// Interactive wizard to discover, configure, and set up remote sources.
     ///
@@ -986,7 +1040,11 @@ pub enum SourcesCommand {
 #[derive(Subcommand, Debug, Clone)]
 pub enum ModelsCommand {
     /// Show model installation status
-    Status {},
+    Status {
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
+    },
     /// Download and install the semantic search model
     Install {
         /// Model to install (default: all-minilm-l6-v2)
@@ -1013,6 +1071,9 @@ pub enum ModelsCommand {
         /// Override data dir
         #[arg(long)]
         data_dir: Option<PathBuf>,
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
     },
     /// Remove model files to free disk space
     Remove {
@@ -1031,6 +1092,9 @@ pub enum ModelsCommand {
         /// Override data dir
         #[arg(long)]
         data_dir: Option<PathBuf>,
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
     },
 }
 
@@ -1041,6 +1105,9 @@ pub enum MappingsAction {
     List {
         /// Source name
         source: String,
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
     },
     /// Add a path mapping
     Add {
@@ -2964,10 +3031,11 @@ async fn execute_cli(
                 }
                 Commands::Stats {
                     data_dir,
+                    json,
                     source,
                     by_source,
                 } => {
-                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    let structured_format = resolve_subcommand_structured_format(cli, json);
                     run_stats(
                         &data_dir,
                         cli.db.clone(),
@@ -2976,16 +3044,21 @@ async fn execute_cli(
                         by_source,
                     )?;
                 }
-                Commands::Diag { data_dir, verbose } => {
-                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                Commands::Diag {
+                    data_dir,
+                    json,
+                    verbose,
+                } => {
+                    let structured_format = resolve_subcommand_structured_format(cli, json);
                     run_diag(&data_dir, cli.db.clone(), structured_format, verbose)?;
                 }
                 Commands::Status {
                     data_dir,
+                    json,
                     robot_meta,
                     stale_threshold,
                 } => {
-                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    let structured_format = resolve_subcommand_structured_format(cli, json);
                     run_status(
                         &data_dir,
                         cli.db.clone(),
@@ -2999,8 +3072,9 @@ async fn execute_cli(
                     source,
                     line,
                     context,
+                    json,
                 } => {
-                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    let structured_format = resolve_subcommand_structured_format(cli, json);
                     run_view(
                         &path,
                         cli.db.clone(),
@@ -3563,20 +3637,21 @@ async fn execute_cli(
                     man.render(&mut std::io::stdout())
                         .map_err(|e| CliError::unknown(format!("failed to render man: {e}")))?;
                 }
-                Commands::Capabilities { .. } => {
-                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                Commands::Capabilities { json } => {
+                    let structured_format = resolve_subcommand_structured_format(cli, json);
                     run_capabilities(structured_format)?;
                 }
-                Commands::ApiVersion { .. } => {
-                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                Commands::ApiVersion { json } => {
+                    let structured_format = resolve_subcommand_structured_format(cli, json);
                     run_api_version(structured_format)?;
                 }
                 Commands::State {
                     data_dir,
+                    json,
                     robot_meta,
                     stale_threshold,
                 } => {
-                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    let structured_format = resolve_subcommand_structured_format(cli, json);
                     run_status(
                         &data_dir,
                         None,
@@ -3585,8 +3660,8 @@ async fn execute_cli(
                         robot_meta,
                     )?;
                 }
-                Commands::Introspect { .. } => {
-                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                Commands::Introspect { json } => {
+                    let structured_format = resolve_subcommand_structured_format(cli, json);
                     run_introspect(structured_format)?;
                 }
                 Commands::Health {
@@ -3606,11 +3681,12 @@ async fn execute_cli(
                 }
                 Commands::Doctor {
                     data_dir,
+                    json,
                     fix,
                     verbose,
                     force_rebuild,
                 } => {
-                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    let structured_format = resolve_subcommand_structured_format(cli, json);
                     run_doctor(
                         &data_dir,
                         cli.db.clone(),
@@ -3625,8 +3701,9 @@ async fn execute_cli(
                     source,
                     data_dir,
                     limit,
+                    json,
                 } => {
-                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    let structured_format = resolve_subcommand_structured_format(cli, json);
                     run_context(
                         &path,
                         source.as_deref(),
@@ -3715,8 +3792,9 @@ async fn execute_cli(
                     source,
                     line,
                     context,
+                    json,
                 } => {
-                    let structured_format = cli.robot_format.or_else(robot_format_from_env);
+                    let structured_format = resolve_subcommand_structured_format(cli, json);
                     run_expand(
                         &path,
                         cli.db.clone(),
@@ -3919,7 +3997,7 @@ fn resolve_analytics_workspace_ids(
     conn: &frankensqlite::Connection,
     workspace_paths: &[String],
 ) -> CliResult<Vec<i64>> {
-    use frankensqlite::compat::{ConnectionExt, ParamValue, RowExt};
+    use frankensqlite::compat::{ParamValue, RowExt};
 
     let requested_paths: Vec<String> = workspace_paths
         .iter()
@@ -3994,8 +4072,6 @@ fn open_franken_cli_read_db(
     reason: &str,
     busy_timeout: Duration,
 ) -> CliResult<frankensqlite::Connection> {
-    use frankensqlite::compat::{OpenFlags, open_with_flags};
-
     if !path.exists() {
         return Err(CliError {
             code: 3,
@@ -4009,20 +4085,41 @@ fn open_franken_cli_read_db(
         });
     }
 
-    let conn = open_with_flags(
-        path.to_string_lossy().as_ref(),
-        OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(|e| CliError {
-        code: 9,
-        kind: "db-open",
-        message: format!(
-            "Failed to open {reason} database at {}: {e}",
-            path.display()
-        ),
-        hint: None,
-        retryable: false,
-    })?;
+    let conn = match crate::storage::sqlite::open_franken_readonly_storage_with_timeout(
+        &path,
+        busy_timeout,
+    ) {
+        Ok(storage) => storage.into_raw(),
+        Err(err) => {
+            let readonly_retryable = crate::storage::sqlite::retryable_franken_anyhow(&err);
+            match crate::storage::sqlite::open_franken_raw_readonly_connection_with_timeout(
+                &path,
+                busy_timeout,
+            ) {
+                Ok(conn) => conn,
+                Err(raw_readonly_err) => {
+                    let raw_readonly_retryable =
+                        crate::storage::sqlite::retryable_franken_anyhow(&raw_readonly_err);
+                    crate::storage::sqlite::open_franken_raw_connection_with_timeout(
+                        &path,
+                        busy_timeout,
+                    )
+                    .map_err(|raw_err| CliError {
+                        code: 9,
+                        kind: "db-open",
+                        message: format!(
+                            "Failed to open {reason} database at {}: readonly storage open failed ({err}); raw readonly open failed ({raw_readonly_err}); raw open failed ({raw_err})",
+                            path.display()
+                        ),
+                        hint: None,
+                        retryable: readonly_retryable
+                            || raw_readonly_retryable
+                            || crate::storage::sqlite::retryable_franken_anyhow(&raw_err),
+                    })?
+                }
+            }
+        }
+    };
 
     let timeout_ms = busy_timeout.as_millis().clamp(1, u128::from(u32::MAX));
     let _ = conn.execute(&format!("PRAGMA busy_timeout = {timeout_ms};"));
@@ -4032,20 +4129,121 @@ fn open_franken_cli_read_db(
 }
 
 fn close_franken_cli_read_db(
-    conn: frankensqlite::Connection,
+    mut conn: frankensqlite::Connection,
     path: &Path,
     reason: &str,
 ) -> CliResult<()> {
-    conn.close().map_err(|e| CliError {
-        code: 9,
-        kind: "db-close",
-        message: format!(
-            "Failed to close {reason} database at {}: {e}",
-            path.display()
-        ),
-        hint: None,
-        retryable: true,
-    })
+    if let Err(err) = conn.close_in_place() {
+        warn!(
+            error = %err,
+            db_path = %path.display(),
+            reason,
+            "close_in_place failed for CLI read probe; falling back to best-effort close"
+        );
+        conn.close_best_effort_in_place();
+    }
+    Ok(())
+}
+
+fn franken_query_row_map_retry<T, F>(
+    conn: &frankensqlite::Connection,
+    sql: &str,
+    params: &[frankensqlite::compat::ParamValue],
+    map: F,
+) -> Result<T, frankensqlite::FrankenError>
+where
+    F: Copy + Fn(&frankensqlite::Row) -> Result<T, frankensqlite::FrankenError>,
+{
+    let deadline = std::time::Instant::now() + CLI_DB_QUERY_RETRY_TIMEOUT;
+    let mut backoff = Duration::from_millis(4);
+    loop {
+        match conn.query_row_map(sql, params, |row| map(row)) {
+            Ok(value) => return Ok(value),
+            Err(err) if crate::storage::sqlite::retryable_franken_error(&err) => {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    return Err(err);
+                }
+                let remaining = deadline.saturating_duration_since(now);
+                std::thread::sleep(backoff.min(remaining));
+                backoff = backoff.saturating_mul(2).min(Duration::from_millis(64));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn franken_query_map_collect_retry<T, F>(
+    conn: &frankensqlite::Connection,
+    sql: &str,
+    params: &[frankensqlite::compat::ParamValue],
+    map: F,
+) -> Result<Vec<T>, frankensqlite::FrankenError>
+where
+    F: Copy + Fn(&frankensqlite::Row) -> Result<T, frankensqlite::FrankenError>,
+{
+    let deadline = std::time::Instant::now() + CLI_DB_QUERY_RETRY_TIMEOUT;
+    let mut backoff = Duration::from_millis(4);
+    loop {
+        match conn.query_map_collect(sql, params, |row| map(row)) {
+            Ok(values) => return Ok(values),
+            Err(err) if crate::storage::sqlite::retryable_franken_error(&err) => {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    return Err(err);
+                }
+                let remaining = deadline.saturating_duration_since(now);
+                std::thread::sleep(backoff.min(remaining));
+                backoff = backoff.saturating_mul(2).min(Duration::from_millis(64));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn fresh_franken_count_retry(
+    path: &Path,
+    reason: &str,
+    busy_timeout: Duration,
+    sql: &str,
+    params: &[frankensqlite::compat::ParamValue],
+) -> Option<i64> {
+    let deadline = std::time::Instant::now() + CLI_DB_QUERY_RETRY_TIMEOUT;
+    let mut backoff = Duration::from_millis(4);
+    loop {
+        let conn = match open_franken_cli_read_db(path.to_path_buf(), reason, busy_timeout) {
+            Ok(conn) => conn,
+            Err(err) => {
+                if !err.retryable {
+                    return None;
+                }
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    return None;
+                }
+                let remaining = deadline.saturating_duration_since(now);
+                std::thread::sleep(backoff.min(remaining));
+                backoff = backoff.saturating_mul(2).min(Duration::from_millis(64));
+                continue;
+            }
+        };
+
+        let result = conn.query_row_map(sql, params, |row| row.get_typed::<i64>(0));
+        let _ = close_franken_cli_read_db(conn, path, reason);
+        match result {
+            Ok(value) => return Some(value),
+            Err(err) if crate::storage::sqlite::retryable_franken_error(&err) => {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    return None;
+                }
+                let remaining = deadline.saturating_duration_since(now);
+                std::thread::sleep(backoff.min(remaining));
+                backoff = backoff.saturating_mul(2).min(Duration::from_millis(64));
+            }
+            Err(_) => return None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4683,8 +4881,10 @@ async fn import_chatgpt_export(
 }
 
 /// Compute lightweight state snapshot (index/db freshness) for robot meta and state command reuse
-const STATE_DB_OPEN_TIMEOUT: Duration = Duration::from_secs(2);
+const STATE_DB_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 const STATUS_COUNT_SCAN_MAX_DB_BYTES: u64 = 256 * 1024 * 1024;
+const CLI_DB_QUERY_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
+const CLI_DIAG_DB_OPEN_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Default)]
 struct StateDbSnapshot {
@@ -4693,6 +4893,7 @@ struct StateDbSnapshot {
     last_indexed_at: Option<i64>,
     opened: bool,
     open_error: Option<String>,
+    open_retryable: bool,
     counts_skipped: bool,
 }
 
@@ -4715,33 +4916,56 @@ fn probe_state_db(
         Ok(conn) => conn,
         Err(err) => {
             snapshot.open_error = Some(err.message);
+            snapshot.open_retryable = err.retryable;
             return snapshot;
         }
     };
 
-    use frankensqlite::compat::{ConnectionExt, RowExt};
+    use frankensqlite::compat::RowExt;
     use frankensqlite::params;
 
     snapshot.opened = true;
-    snapshot.last_indexed_at = conn
-        .query_row_map(
-            "SELECT value FROM meta WHERE key = 'last_indexed_at'",
-            params![],
-            |r| r.get_typed::<String>(0),
-        )
-        .ok()
-        .and_then(|s| s.parse::<i64>().ok());
+    snapshot.last_indexed_at = franken_query_row_map_retry(
+        &conn,
+        "SELECT value FROM meta WHERE key = 'last_indexed_at'",
+        params![],
+        |r| r.get_typed::<String>(0),
+    )
+    .ok()
+    .and_then(|s| s.parse::<i64>().ok());
     if include_counts {
-        snapshot.conversation_count = conn
-            .query_row_map("SELECT COUNT(*) FROM conversations", params![], |r| {
+        snapshot.conversation_count = franken_query_row_map_retry(
+            &conn,
+            "SELECT COUNT(*) FROM conversations",
+            params![],
+            |r| r.get_typed(0),
+        )
+        .unwrap_or(0);
+        snapshot.message_count =
+            franken_query_row_map_retry(&conn, "SELECT COUNT(*) FROM messages", params![], |r| {
                 r.get_typed(0)
             })
             .unwrap_or(0);
-        snapshot.message_count = conn
-            .query_row_map("SELECT COUNT(*) FROM messages", params![], |r| {
-                r.get_typed(0)
-            })
+        if snapshot.conversation_count == 0 {
+            snapshot.conversation_count = fresh_franken_count_retry(
+                db_path,
+                reason,
+                timeout,
+                "SELECT COUNT(*) FROM conversations",
+                params![],
+            )
             .unwrap_or(0);
+        }
+        if snapshot.message_count == 0 {
+            snapshot.message_count = fresh_franken_count_retry(
+                db_path,
+                reason,
+                timeout,
+                "SELECT COUNT(*) FROM messages",
+                params![],
+            )
+            .unwrap_or(0);
+        }
     }
 
     if let Err(err) = close_franken_cli_read_db(conn, db_path, reason) {
@@ -4922,6 +5146,7 @@ fn state_meta_json(
     let mut last_indexed_at = db_snapshot.last_indexed_at;
     let db_opened = db_snapshot.opened;
     let db_open_error = db_snapshot.open_error;
+    let db_open_retryable = db_snapshot.open_retryable;
     let counts_skipped = db_snapshot.counts_skipped;
 
     let index_path = crate::search::tantivy::index_dir(data_dir)
@@ -5054,6 +5279,7 @@ fn state_meta_json(
             "conversations": state_db_count_json(conversation_count, counts_skipped),
             "messages": state_db_count_json(message_count, counts_skipped),
             "open_error": db_open_error,
+            "open_retryable": db_open_retryable,
             "counts_skipped": counts_skipped
         },
         "pending": {
@@ -5129,6 +5355,81 @@ fn state_db_count_json(count: i64, counts_skipped: bool) -> serde_json::Value {
     } else {
         serde_json::Value::from(count)
     }
+}
+
+fn refresh_state_database_counts_if_needed(
+    state: &mut serde_json::Value,
+    db_path: &Path,
+    reason: &str,
+) {
+    let current_opened = state
+        .get("database")
+        .and_then(|db| db.get("opened"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let current_counts_skipped = state
+        .get("database")
+        .and_then(|db| db.get("counts_skipped"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let current_conversations = state
+        .get("database")
+        .and_then(|db| db.get("conversations"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let current_messages = state
+        .get("database")
+        .and_then(|db| db.get("messages"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+
+    let needs_refresh = current_counts_skipped
+        || !current_opened
+        || current_conversations <= 0
+        || current_messages <= 0;
+    if !needs_refresh || !db_path.exists() {
+        return;
+    }
+
+    let refreshed = probe_state_db(db_path, reason, Duration::from_secs(30), true);
+    let improved = (!current_opened && refreshed.opened)
+        || (current_counts_skipped && !refreshed.counts_skipped)
+        || (current_conversations <= 0 && refreshed.conversation_count > 0)
+        || (current_messages <= 0 && refreshed.message_count > 0);
+    if !improved {
+        return;
+    }
+
+    let Some(database) = state.get_mut("database").and_then(|db| db.as_object_mut()) else {
+        return;
+    };
+    database.insert(
+        "opened".to_string(),
+        serde_json::Value::Bool(refreshed.opened),
+    );
+    database.insert(
+        "conversations".to_string(),
+        state_db_count_json(refreshed.conversation_count, refreshed.counts_skipped),
+    );
+    database.insert(
+        "messages".to_string(),
+        state_db_count_json(refreshed.message_count, refreshed.counts_skipped),
+    );
+    database.insert(
+        "open_error".to_string(),
+        refreshed
+            .open_error
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    database.insert(
+        "open_retryable".to_string(),
+        serde_json::Value::Bool(refreshed.open_retryable),
+    );
+    database.insert(
+        "counts_skipped".to_string(),
+        serde_json::Value::Bool(refreshed.counts_skipped),
+    );
 }
 
 fn warn_tui_terminal_profile(stderr_is_tty: bool) {
@@ -5322,30 +5623,6 @@ fn resolve_progress(mode: ProgressMode, stdout_is_tty: bool) -> ProgressResolved
     }
 }
 
-/// Convert [`LazyDbError`] to the CLI-appropriate [`CliError`].
-fn lazy_db_to_cli_error(e: crate::storage::sqlite::LazyDbError) -> CliError {
-    use crate::storage::sqlite::LazyDbError;
-    match e {
-        LazyDbError::NotFound(path) => CliError {
-            code: 3,
-            kind: "missing-db",
-            message: format!(
-                "Database not found at {}. Run 'cass index --full' first.",
-                path.display()
-            ),
-            hint: Some("Run 'cass index --full' to create the database.".into()),
-            retryable: true,
-        },
-        LazyDbError::FrankenOpenFailed { path, source } => CliError {
-            code: 9,
-            kind: "db-open",
-            message: format!("Failed to open database at {}: {source}", path.display()),
-            hint: None,
-            retryable: false,
-        },
-    }
-}
-
 fn describe_command(cli: &Cli) -> String {
     match &cli.command {
         Some(Commands::Tui { .. }) => "tui".to_string(),
@@ -5418,33 +5695,51 @@ fn is_robot_mode(command: &Commands, cli: &Cli) -> bool {
         Commands::ExportHtml { json, .. } => {
             resolve_subcommand_structured_format(cli, *json).is_some()
         }
-        Commands::Stats { .. }
-        | Commands::Diag { .. }
-        | Commands::Status { .. }
-        | Commands::Doctor { .. }
-        | Commands::ApiVersion { .. }
-        | Commands::State { .. }
-        | Commands::View { .. }
-        | Commands::Capabilities { .. }
-        | Commands::Introspect { .. }
-        | Commands::Context { .. }
-        | Commands::Expand { .. } => cli.robot_format.is_some() || env_robot_mode,
+        Commands::Stats { json, .. }
+        | Commands::Diag { json, .. }
+        | Commands::Status { json, .. }
+        | Commands::ApiVersion { json }
+        | Commands::State { json, .. }
+        | Commands::View { json, .. }
+        | Commands::Capabilities { json }
+        | Commands::Introspect { json }
+        | Commands::Context { json, .. }
+        | Commands::Expand { json, .. } => {
+            resolve_subcommand_structured_format(cli, *json).is_some()
+        }
+        Commands::Doctor { json, .. } => resolve_subcommand_structured_format(cli, *json).is_some(),
         Commands::Timeline { json, .. } => {
             resolve_subcommand_structured_format(cli, *json).is_some()
         }
-        Commands::Sources(
-            SourcesCommand::List { .. }
-            | SourcesCommand::Doctor { .. }
-            | SourcesCommand::Sync { .. }
-            | SourcesCommand::Discover { .. },
-        ) => cli.robot_format.is_some() || env_robot_mode,
+        Commands::Sources(SourcesCommand::List { json, .. }) => {
+            resolve_subcommand_structured_format(cli, *json).is_some()
+        }
+        Commands::Sources(SourcesCommand::Doctor { json, .. }) => {
+            resolve_subcommand_structured_format(cli, *json).is_some()
+        }
+        Commands::Sources(SourcesCommand::Sync { json, .. }) => {
+            resolve_subcommand_structured_format(cli, *json).is_some()
+        }
+        Commands::Sources(SourcesCommand::Discover { json, .. }) => {
+            resolve_subcommand_structured_format(cli, *json).is_some()
+        }
         Commands::Sources(SourcesCommand::Setup { json, .. }) => {
+            resolve_subcommand_structured_format(cli, *json).is_some()
+        }
+        Commands::Models(ModelsCommand::Status { json }) => {
+            resolve_subcommand_structured_format(cli, *json).is_some()
+        }
+        Commands::Models(ModelsCommand::Verify { json, .. }) => {
+            resolve_subcommand_structured_format(cli, *json).is_some()
+        }
+        Commands::Models(ModelsCommand::CheckUpdate { json, .. }) => {
             resolve_subcommand_structured_format(cli, *json).is_some()
         }
         Commands::Sources(_) => false,
         Commands::Import(cmd) => match cmd {
             ImportCommand::Chatgpt { .. } => cli.robot_format.is_some() || env_robot_mode,
         },
+        Commands::Models(_) => cli.robot_format.is_some() || env_robot_mode,
         Commands::Analytics(cmd) => analytics_requests_structured_output(cmd, cli),
         _ => false,
     }
@@ -8542,14 +8837,11 @@ fn run_stats(
 ) -> CliResult<()> {
     use crate::sources::provenance::SourceFilter;
 
-    use frankensqlite::compat::{ConnectionExt, ParamValue, RowExt};
+    use frankensqlite::compat::{ParamValue, RowExt};
 
-    let lazy =
-        crate::storage::sqlite::LazyFrankenDb::from_overrides(data_dir_override, db_override);
-    // Fix #128: Use timeout to prevent hanging on degraded databases.
-    let conn = lazy
-        .get_with_timeout("stats", Duration::from_secs(30))
-        .map_err(lazy_db_to_cli_error)?;
+    let data_dir = data_dir_override.clone().unwrap_or_else(default_data_dir);
+    let db_path = db_override.unwrap_or_else(|| data_dir.join("agent_search.db"));
+    let conn = open_franken_cli_read_db(db_path.clone(), "stats", Duration::from_secs(30))?;
 
     // Parse source filter (P3.7)
     let source_filter = source.map(SourceFilter::parse);
@@ -8568,30 +8860,53 @@ fn run_stats(
 
     // Get counts and statistics with source filter
     let params = make_params(&source_param);
-    let conversation_count: i64 = conn
-        .query_row_map(
-            &format!("SELECT COUNT(*) FROM conversations c{source_where}"),
-            &params,
-            |r| r.get_typed(0),
-        )
-        .unwrap_or(0);
+    let conversation_sql = format!("SELECT COUNT(*) FROM conversations c{source_where}");
+    let message_sql = format!(
+        "SELECT COUNT(*) FROM messages m JOIN conversations c ON m.conversation_id = c.id{source_where}"
+    );
 
-    let message_count: i64 = conn
-        .query_row_map(
-            &format!(
-                "SELECT COUNT(*) FROM messages m JOIN conversations c ON m.conversation_id = c.id{source_where}"
-            ),
+    let mut conversation_count: i64 = franken_query_row_map_retry(
+        &conn,
+        &conversation_sql,
+        &params,
+        |r| r.get_typed(0),
+    )
+    .unwrap_or(0);
+
+    let mut message_count: i64 = franken_query_row_map_retry(
+        &conn,
+        &message_sql,
+        &params,
+        |r| r.get_typed(0),
+    )
+    .unwrap_or(0);
+    if conversation_count == 0 {
+        conversation_count = fresh_franken_count_retry(
+            &db_path,
+            "stats",
+            Duration::from_secs(30),
+            &conversation_sql,
             &params,
-            |r| r.get_typed(0),
         )
         .unwrap_or(0);
+    }
+    if message_count == 0 {
+        message_count = fresh_franken_count_retry(
+            &db_path,
+            "stats",
+            Duration::from_secs(30),
+            &message_sql,
+            &params,
+        )
+        .unwrap_or(0);
+    }
 
     // Get per-agent breakdown with source filter
     let agent_sql = format!(
         "SELECT a.slug, COUNT(*) FROM conversations c JOIN agents a ON c.agent_id = a.id{source_where} GROUP BY a.slug ORDER BY COUNT(*) DESC"
     );
-    let agent_rows: Vec<(String, i64)> = conn
-        .query_map_collect(&agent_sql, &params, |r| {
+    let agent_rows: Vec<(String, i64)> =
+        franken_query_map_collect_retry(&conn, &agent_sql, &params, |r| {
             Ok((r.get_typed::<String>(0)?, r.get_typed::<i64>(1)?))
         })
         .map_err(|e| CliError::unknown(format!("query: {e}")))?;
@@ -8600,11 +8915,13 @@ fn run_stats(
     let ws_sql = format!(
         "SELECT w.path, COUNT(*) FROM conversations c JOIN workspaces w ON c.workspace_id = w.id{source_where} GROUP BY w.path ORDER BY COUNT(*) DESC LIMIT 10"
     );
-    let ws_rows: Vec<(String, i64)> = conn
-        .query_map_collect(&ws_sql, &params, |r| {
-            Ok((r.get_typed::<String>(0)?, r.get_typed::<i64>(1)?))
-        })
-        .map_err(|e| CliError::unknown(format!("query: {e}")))?;
+    let ws_rows: Vec<(String, i64)> = franken_query_map_collect_retry(
+        &conn,
+        &ws_sql,
+        &params,
+        |r| Ok((r.get_typed::<String>(0)?, r.get_typed::<i64>(1)?)),
+    )
+    .map_err(|e| CliError::unknown(format!("query: {e}")))?;
 
     // Get date range with source filter.
     // Note: source_where already includes a leading " WHERE ...", so when it is present we must
@@ -8617,8 +8934,8 @@ fn run_stats(
             "SELECT MIN(started_at), MAX(started_at) FROM conversations c{source_where} AND started_at IS NOT NULL"
         )
     };
-    let (oldest, newest): (Option<i64>, Option<i64>) = conn
-        .query_row_map(&date_sql, &params, |r| {
+    let (oldest, newest): (Option<i64>, Option<i64>) =
+        franken_query_row_map_retry(&conn, &date_sql, &params, |r| {
             Ok((r.get_typed(0)?, r.get_typed(1)?))
         })
         .unwrap_or((None, None));
@@ -8635,7 +8952,7 @@ fn run_stats(
              GROUP BY {normalized_source_sql}
              ORDER BY convs DESC"
         );
-        conn.query_map_collect(&source_sql, &params, |r| {
+        franken_query_map_collect_retry(&conn, &source_sql, &params, |r| {
             Ok((
                 r.get_typed::<String>(0)?,
                 r.get_typed::<i64>(1)?,
@@ -8665,7 +8982,7 @@ fn run_stats(
                 "oldest": oldest.and_then(|ts| chrono::DateTime::from_timestamp_millis(ts).map(|d| d.to_rfc3339())),
                 "newest": newest.and_then(|ts| chrono::DateTime::from_timestamp_millis(ts).map(|d| d.to_rfc3339())),
             },
-            "db_path": lazy.path().display().to_string(),
+            "db_path": db_path.display().to_string(),
         });
 
         // Add source filter info if specified (P3.7)
@@ -8700,7 +9017,7 @@ fn run_stats(
     };
     println!("{title}");
     println!("{}", "=".repeat(title.len()));
-    println!("Database: {}", lazy.path().display());
+    println!("Database: {}", db_path.display());
     println!();
 
     // Show by_source breakdown if requested (P3.7)
@@ -8752,8 +9069,7 @@ fn run_diag(
     output_format: Option<RobotFormat>,
     verbose: bool,
 ) -> CliResult<()> {
-    use frankensqlite::Connection;
-    use frankensqlite::compat::{ConnectionExt, RowExt};
+    use frankensqlite::compat::RowExt;
     use frankensqlite::params;
     use std::fs;
 
@@ -8767,18 +9083,44 @@ fn run_diag(
     // Check database existence and get stats
     let (db_exists, db_size, conversation_count, message_count) = if db_path.exists() {
         let size = fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
-        let (convs, msgs) = match Connection::open(db_path.to_string_lossy().into_owned()) {
+        let (convs, msgs) = match open_franken_cli_read_db(
+            db_path.clone(),
+            "diagnostics",
+            CLI_DIAG_DB_OPEN_TIMEOUT,
+        ) {
             Ok(conn) => {
-                let convs: i64 = conn
-                    .query_row_map("SELECT COUNT(*) FROM conversations", params![], |r| {
+                let mut convs: i64 = franken_query_row_map_retry(
+                    &conn,
+                    "SELECT COUNT(*) FROM conversations",
+                    params![],
+                    |r| r.get_typed(0),
+                )
+                .unwrap_or(0);
+                let mut msgs: i64 =
+                    franken_query_row_map_retry(&conn, "SELECT COUNT(*) FROM messages", params![], |r| {
                         r.get_typed(0)
                     })
                     .unwrap_or(0);
-                let msgs: i64 = conn
-                    .query_row_map("SELECT COUNT(*) FROM messages", params![], |r| {
-                        r.get_typed(0)
-                    })
+                if convs == 0 {
+                    convs = fresh_franken_count_retry(
+                        &db_path,
+                        "diagnostics",
+                        CLI_DIAG_DB_OPEN_TIMEOUT,
+                        "SELECT COUNT(*) FROM conversations",
+                        params![],
+                    )
                     .unwrap_or(0);
+                }
+                if msgs == 0 {
+                    msgs = fresh_franken_count_retry(
+                        &db_path,
+                        "diagnostics",
+                        CLI_DIAG_DB_OPEN_TIMEOUT,
+                        "SELECT COUNT(*) FROM messages",
+                        params![],
+                    )
+                    .unwrap_or(0);
+                }
                 (convs, msgs)
             }
             Err(e) => {
@@ -8808,6 +9150,27 @@ fn run_diag(
         .map(|(name, path)| {
             let exists = path.exists();
             (name, path, exists)
+        })
+        .collect();
+    let mut connector_paths_by_name: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    for (name, path, exists) in &agent_paths {
+        if *exists {
+            connector_paths_by_name
+                .entry(public_connector_slug(name).to_string())
+                .or_default()
+                .push(path.clone());
+        }
+    }
+    let connector_rows: Vec<(String, String, bool)> = capabilities_connector_names()
+        .into_iter()
+        .map(|name| {
+            let path = connector_paths_by_name
+                .get(&name)
+                .and_then(|paths| paths.first())
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "(not detected)".to_string());
+            let found = path != "(not detected)";
+            (name, path, found)
         })
         .collect();
 
@@ -8841,11 +9204,11 @@ fn run_diag(
                 "exists": index_exists,
                 "size_bytes": index_size,
             },
-            "connectors": agent_paths.iter().map(|(name, path, exists)| {
+            "connectors": connector_rows.iter().map(|(name, path, found)| {
                 serde_json::json!({
                     "name": name,
-                    "path": path.display().to_string(),
-                    "found": exists,
+                    "path": path,
+                    "found": found,
                 })
             }).collect::<Vec<_>>(),
         });
@@ -8888,9 +9251,9 @@ fn run_diag(
     }
     println!();
     println!("Connector Search Paths:");
-    for (name, path, exists) in &agent_paths {
-        let status = if *exists { "✓" } else { "✗" };
-        println!("  {} {}: {}", status, name, path.display());
+    for (name, path, found) in &connector_rows {
+        let status = if *found { "✓" } else { "✗" };
+        println!("  {} {}: {}", status, name, path);
     }
 
     Ok(())
@@ -9039,7 +9402,8 @@ fn run_status(
 ) -> CliResult<()> {
     let data_dir = data_dir_override.clone().unwrap_or_else(default_data_dir);
     let db_path = db_override.unwrap_or_else(|| data_dir.join("agent_search.db"));
-    let state = state_meta_json(&data_dir, &db_path, stale_threshold, true);
+    let mut state = state_meta_json(&data_dir, &db_path, stale_threshold, true);
+    refresh_state_database_counts_if_needed(&mut state, &db_path, "status");
 
     let index_exists = state
         .get("index")
@@ -9089,6 +9453,11 @@ fn run_status(
         .and_then(|d| d.get("open_error"))
         .and_then(|v| v.as_str())
         .map(str::to_string);
+    let db_open_retryable = state
+        .get("database")
+        .and_then(|d| d.get("open_retryable"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let counts_skipped = state
         .get("database")
         .and_then(|d| d.get("counts_skipped"))
@@ -9114,12 +9483,13 @@ fn run_status(
         .and_then(|s| s.get("hint"))
         .and_then(|v| v.as_str());
 
-    let healthy = db_exists && db_opened && index_exists && index_fresh && !rebuild_active;
+    let db_available = db_opened || (db_exists && db_open_retryable);
+    let healthy = db_exists && db_available && index_exists && index_fresh && !rebuild_active;
     let status = if rebuild_active {
         "rebuilding"
     } else if healthy {
         "healthy"
-    } else if db_exists && !db_opened {
+    } else if db_exists && !db_available {
         "degraded"
     } else {
         "unhealthy"
@@ -9129,7 +9499,7 @@ fn run_status(
         Some("Index rebuild is already in progress".to_string())
     } else if !db_exists {
         Some("Run 'cass index --full' to create the database".to_string())
-    } else if !db_opened {
+    } else if !db_available {
         Some("Run 'cass doctor --fix' or 'cass index --full' to recover the database".to_string())
     } else if !index_exists {
         Some("Run 'cass index --full' to rebuild the search index".to_string())
@@ -9166,6 +9536,7 @@ fn run_status(
                 "messages": state.get("database").and_then(|d| d.get("messages")).cloned().unwrap_or(serde_json::Value::Null),
                 "path": db_path.display().to_string(),
                 "open_error": db_open_error,
+                "open_retryable": db_open_retryable,
                 "counts_skipped": counts_skipped,
             }),
             "pending": state.get("pending").cloned().unwrap_or(serde_json::Value::Null),
@@ -9245,6 +9616,11 @@ fn run_status(
                 {
                     println!("  Messages: {messages}");
                 }
+            }
+        } else if db_open_retryable {
+            println!("  Temporarily busy during probe");
+            if let Some(err) = &db_open_error {
+                println!("  Probe error: {err}");
             }
         } else {
             println!("  Exists, but could not be opened");
@@ -12342,12 +12718,30 @@ fn run_api_version(output_format: Option<RobotFormat>) -> CliResult<()> {
 /// Build command schemas for all CLI commands
 fn build_command_schemas() -> Vec<CommandSchema> {
     let root = Cli::command();
+    let global_robot_format = root
+        .get_arguments()
+        .find(|arg| arg.get_id().as_str() == "robot_format");
     root.get_subcommands()
-        .map(command_schema_from_clap)
+        .map(|cmd| command_schema_from_clap(cmd, global_robot_format))
         .collect()
 }
 
-fn command_schema_from_clap(cmd: &Command) -> CommandSchema {
+fn command_schema_from_clap(cmd: &Command, global_robot_format: Option<&Arg>) -> CommandSchema {
+    let mut arguments: Vec<ArgumentSchema> = cmd
+        .get_arguments()
+        .filter(|arg| !should_skip_arg(arg))
+        .map(argument_schema_from_clap)
+        .collect();
+    let has_json_output = cmd
+        .get_arguments()
+        .any(|arg| arg.get_id().as_str() == "json");
+    if has_json_output
+        && let Some(robot_format) = global_robot_format
+        && !arguments.iter().any(|arg| arg.name == "robot-format")
+    {
+        arguments.push(argument_schema_from_clap(robot_format));
+    }
+
     CommandSchema {
         name: cmd.get_name().to_string(),
         description: cmd
@@ -12355,14 +12749,8 @@ fn command_schema_from_clap(cmd: &Command) -> CommandSchema {
             .or_else(|| cmd.get_long_about())
             .map(std::string::ToString::to_string)
             .unwrap_or_default(),
-        arguments: cmd
-            .get_arguments()
-            .filter(|arg| !should_skip_arg(arg))
-            .map(argument_schema_from_clap)
-            .collect(),
-        has_json_output: cmd
-            .get_arguments()
-            .any(|arg| arg.get_id().as_str() == "json"),
+        arguments,
+        has_json_output,
     }
 }
 
@@ -14502,6 +14890,24 @@ fn run_export_html(
     }
     let normalized_source_id = canonical_followup_source_id(source_id);
     let source_id = normalized_source_id.as_deref();
+    let structured_error_output = output_format.or_else(robot_format_from_env).is_some();
+    let emit_structured_error = |err: &CliError| {
+        if structured_error_output {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "success": false,
+                    "error": {
+                        "code": err.code,
+                        "kind": err.kind,
+                        "message": err.message,
+                        "hint": err.hint,
+                        "retryable": err.retryable
+                    }
+                })
+            );
+        }
+    };
 
     let db_path = db_override.unwrap_or_else(default_db_path);
     let indexed_view =
@@ -14647,6 +15053,7 @@ fn run_export_html(
                         .map(|p| p.display().to_string());
                     raw_messages = conversation_view_to_raw_messages(view);
                 } else {
+                    emit_structured_error(&err);
                     return Err(err);
                 }
             }
@@ -14693,23 +15100,28 @@ fn run_export_html(
                     agent_name = Some("opencode".to_string());
                 }
                 Err(e) => {
-                    return Err(CliError {
+                    let err = CliError {
                         code: 9,
                         kind: "opencode_parse",
                         message: format!("Failed to parse OpenCode session: {e}"),
                         hint: Some("Ensure the session file is valid".into()),
                         retryable: false,
-                    });
+                    };
+                    emit_structured_error(&err);
+                    return Err(err);
                 }
             }
         } else if prefers_direct_jsonl_file(session_path, source_id) {
             let (parsed_messages, parsed_start, parsed_end) =
-                parse_followup_jsonl_messages(session_path)?;
+                parse_followup_jsonl_messages(session_path).map_err(|err| {
+                    emit_structured_error(&err);
+                    err
+                })?;
             raw_messages = parsed_messages;
             session_start = parsed_start;
             session_end = parsed_end;
         } else {
-            return Err(CliError {
+            let err = CliError {
                 code: 9,
                 kind: "indexed-session-required",
                 message: format!(
@@ -14721,18 +15133,22 @@ fn run_export_html(
                         .to_string(),
                 ),
                 retryable: false,
-            });
+            };
+            emit_structured_error(&err);
+            return Err(err);
         }
     }
 
     if raw_messages.is_empty() {
-        return Err(CliError {
+        let err = CliError {
             code: 9,
             kind: "empty_session",
             message: format!("No messages found in: {}", session_path.display()),
             hint: None,
             retryable: false,
-        });
+        };
+        emit_structured_error(&err);
+        return Err(err);
     }
 
     // Find title from first user message
@@ -14957,13 +15373,15 @@ fn run_export_html(
     }
 
     if filename.is_some() && !is_valid_filename(&final_filename) {
-        return Err(CliError {
+        let err = CliError {
             code: 4,
             kind: "invalid_filename",
             message: format!("Invalid output filename: {final_filename}"),
             hint: Some("Avoid path separators and reserved characters".to_string()),
             retryable: false,
-        });
+        };
+        emit_structured_error(&err);
+        return Err(err);
     }
 
     let output_path = output_directory.join(final_filename);
@@ -15038,32 +15456,44 @@ fn run_export_html(
 
     let html = exporter
         .export_messages(title, &message_groups, metadata, final_password.as_deref())
-        .map_err(|e| CliError {
-            code: 5,
-            kind: "export_failed",
-            message: format!("Failed to export HTML: {e}"),
-            hint: None,
-            retryable: false,
+        .map_err(|e| {
+            let err = CliError {
+                code: 5,
+                kind: "export_failed",
+                message: format!("Failed to export HTML: {e}"),
+                hint: None,
+                retryable: false,
+            };
+            emit_structured_error(&err);
+            err
         })?;
 
     // --- Write file ---
     std::fs::create_dir_all(output_path.parent().unwrap_or(Path::new("."))).ok();
-    let mut file = File::create(&output_path).map_err(|e| CliError {
-        code: 4,
-        kind: "output_not_writable",
-        message: format!("Could not create output file: {e}"),
-        hint: Some(format!(
-            "Check permissions for {}",
-            output_directory.display()
-        )),
-        retryable: false,
+    let mut file = File::create(&output_path).map_err(|e| {
+        let err = CliError {
+            code: 4,
+            kind: "output_not_writable",
+            message: format!("Could not create output file: {e}"),
+            hint: Some(format!(
+                "Check permissions for {}",
+                output_directory.display()
+            )),
+            retryable: false,
+        };
+        emit_structured_error(&err);
+        err
     })?;
-    file.write_all(html.as_bytes()).map_err(|e| CliError {
-        code: 4,
-        kind: "write_failed",
-        message: format!("Failed to write file: {e}"),
-        hint: None,
-        retryable: false,
+    file.write_all(html.as_bytes()).map_err(|e| {
+        let err = CliError {
+            code: 4,
+            kind: "write_failed",
+            message: format!("Failed to write file: {e}"),
+            hint: None,
+            retryable: false,
+        };
+        emit_structured_error(&err);
+        err
     })?;
 
     let file_size = html.len();
@@ -19102,8 +19532,8 @@ fn run_timeline(
 /// Handle sources subcommands (P5.x)
 fn run_sources_command(cmd: SourcesCommand, cli: &Cli) -> CliResult<()> {
     match cmd {
-        SourcesCommand::List { verbose } => {
-            let structured_format = cli.robot_format.or_else(robot_format_from_env);
+        SourcesCommand::List { verbose, json } => {
+            let structured_format = resolve_subcommand_structured_format(cli, json);
             run_sources_list(verbose, structured_format)
         }
         SourcesCommand::Add {
@@ -19114,8 +19544,8 @@ fn run_sources_command(cmd: SourcesCommand, cli: &Cli) -> CliResult<()> {
             no_test,
         } => run_sources_add(&url, name, preset, paths, no_test),
         SourcesCommand::Remove { name, purge, yes } => run_sources_remove(&name, purge, yes),
-        SourcesCommand::Doctor { source } => {
-            let structured_format = cli.robot_format.or_else(robot_format_from_env);
+        SourcesCommand::Doctor { source, json } => {
+            let structured_format = resolve_subcommand_structured_format(cli, json);
             run_sources_doctor(source.as_deref(), structured_format)
         }
         SourcesCommand::Sync {
@@ -19123,16 +19553,18 @@ fn run_sources_command(cmd: SourcesCommand, cli: &Cli) -> CliResult<()> {
             no_index,
             verbose,
             dry_run,
+            json,
         } => {
-            let structured_format = cli.robot_format.or_else(robot_format_from_env);
+            let structured_format = resolve_subcommand_structured_format(cli, json);
             run_sources_sync(source, no_index, verbose, dry_run, structured_format)
         }
         SourcesCommand::Mappings(action) => run_mappings_command(action, cli),
         SourcesCommand::Discover {
             preset,
             skip_existing,
+            json,
         } => {
-            let structured_format = cli.robot_format.or_else(robot_format_from_env);
+            let structured_format = resolve_subcommand_structured_format(cli, json);
             run_sources_discover(&preset, skip_existing, structured_format)
         }
         SourcesCommand::Setup {
@@ -20529,8 +20961,8 @@ fn run_sources_setup(opts: sources::setup::SetupOptions) -> CliResult<()> {
 /// Handle models subcommands
 fn run_models_command(cmd: ModelsCommand, cli: &Cli) -> CliResult<()> {
     match cmd {
-        ModelsCommand::Status {} => {
-            let structured_format = cli.robot_format.or_else(robot_format_from_env);
+        ModelsCommand::Status { json } => {
+            let structured_format = resolve_subcommand_structured_format(cli, json);
             run_models_status(structured_format)
         }
         ModelsCommand::Install {
@@ -20546,8 +20978,12 @@ fn run_models_command(cmd: ModelsCommand, cli: &Cli) -> CliResult<()> {
             yes,
             data_dir,
         ),
-        ModelsCommand::Verify { repair, data_dir } => {
-            let structured_format = cli.robot_format.or_else(robot_format_from_env);
+        ModelsCommand::Verify {
+            repair,
+            data_dir,
+            json,
+        } => {
+            let structured_format = resolve_subcommand_structured_format(cli, json);
             run_models_verify(repair, data_dir, structured_format)
         }
         ModelsCommand::Remove {
@@ -20555,8 +20991,8 @@ fn run_models_command(cmd: ModelsCommand, cli: &Cli) -> CliResult<()> {
             yes,
             data_dir,
         } => run_models_remove(&model, yes, data_dir),
-        ModelsCommand::CheckUpdate { data_dir } => {
-            let structured_format = cli.robot_format.or_else(robot_format_from_env);
+        ModelsCommand::CheckUpdate { data_dir, json } => {
+            let structured_format = resolve_subcommand_structured_format(cli, json);
             run_models_check_update(structured_format, data_dir)
         }
     }
@@ -21358,8 +21794,8 @@ fn run_models_check_update(
 /// Handle mappings subcommands (P6.3)
 fn run_mappings_command(action: MappingsAction, cli: &Cli) -> CliResult<()> {
     match action {
-        MappingsAction::List { source } => {
-            let structured_format = cli.robot_format.or_else(robot_format_from_env);
+        MappingsAction::List { source, json } => {
+            let structured_format = resolve_subcommand_structured_format(cli, json);
             run_mappings_list(&source, structured_format)?;
         }
         MappingsAction::Add {

@@ -264,6 +264,7 @@ impl ExportEngine {
                 let mut processed = 0;
                 let mut msg_processed = 0;
                 let message_cols = table_columns(&src, "messages")?;
+                let has_snippets_table = table_exists(&src, "snippets");
                 let msg_query = build_message_export_query(&message_cols);
 
                 for (
@@ -367,19 +368,23 @@ impl ExportEngine {
                         )?;
 
                         // 5. Migrate Snippets for this message (bd-4x92)
-                        let snip_rows: Vec<SnippetExportRow> = src.query_map_collect(
-                            "SELECT file_path, start_line, end_line, language, snippet_text FROM snippets WHERE message_id = ?1",
-                            params![*source_message_id],
-                            |row: &FrankenRow| {
-                                Ok((
-                                    row.get_typed::<Option<String>>(0)?,
-                                    row.get_typed::<Option<i64>>(1)?,
-                                    row.get_typed::<Option<i64>>(2)?,
-                                    row.get_typed::<Option<String>>(3)?,
-                                    row.get_typed::<String>(4)?,
-                                ))
-                            },
-                        )?;
+                        let snip_rows: Vec<SnippetExportRow> = if has_snippets_table {
+                            src.query_map_collect(
+                                "SELECT file_path, start_line, end_line, language, snippet_text FROM snippets WHERE message_id = ?1",
+                                params![*source_message_id],
+                                |row: &FrankenRow| {
+                                    Ok((
+                                        row.get_typed::<Option<String>>(0)?,
+                                        row.get_typed::<Option<i64>>(1)?,
+                                        row.get_typed::<Option<i64>>(2)?,
+                                        row.get_typed::<Option<String>>(3)?,
+                                        row.get_typed::<String>(4)?,
+                                    ))
+                                },
+                            )?
+                        } else {
+                            Vec::new()
+                        };
 
                         for (fpath, start, end, lang, stext) in snip_rows {
                             tx.execute_compat(
@@ -473,6 +478,19 @@ fn table_columns(conn: &Connection, table_name: &str) -> Result<Vec<String>> {
         row.get_typed::<String>(1)
     })
     .context("Failed to inspect source table schema")
+}
+
+fn table_exists(conn: &Connection, table_name: &str) -> bool {
+    if !table_name
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return false;
+    }
+
+    table_columns(conn, table_name)
+        .map(|columns| !columns.is_empty())
+        .unwrap_or(false)
 }
 
 fn build_message_export_query(columns: &[String]) -> String {
