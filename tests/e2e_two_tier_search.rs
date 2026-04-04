@@ -397,10 +397,8 @@ fn two_tier_progressive_search_correctness() {
             let candidate_indices: Vec<usize> = fast_candidates.iter().map(|r| r.idx).collect();
             let quality_scores =
                 index.quality_scores_for_indices(&quality_query, &candidate_indices);
-            let mut expected_pairs: Vec<(usize, f32)> = candidate_indices
-                .into_iter()
-                .zip(quality_scores)
-                .collect();
+            let mut expected_pairs: Vec<(usize, f32)> =
+                candidate_indices.into_iter().zip(quality_scores).collect();
             expected_pairs.sort_by(|a, b| {
                 b.1.partial_cmp(&a.1)
                     .unwrap_or(std::cmp::Ordering::Equal)

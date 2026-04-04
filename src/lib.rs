@@ -2849,7 +2849,6 @@ async fn execute_cli(
         | Commands::Status { .. }
         | Commands::View { .. }
         | Commands::Pages { .. }
-        | Commands::Daemon { .. }
         | Commands::Import(..)
         | Commands::Analytics(..) => {
             tracing_subscriber::fmt()
@@ -5650,6 +5649,7 @@ fn describe_command(cli: &Cli) -> String {
         Some(Commands::Sources(..)) => "sources".to_string(),
         Some(Commands::Models(..)) => "models".to_string(),
         Some(Commands::Pages { .. }) => "pages".to_string(),
+        #[cfg(unix)]
         Some(Commands::Daemon { .. }) => "daemon".to_string(),
         Some(Commands::Import(..)) => "import".to_string(),
         Some(Commands::Analytics(..)) => "analytics".to_string(),
