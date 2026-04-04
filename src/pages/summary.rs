@@ -557,11 +557,25 @@ impl<'a> SummaryGenerator<'a> {
         (where_clause, params)
     }
 
-    /// Build SQL params for queries that prepend one local value before filter params.
-    fn prepend_params(first: ParamValue, params: &[ParamValue]) -> Vec<ParamValue> {
-        std::iter::once(first)
-            .chain(params.iter().cloned())
-            .collect()
+    /// Count messages across a known set of conversation IDs.
+    fn count_messages_for_conversation_ids(&self, conversation_ids: &[i64]) -> Result<usize> {
+        if conversation_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let params: Vec<ParamValue> = conversation_ids
+            .iter()
+            .copied()
+            .map(ParamValue::from)
+            .collect();
+        let placeholders = vec!["?"; params.len()].join(", ");
+        let query = format!(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id IN ({placeholders})"
+        );
+        let count: i64 = self
+            .db
+            .query_row_map(&query, &params, |row: &Row| row.get_typed(0))?;
+        Ok(count as usize)
     }
 
     /// Get basic counts.
@@ -701,61 +715,89 @@ impl<'a> SummaryGenerator<'a> {
         where_clause: &str,
         params: &[ParamValue],
     ) -> Result<Vec<WorkspaceSummaryItem>> {
+        #[derive(Default)]
+        struct WorkspaceAggregate {
+            conversation_ids: Vec<i64>,
+            min_ts: Option<i64>,
+            max_ts: Option<i64>,
+            sample_titles: Vec<String>,
+        }
+
         let query = format!(
-            "SELECT w.path, COUNT(*) as conv_count,
-                    MIN(c.started_at), MAX(c.started_at)
+            "SELECT c.id, c.workspace_id, c.title, c.started_at
              FROM conversations c
-             LEFT JOIN workspaces w ON c.workspace_id = w.id
-             WHERE w.path IS NOT NULL{}
-             GROUP BY w.path
-             ORDER BY conv_count DESC",
+             WHERE 1=1{}
+             ORDER BY c.started_at DESC",
             where_clause
         );
 
-        let ws_rows = self.db.query_map_collect(&query, params, |row: &Row| {
+        let conv_rows = self.db.query_map_collect(&query, params, |row: &Row| {
             Ok((
-                row.get_typed::<String>(0)?,
-                row.get_typed::<i64>(1)?,
-                row.get_typed::<Option<i64>>(2)?,
+                row.get_typed::<i64>(0)?,
+                row.get_typed::<Option<i64>>(1)?,
+                row.get_typed::<Option<String>>(2)?,
                 row.get_typed::<Option<i64>>(3)?,
             ))
         })?;
 
+        let mut workspace_ids: Vec<i64> = conv_rows
+            .iter()
+            .filter_map(|(_, workspace_id, _, _)| *workspace_id)
+            .collect();
+        workspace_ids.sort_unstable();
+        workspace_ids.dedup();
+
+        let workspace_map = if workspace_ids.is_empty() {
+            HashMap::new()
+        } else {
+            let workspace_params: Vec<ParamValue> = workspace_ids
+                .iter()
+                .copied()
+                .map(ParamValue::from)
+                .collect();
+            let placeholders = vec!["?"; workspace_params.len()].join(", ");
+            let workspace_query =
+                format!("SELECT id, path FROM workspaces WHERE id IN ({placeholders})");
+            self.db
+                .query_map_collect(&workspace_query, &workspace_params, |row: &Row| {
+                    Ok((row.get_typed::<i64>(0)?, row.get_typed::<String>(1)?))
+                })?
+                .into_iter()
+                .collect::<HashMap<_, _>>()
+        };
+
+        let mut aggregates: HashMap<String, WorkspaceAggregate> = HashMap::new();
+        for (conversation_id, workspace_id, title, started_at) in conv_rows {
+            let Some(workspace_id) = workspace_id else {
+                continue;
+            };
+            let Some(workspace) = workspace_map.get(&workspace_id) else {
+                continue;
+            };
+
+            let aggregate = aggregates.entry(workspace.clone()).or_default();
+            aggregate.conversation_ids.push(conversation_id);
+            aggregate.min_ts = match (aggregate.min_ts, started_at) {
+                (Some(existing), Some(value)) => Some(existing.min(value)),
+                (None, value) => value,
+                (existing, None) => existing,
+            };
+            aggregate.max_ts = match (aggregate.max_ts, started_at) {
+                (Some(existing), Some(value)) => Some(existing.max(value)),
+                (None, value) => value,
+                (existing, None) => existing,
+            };
+            if let Some(title) = title
+                && !title.is_empty()
+                && aggregate.sample_titles.len() < 5
+            {
+                aggregate.sample_titles.push(title);
+            }
+        }
+
         let mut workspaces = Vec::new();
-        for (workspace, conv_count, min_ts, max_ts) in ws_rows {
-            // Get message count for this workspace
-            let msg_query = format!(
-                "SELECT COUNT(*) FROM messages
-                 WHERE conversation_id IN (
-                     SELECT c.id
-                     FROM conversations c
-                     LEFT JOIN workspaces w ON c.workspace_id = w.id
-                     WHERE w.path = ?{}
-                 )",
-                where_clause
-            );
-            let prepended = Self::prepend_params(ParamValue::from(workspace.as_str()), params);
-            let msg_count: i64 = self.db.query_row_map(&msg_query, &prepended, |row: &Row| {
-                Ok(row.get_typed::<Option<i64>>(0)?.unwrap_or(0))
-            })?;
-
-            // Get sample titles
-            let title_query = format!(
-                "SELECT c.title
-                 FROM conversations c
-                 LEFT JOIN workspaces w ON c.workspace_id = w.id
-                 WHERE w.path = ? AND c.title IS NOT NULL{}
-                 ORDER BY c.started_at DESC LIMIT 5",
-                where_clause
-            );
-            let title_prepended =
-                Self::prepend_params(ParamValue::from(workspace.as_str()), params);
-            let titles: Vec<String> =
-                self.db
-                    .query_map_collect(&title_query, &title_prepended, |row: &Row| {
-                        row.get_typed(0)
-                    })?;
-
+        for (workspace, aggregate) in aggregates {
+            let msg_count = self.count_messages_for_conversation_ids(&aggregate.conversation_ids)?;
             // Extract display name
             let display_name = std::path::Path::new(&workspace)
                 .file_name()
@@ -765,13 +807,19 @@ impl<'a> SummaryGenerator<'a> {
             workspaces.push(WorkspaceSummaryItem {
                 path: workspace,
                 display_name,
-                conversation_count: conv_count as usize,
-                message_count: msg_count as usize,
-                date_range: DateRange::from_timestamps(min_ts, max_ts),
-                sample_titles: titles,
+                conversation_count: aggregate.conversation_ids.len(),
+                message_count: msg_count,
+                date_range: DateRange::from_timestamps(aggregate.min_ts, aggregate.max_ts),
+                sample_titles: aggregate.sample_titles,
                 included: true,
             });
         }
+
+        workspaces.sort_by(|a, b| {
+            b.conversation_count
+                .cmp(&a.conversation_count)
+                .then_with(|| a.path.cmp(&b.path))
+        });
 
         Ok(workspaces)
     }
@@ -784,37 +832,50 @@ impl<'a> SummaryGenerator<'a> {
         total_conversations: usize,
     ) -> Result<Vec<AgentSummaryItem>> {
         let query = format!(
-            "SELECT a.slug, COUNT(*) as conv_count
+            "SELECT c.id, c.agent_id
              FROM conversations c
-             JOIN agents a ON c.agent_id = a.id
-             WHERE 1=1{}
-             GROUP BY a.slug
-             ORDER BY conv_count DESC",
+             WHERE 1=1{}",
             where_clause
         );
 
-        let agent_rows = self.db.query_map_collect(&query, params, |row: &Row| {
-            Ok((row.get_typed::<String>(0)?, row.get_typed::<i64>(1)?))
+        let conv_rows = self.db.query_map_collect(&query, params, |row: &Row| {
+            Ok((row.get_typed::<i64>(0)?, row.get_typed::<i64>(1)?))
         })?;
 
-        let mut agents = Vec::new();
-        for (agent, conv_count) in agent_rows {
-            // Get message count
-            let msg_query = format!(
-                "SELECT COUNT(*) FROM messages
-                 WHERE conversation_id IN (
-                     SELECT c.id
-                     FROM conversations c
-                     JOIN agents a ON c.agent_id = a.id
-                     WHERE a.slug = ?{}
-                 )",
-                where_clause
-            );
-            let prepended = Self::prepend_params(ParamValue::from(agent.as_str()), params);
-            let msg_count: i64 = self.db.query_row_map(&msg_query, &prepended, |row: &Row| {
-                Ok(row.get_typed::<Option<i64>>(0)?.unwrap_or(0))
-            })?;
+        let mut agent_ids: Vec<i64> = conv_rows.iter().map(|(_, agent_id)| *agent_id).collect();
+        agent_ids.sort_unstable();
+        agent_ids.dedup();
 
+        let agent_map = if agent_ids.is_empty() {
+            HashMap::new()
+        } else {
+            let agent_params: Vec<ParamValue> =
+                agent_ids.iter().copied().map(ParamValue::from).collect();
+            let placeholders = vec!["?"; agent_params.len()].join(", ");
+            let agent_query = format!("SELECT id, slug FROM agents WHERE id IN ({placeholders})");
+            self.db
+                .query_map_collect(&agent_query, &agent_params, |row: &Row| {
+                    Ok((row.get_typed::<i64>(0)?, row.get_typed::<String>(1)?))
+                })?
+                .into_iter()
+                .collect::<HashMap<_, _>>()
+        };
+
+        let mut aggregates: HashMap<String, Vec<i64>> = HashMap::new();
+        for (conversation_id, agent_id) in conv_rows {
+            let Some(agent) = agent_map.get(&agent_id) else {
+                continue;
+            };
+            aggregates
+                .entry(agent.clone())
+                .or_default()
+                .push(conversation_id);
+        }
+
+        let mut agents = Vec::new();
+        for (agent, conversation_ids) in aggregates {
+            let conv_count = conversation_ids.len();
+            let msg_count = self.count_messages_for_conversation_ids(&conversation_ids)?;
             let percentage = if total_conversations > 0 {
                 (conv_count as f64 / total_conversations as f64) * 100.0
             } else {
@@ -823,12 +884,18 @@ impl<'a> SummaryGenerator<'a> {
 
             agents.push(AgentSummaryItem {
                 name: agent,
-                conversation_count: conv_count as usize,
-                message_count: msg_count as usize,
+                conversation_count: conv_count,
+                message_count: msg_count,
                 percentage,
                 included: true,
             });
         }
+
+        agents.sort_by(|a, b| {
+            b.conversation_count
+                .cmp(&a.conversation_count)
+                .then_with(|| a.name.cmp(&b.name))
+        });
 
         Ok(agents)
     }
@@ -840,22 +907,15 @@ impl<'a> SummaryGenerator<'a> {
         included_workspaces: &HashSet<String>,
         exclusions: &ExclusionSet,
     ) -> Result<(usize, usize, usize)> {
-        // Build exclusion query
-        let mut conv_count = 0usize;
-        let mut msg_count = 0usize;
-        let mut char_count = 0usize;
+        let enforce_workspace_inclusion = !included_workspaces.is_empty();
 
         let (where_clause, params) = filters
             .map(|active_filters| self.build_filter_clause(active_filters))
             .unwrap_or_default();
 
-        // Query conversations and filter
         let query = format!(
-            "SELECT c.id, w.path, c.title,
-                    (SELECT COUNT(*) FROM messages WHERE conversation_id = c.id),
-                    (SELECT SUM(LENGTH(content)) FROM messages WHERE conversation_id = c.id)
+            "SELECT c.id, c.workspace_id, c.title
              FROM conversations c
-             LEFT JOIN workspaces w ON c.workspace_id = w.id
              WHERE 1=1{}",
             where_clause
         );
@@ -863,34 +923,80 @@ impl<'a> SummaryGenerator<'a> {
         let conv_rows = self.db.query_map_collect(&query, &params, |row: &Row| {
             Ok((
                 row.get_typed::<i64>(0)?,
-                row.get_typed::<Option<String>>(1)?,
+                row.get_typed::<Option<i64>>(1)?,
                 row.get_typed::<Option<String>>(2)?,
-                row.get_typed::<i64>(3)?,
-                row.get_typed::<Option<i64>>(4)?.unwrap_or(0),
             ))
         })?;
+        let workspace_ids: Vec<i64> = conv_rows
+            .iter()
+            .filter_map(|(_, workspace_id, _)| *workspace_id)
+            .collect();
+        let workspace_map = if workspace_ids.is_empty() {
+            HashMap::new()
+        } else {
+            let workspace_params: Vec<ParamValue> = workspace_ids
+                .iter()
+                .copied()
+                .map(ParamValue::from)
+                .collect();
+            let placeholders = vec!["?"; workspace_params.len()].join(", ");
+            let workspace_query = format!(
+                "SELECT id, path FROM workspaces WHERE id IN ({placeholders})"
+            );
+            self.db.query_map_collect(&workspace_query, &workspace_params, |row: &Row| {
+                Ok((row.get_typed::<i64>(0)?, row.get_typed::<String>(1)?))
+            })?
+            .into_iter()
+            .collect()
+        };
 
-        for (id, workspace, title, msgs, chars) in conv_rows {
+        let mut included_conversation_ids = Vec::new();
+        for (id, workspace_id, title) in conv_rows {
+            let workspace = workspace_id.and_then(|id| workspace_map.get(&id).cloned());
             let title_str = title.as_deref().unwrap_or("");
 
-            // Check exclusions
             if exclusions.should_exclude(workspace.as_deref(), id, title_str) {
                 continue;
             }
 
-            // Check workspace inclusion
-            if let Some(ws) = &workspace
+            if enforce_workspace_inclusion
+                && let Some(ws) = &workspace
                 && !included_workspaces.contains(ws)
             {
                 continue;
             }
 
-            conv_count += 1;
-            msg_count += msgs as usize;
-            char_count += chars as usize;
+            included_conversation_ids.push(id);
         }
 
-        Ok((conv_count, msg_count, char_count))
+        if included_conversation_ids.is_empty() {
+            return Ok((0, 0, 0));
+        }
+
+        let msg_params: Vec<ParamValue> = included_conversation_ids
+            .iter()
+            .copied()
+            .map(ParamValue::from)
+            .collect();
+        let placeholders = vec!["?"; msg_params.len()].join(", ");
+        let msg_query = format!(
+            "SELECT COUNT(*), SUM(LENGTH(content))
+             FROM messages
+             WHERE conversation_id IN ({placeholders})"
+        );
+        let (msg_count, char_count): (i64, i64) = self
+            .db
+            .query_map_collect(&msg_query, &msg_params, |row: &Row| {
+                Ok((
+                    row.get_typed::<Option<i64>>(0)?.unwrap_or(0),
+                    row.get_typed::<Option<i64>>(1)?.unwrap_or(0),
+                ))
+            })?
+            .into_iter()
+            .next()
+            .unwrap_or((0, 0));
+
+        Ok((included_conversation_ids.len(), msg_count as usize, char_count as usize))
     }
 }
 
@@ -1076,6 +1182,47 @@ mod tests {
         (dir, conn)
     }
 
+    fn create_test_db_without_message_count() -> (TempDir, Connection) {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test-no-message-count.db");
+        let conn = Connection::open(db_path.to_string_lossy().as_ref()).unwrap();
+
+        conn.execute_batch(
+            "CREATE TABLE agents (
+                id INTEGER PRIMARY KEY,
+                slug TEXT NOT NULL UNIQUE
+            );
+            CREATE TABLE workspaces (
+                id INTEGER PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE
+            );
+            CREATE TABLE conversations (
+                id INTEGER PRIMARY KEY,
+                agent_id INTEGER NOT NULL,
+                workspace_id INTEGER,
+                title TEXT,
+                source_path TEXT NOT NULL,
+                started_at INTEGER,
+                ended_at INTEGER,
+                metadata_json TEXT,
+                FOREIGN KEY (agent_id) REFERENCES agents(id),
+                FOREIGN KEY (workspace_id) REFERENCES workspaces(id)
+            );
+            CREATE TABLE messages (
+                id INTEGER PRIMARY KEY,
+                conversation_id INTEGER NOT NULL,
+                idx INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at INTEGER,
+                FOREIGN KEY (conversation_id) REFERENCES conversations(id)
+            );",
+        )
+        .unwrap();
+
+        (dir, conn)
+    }
+
     fn insert_test_data(conn: &Connection) {
         use frankensqlite::compat::ConnectionExt;
         use frankensqlite::params;
@@ -1091,16 +1238,16 @@ mod tests {
 
         // Insert conversations
         conn.execute(
-            "INSERT INTO conversations (id, agent_id, workspace_id, title, source_path, started_at, message_count)
-             VALUES (1, 1, 1, 'Fix authentication bug', '/path/a.jsonl', 1700000000000, 5);",
+            "INSERT INTO conversations (id, agent_id, workspace_id, title, source_path, started_at)
+             VALUES (1, 1, 1, 'Fix authentication bug', '/path/a.jsonl', 1700000000000);",
         ).unwrap();
         conn.execute(
-            "INSERT INTO conversations (id, agent_id, workspace_id, title, source_path, started_at, message_count)
-             VALUES (2, 1, 1, 'Add user profile', '/path/b.jsonl', 1700100000000, 3);",
+            "INSERT INTO conversations (id, agent_id, workspace_id, title, source_path, started_at)
+             VALUES (2, 1, 1, 'Add user profile', '/path/b.jsonl', 1700100000000);",
         ).unwrap();
         conn.execute(
-            "INSERT INTO conversations (id, agent_id, workspace_id, title, source_path, started_at, message_count)
-             VALUES (3, 2, 2, 'Setup database', '/path/c.jsonl', 1700200000000, 4);",
+            "INSERT INTO conversations (id, agent_id, workspace_id, title, source_path, started_at)
+             VALUES (3, 2, 2, 'Setup database', '/path/c.jsonl', 1700200000000);",
         ).unwrap();
 
         // Insert messages
@@ -1143,6 +1290,34 @@ mod tests {
         assert!(summary.total_characters > 0);
         assert_eq!(summary.workspaces.len(), 2);
         assert_eq!(summary.agents.len(), 2);
+    }
+
+    #[test]
+    fn test_summary_generation_without_conversation_message_count_column() {
+        let (_dir, conn) = create_test_db_without_message_count();
+        insert_test_data(&conn);
+
+        let generator = SummaryGenerator::new(&conn);
+        let summary = generator.generate(None).unwrap();
+
+        assert_eq!(summary.total_conversations, 3);
+        assert_eq!(summary.total_messages, 12);
+        assert_eq!(summary.workspaces.len(), 2);
+        assert_eq!(summary.agents.len(), 2);
+
+        let project_a = summary
+            .workspaces
+            .iter()
+            .find(|w| w.path == "/home/user/project-a")
+            .unwrap();
+        assert_eq!(project_a.message_count, 8);
+
+        let claude = summary
+            .agents
+            .iter()
+            .find(|a| a.name == "claude-code")
+            .unwrap();
+        assert_eq!(claude.message_count, 8);
     }
 
     #[test]

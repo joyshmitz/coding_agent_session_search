@@ -44,7 +44,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use frankensqlite::Connection;
-use frankensqlite::compat::{ConnectionExt, ParamValue, RowExt};
+use frankensqlite::compat::{
+    ConnectionExt, ParamValue, RowExt, params_from_iter,
+};
 #[cfg(test)]
 use frankensqlite::params;
 
@@ -68,12 +70,65 @@ impl std::ops::Deref for SendConnection {
     }
 }
 
+fn franken_query_map_collect_retry<T, F>(
+    conn: &Connection,
+    sql: &str,
+    params: &[ParamValue],
+    map: F,
+) -> Result<Vec<T>, frankensqlite::FrankenError>
+where
+    F: Copy + Fn(&frankensqlite::Row) -> Result<T, frankensqlite::FrankenError>,
+{
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut backoff = Duration::from_millis(4);
+    loop {
+        match conn.query_map_collect(sql, params, |row| map(row)) {
+            Ok(values) => return Ok(values),
+            Err(err) if crate::storage::sqlite::retryable_franken_error(&err) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(err);
+                }
+                let remaining = deadline.saturating_duration_since(now);
+                std::thread::sleep(backoff.min(remaining));
+                backoff = backoff.saturating_mul(2).min(Duration::from_millis(64));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn franken_query_rows_retry(
+    conn: &Connection,
+    sql: &str,
+    params: &[frankensqlite::SqliteValue],
+) -> Result<Vec<frankensqlite::Row>, frankensqlite::FrankenError> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut backoff = Duration::from_millis(4);
+    loop {
+        match conn.query_with_params(sql, params) {
+            Ok(rows) => return Ok(rows),
+            Err(err) if crate::storage::sqlite::retryable_franken_error(&err) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(err);
+                }
+                let remaining = deadline.saturating_duration_since(now);
+                std::thread::sleep(backoff.min(remaining));
+                backoff = backoff.saturating_mul(2).min(Duration::from_millis(64));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 use crate::search::canonicalize::{canonicalize_for_embedding, content_hash};
 use crate::search::embedder::Embedder;
 use crate::search::vector_index::{
     ROLE_USER, SemanticDocId, SemanticFilter, SemanticFilterMaps, VectorIndex, VectorSearchResult,
     parse_semantic_doc_id, role_code_from_str,
 };
+use crate::storage::sqlite::FrankenStorage;
 
 use crate::sources::provenance::SourceFilter;
 
@@ -2298,21 +2353,38 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
     prev_row[b_len]
 }
 
-/// Normalize a term into tokenizer-aligned parts.
-/// Splits on non-word punctuation (hyphens preserved) to match `hyphen_normalize` tokenizer,
-/// preserving `*` for wildcards. The FTS5 transpiler quotes hyphenated terms later so
-/// stock SQLite parses them correctly.
+/// Normalize a term into FTS5-porter-aligned parts.
+/// Splits punctuation into separate fragments while preserving a trailing `*`
+/// on the final fragment so fallback queries match how SQLite tokenizes indexed
+/// text in `fts_messages`.
 fn normalize_term_parts(raw: &str) -> Vec<String> {
-    fs_cass_sanitize_query(raw)
-        .split_whitespace()
-        .map(|s| s.to_string())
-        .collect()
+    let mut parts = Vec::new();
+    for token in fs_cass_sanitize_query(raw).split_whitespace() {
+        let mut current = String::new();
+        let mut chars = token.chars().peekable();
+        while let Some(ch) = chars.next() {
+            let trailing_wildcard = ch == '*' && chars.peek().is_none() && !current.is_empty();
+            if ch.is_alphanumeric() || ch == '_' || trailing_wildcard {
+                current.push(ch);
+                continue;
+            }
+
+            if !current.is_empty() {
+                parts.push(std::mem::take(&mut current));
+            }
+        }
+
+        if !current.is_empty() {
+            parts.push(current);
+        }
+    }
+    parts
 }
 
 /// Normalize phrase text into tokenizer-aligned terms (lowercased, no wildcards).
 fn normalize_phrase_terms(raw: &str) -> Vec<String> {
-    fs_cass_sanitize_query(raw)
-        .split_whitespace()
+    normalize_term_parts(raw)
+        .into_iter()
         .map(|s| s.trim_matches('*').to_lowercase())
         .filter(|s| !s.is_empty())
         .collect()
@@ -2327,15 +2399,6 @@ fn render_fts5_term_part(part: &str) -> Option<String> {
             | FsCassWildcardPattern::Complex(_)
     ) {
         return None;
-    }
-
-    if part.contains('-') {
-        return Some(match pattern {
-            FsCassWildcardPattern::Prefix(_) => {
-                format!("\"{}\"*", part.trim_end_matches('*'))
-            }
-            _ => format!("\"{}\"", part),
-        });
     }
 
     Some(part.to_string())
@@ -2582,17 +2645,35 @@ impl SearchClient {
         if guard.is_none()
             && let Some(path) = &self.sqlite_path
         {
-            let path_str = path.to_string_lossy().to_string();
-            match Connection::open(&path_str) {
-                Ok(conn) => {
-                    *guard = Some(SendConnection(conn));
+            match FrankenStorage::open(path) {
+                Ok(storage) => {
+                    *guard = Some(SendConnection(storage.into_raw()));
                 }
                 Err(e) => {
-                    tracing::debug!(
-                        error = %e,
-                        path = %path.display(),
-                        "sqlite open failed"
-                    );
+                    let retryable = crate::storage::sqlite::retryable_franken_anyhow(&e);
+                    if retryable {
+                        match crate::storage::sqlite::open_franken_storage_with_timeout(
+                            path,
+                            std::time::Duration::from_secs(1),
+                        ) {
+                            Ok(storage) => {
+                                *guard = Some(SendConnection(storage.into_raw()));
+                            }
+                            Err(fallback_err) => {
+                                tracing::debug!(
+                                    error = %fallback_err,
+                                    path = %path.display(),
+                                    "sqlite open failed after retry fallback"
+                                );
+                            }
+                        }
+                    } else {
+                        tracing::debug!(
+                            error = %e,
+                            path = %path.display(),
+                            "sqlite open failed"
+                        );
+                    }
                 }
             }
         }
@@ -2765,8 +2846,6 @@ impl SearchClient {
             // If empty, we *can* try SQLite just in case index is lagging.
         }
 
-        // Fallback: DB-resident FTS is currently disabled in frankensqlite-only
-        // mode. The primary lexical path is the Tantivy index above.
         // Skip SQLite fallback when the query contains leading/internal wildcards that
         // FTS5 cannot parse (e.g., "*handler" or "f*o").
         // We ALLOW trailing wildcards ("foo*") as FTS5 supports prefix matching.
@@ -2779,20 +2858,24 @@ impl SearchClient {
             return Ok(Vec::new());
         }
 
-        if let Some(db_path) = &self.sqlite_path {
+        let has_sqlite_backend = {
+            let sqlite_guard = self
+                .sqlite
+                .lock()
+                .map_err(|_| anyhow!("sqlite lock poisoned"))?;
+            sqlite_guard.is_some() || self.sqlite_path.is_some()
+        };
+
+        if has_sqlite_backend {
             tracing::info!(
-                backend = "sqlite-fts5-disabled",
+                backend = "sqlite-fts5",
                 query = sanitized,
                 limit = fallback_fetch_limit,
                 offset = 0,
                 "search_start"
             );
-            // NOTE: This path is intentionally disabled and currently returns an empty hit set.
-            // Keep the call to exercise FTS5 transpilation and preserve one obvious hook for a
-            // future frankensqlite-native FTS implementation without misrepresenting current
-            // behavior to maintainers.
             let hits = self.search_sqlite_fts5(
-                db_path,
+                self.sqlite_path.as_deref().unwrap_or_else(|| Path::new(":memory:")),
                 query,
                 filters.clone(),
                 fallback_fetch_limit,
@@ -4523,20 +4606,215 @@ impl SearchClient {
         Ok(hits)
     }
 
-    /// DB-resident FTS fallback is disabled until cass has a fully
-    /// frankensqlite-native implementation. The primary lexical engine is the
-    /// Tantivy index built during `cass index --full`.
+    fn sqlite_fts_uses_message_id_column(conn: &Connection) -> Result<bool> {
+        let params: [ParamValue; 0] = [];
+        let ddl_rows: Vec<String> = franken_query_map_collect_retry(
+            conn,
+            "SELECT COALESCE(sql, '')
+             FROM sqlite_master
+             WHERE name = 'fts_messages'
+             ORDER BY rowid DESC
+             LIMIT 1",
+            &params,
+            |row: &frankensqlite::Row| row.get_typed::<String>(0),
+        )?;
+        Ok(ddl_rows
+            .first()
+            .map(|sql| sql.to_ascii_lowercase().contains("message_id"))
+            .unwrap_or(false))
+    }
+
     fn search_sqlite_fts5(
         &self,
         _db_path: &Path,
         raw_query: &str,
-        _filters: SearchFilters,
-        _limit: usize,
-        _offset: usize,
-        _field_mask: FieldMask,
+        filters: SearchFilters,
+        limit: usize,
+        offset: usize,
+        field_mask: FieldMask,
     ) -> Result<Vec<SearchHit>> {
-        let _ = transpile_to_fts5(raw_query);
-        Ok(Vec::new())
+        let fts_query = match transpile_to_fts5(raw_query) {
+            Some(q) if !q.trim().is_empty() => q,
+            _ => return Ok(Vec::new()),
+        };
+
+        let sqlite_guard = self.sqlite_guard()?;
+        let Some(conn) = sqlite_guard.as_ref() else {
+            return Ok(Vec::new());
+        };
+
+        let empty_params: [ParamValue; 0] = [];
+        let has_fts = franken_query_map_collect_retry(
+            conn,
+            "SELECT 1 FROM sqlite_master WHERE name = 'fts_messages'",
+            &empty_params,
+            |row| row.get_typed::<i64>(0),
+        )
+        .map(|rows| !rows.is_empty())
+        .unwrap_or(false);
+        if !has_fts {
+            return Ok(Vec::new());
+        }
+
+        let query_match_type = dominant_match_type(raw_query);
+        let message_join = if Self::sqlite_fts_uses_message_id_column(conn)? {
+            "CAST(fts_messages.message_id AS INTEGER) = m.id"
+        } else {
+            "fts_messages.rowid = m.id"
+        };
+
+        let title_expr = if field_mask.wants_title() {
+            "fts_messages.title"
+        } else {
+            "''"
+        };
+        let content_expr = if field_mask.needs_content() || field_mask.wants_snippet() {
+            "fts_messages.content"
+        } else {
+            "''"
+        };
+        let normalized_source_sql = normalized_search_source_id_sql_expr("c.source_id");
+        let created_at_expr = "CAST(fts_messages.created_at AS INTEGER)";
+        let mut sql = format!(
+            "SELECT {title_expr},
+                    {content_expr},
+                    fts_messages.agent,
+                    COALESCE(fts_messages.workspace, ''),
+                    fts_messages.source_path,
+                    {created_at_expr},
+                    m.idx,
+                    c.id,
+                    {normalized_source_sql},
+                    c.origin_host,
+                    COALESCE(s.kind, 'local'),
+                    bm25(fts_messages)
+             FROM fts_messages
+             LEFT JOIN messages m ON {message_join}
+             LEFT JOIN conversations c ON m.conversation_id = c.id
+             LEFT JOIN sources s ON c.source_id = s.id
+             WHERE fts_messages MATCH ?"
+        );
+        let mut params = Vec::with_capacity(filters.agents.len() + filters.workspaces.len() + 5);
+        params.push(ParamValue::from(fts_query.as_str()));
+
+        if !filters.agents.is_empty() {
+            let placeholders = sql_placeholders(filters.agents.len());
+            sql.push_str(&format!(" AND fts_messages.agent IN ({placeholders})"));
+            for agent in &filters.agents {
+                params.push(ParamValue::from(agent.as_str()));
+            }
+        }
+
+        if !filters.workspaces.is_empty() {
+            let placeholders = sql_placeholders(filters.workspaces.len());
+            sql.push_str(&format!(
+                " AND COALESCE(fts_messages.workspace, '') IN ({placeholders})"
+            ));
+            for workspace in &filters.workspaces {
+                params.push(ParamValue::from(workspace.as_str()));
+            }
+        }
+
+        if let Some(created_from) = filters.created_from {
+            sql.push_str(&format!(" AND {created_at_expr} >= ?"));
+            params.push(ParamValue::from(created_from));
+        }
+        if let Some(created_to) = filters.created_to {
+            sql.push_str(&format!(" AND {created_at_expr} <= ?"));
+            params.push(ParamValue::from(created_to));
+        }
+
+        match &filters.source_filter {
+            SourceFilter::All => {}
+            SourceFilter::Local => sql.push_str(&format!(
+                " AND {normalized_source_sql} = '{local}'",
+                local = crate::sources::provenance::LOCAL_SOURCE_ID,
+            )),
+            SourceFilter::Remote => sql.push_str(&format!(
+                " AND {normalized_source_sql} != '{local}'",
+                local = crate::sources::provenance::LOCAL_SOURCE_ID,
+            )),
+            SourceFilter::SourceId(id) => {
+                sql.push_str(&format!(" AND {normalized_source_sql} = ?"));
+                params.push(ParamValue::from(normalize_search_source_filter_value(id)));
+            }
+        }
+
+        sql.push_str(" ORDER BY bm25(fts_messages), m.id LIMIT ? OFFSET ?");
+        params.push(ParamValue::from(limit as i64));
+        params.push(ParamValue::from(offset as i64));
+
+        let params = params_from_iter(params);
+        let rows = franken_query_rows_retry(conn, &sql, &params)?;
+        let mut hits = Vec::with_capacity(rows.len());
+        for row in rows {
+            let title: String = row.get_typed(0)?;
+            let raw_content: String = row.get_typed(1)?;
+            let agent: String = row.get_typed(2)?;
+            let workspace: String = row.get_typed(3)?;
+            let source_path: String = row.get_typed(4)?;
+            let created_at: Option<i64> = row.get_typed(5)?;
+            let idx: Option<i64> = row.get_typed(6)?;
+            let conversation_id: Option<i64> = row.get_typed(7)?;
+            let raw_source_id: String = row
+                .get_typed::<Option<String>>(8)?
+                .unwrap_or_else(default_source_id);
+            let origin_host: Option<String> = row.get_typed(9)?;
+            let raw_origin_kind: Option<String> = row.get_typed(10)?;
+            let bm25_score = match row.get_typed::<Option<f64>>(11)? {
+                Some(score) => score,
+                None => continue,
+            };
+
+            let source_id = normalized_search_hit_source_id_parts(
+                raw_source_id.as_str(),
+                raw_origin_kind.as_deref().unwrap_or_default(),
+                origin_host.as_deref(),
+            );
+            let origin_kind = normalized_search_hit_origin_kind(
+                source_id.as_str(),
+                raw_origin_kind.as_deref(),
+            )
+            .to_string();
+            let line_number = idx
+                .and_then(|i| usize::try_from(i).ok())
+                .map(|i| i.saturating_add(1));
+            let snippet = if field_mask.wants_snippet() {
+                snippet_from_content(&raw_content)
+            } else {
+                String::new()
+            };
+            let content = if field_mask.needs_content() {
+                raw_content
+            } else {
+                String::new()
+            };
+            let content_hash = if content.is_empty() {
+                stable_hit_hash(&snippet, &source_path, line_number, created_at)
+            } else {
+                stable_hit_hash(&content, &source_path, line_number, created_at)
+            };
+
+            hits.push(SearchHit {
+                title,
+                snippet,
+                content,
+                content_hash,
+                conversation_id,
+                score: (-bm25_score) as f32,
+                source_path,
+                agent,
+                workspace,
+                workspace_original: None,
+                created_at,
+                line_number,
+                match_type: query_match_type,
+                source_id,
+                origin_kind,
+                origin_host,
+            });
+        }
+        Ok(hits)
     }
 
     /// Browse messages ordered by date, without any text query.
@@ -4767,9 +5045,19 @@ fn transpile_to_fts5(raw_query: &str) -> Option<String> {
                 next_op = "NOT";
             }
             FsCassQueryToken::Term(t) => {
-                // Sanitize and normalize. FTS5 implicitly ANDs words in a string.
-                // e.g. "foo bar" -> foo AND bar. Hyphens stay intact here so we can
-                // later emit them as quoted terms; bare `foo-bar` is invalid FTS5 syntax.
+                let raw_pattern = FsCassWildcardPattern::parse(&t);
+                if matches!(
+                    raw_pattern,
+                    FsCassWildcardPattern::Suffix(_)
+                        | FsCassWildcardPattern::Substring(_)
+                        | FsCassWildcardPattern::Complex(_)
+                ) {
+                    return None;
+                }
+
+                // Sanitize and normalize. FTS5 implicitly ANDs words in a string,
+                // but we split punctuation into porter-aligned fragments first so
+                // fallback queries match SQLite tokenization.
                 let term_parts = normalize_term_parts(&t);
                 if term_parts.is_empty() {
                     continue;
@@ -4780,9 +5068,8 @@ fn transpile_to_fts5(raw_query: &str) -> Option<String> {
                     rendered_parts.push(render_fts5_term_part(part)?);
                 }
 
-                // If multiple parts, wrap in parens and join with AND to ensure they stay together.
-                // Stock FTS5 requires hyphenated tokens to be quoted (and prefix queries need the
-                // trailing * outside the quotes), otherwise bare `foo-bar` is parsed as syntax.
+                // If multiple parts, wrap in parens and join with AND so a
+                // punctuated term like `foo-bar` becomes `(foo AND bar)`.
                 let fts_term = if rendered_parts.len() > 1 {
                     format!("({})", rendered_parts.join(" AND "))
                 } else {
@@ -6435,10 +6722,9 @@ mod tests {
 
     #[test]
     fn search_deduplication_across_pages_repro() {
-        // Reproduction of "duplicate content across pages" bug.
-        // If we fetch page 1 (limit 1) and page 2 (limit 1) separately,
-        // and deduplication happens AFTER fetching the window,
-        // we might see the same content on both pages.
+        // Distinct sessions with identical content should remain visible across
+        // pages. Global pagination still has to happen after deduplication, but
+        // dedup itself only coalesces hits that share message-level provenance.
 
         let dir = TempDir::new().unwrap();
         let index_path = dir.path();
@@ -6508,11 +6794,8 @@ mod tests {
             .search("duplicate", SearchFilters::default(), 1, 1, FieldMask::FULL)
             .unwrap();
 
-        // IF deduplication works globally, page 2 should be EMPTY (because we only have 1 unique content).
-        assert!(
-            page2.is_empty(),
-            "Page 2 should be empty because deduplication works globally"
-        );
+        assert_eq!(page2.len(), 1);
+        assert_ne!(page1[0].source_path, page2[0].source_path);
     }
 
     #[test]
@@ -7391,38 +7674,40 @@ mod tests {
         let db_path = temp_dir.path().join("legacy-fts.db");
 
         {
-            let conn = LegacyConnection::open(&db_path)?;
-            conn.execute_batch(
-                "CREATE TABLE sources (id TEXT PRIMARY KEY, kind TEXT);
-                 CREATE TABLE agents (id INTEGER PRIMARY KEY, slug TEXT NOT NULL UNIQUE);
-                 CREATE TABLE workspaces (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE);
-                 CREATE TABLE conversations (
-                    id INTEGER PRIMARY KEY,
-                    agent_id INTEGER,
-                    workspace_id INTEGER,
-                    source_id TEXT,
-                    origin_host TEXT,
-                    title TEXT,
-                    source_path TEXT
-                 );
-                 CREATE TABLE messages (
-                    id INTEGER PRIMARY KEY,
-                    conversation_id INTEGER,
-                    idx INTEGER,
-                    content TEXT,
-                    created_at INTEGER
-                 );
-                 CREATE VIRTUAL TABLE fts_messages USING fts5(
-                    content,
-                    title,
-                    agent,
-                    workspace,
-                    source_path,
-                    created_at UNINDEXED,
-                    message_id UNINDEXED,
-                    tokenize='porter'
-                 );",
-            )?;
+            let storage = FrankenStorage::open(&db_path)?;
+            let agent = Agent {
+                id: None,
+                slug: "codex".into(),
+                name: "Codex".into(),
+                version: None,
+                kind: AgentKind::Cli,
+            };
+            let agent_id = storage.ensure_agent(&agent)?;
+            let conversation = Conversation {
+                id: None,
+                agent_slug: "codex".into(),
+                workspace: Some(PathBuf::from("/tmp/workspace")),
+                external_id: Some("dup-fts-schema".into()),
+                title: Some("Duplicate FTS schema".into()),
+                source_path: PathBuf::from("/tmp/dup-fts-schema.jsonl"),
+                started_at: Some(1_700_000_000_000),
+                ended_at: Some(1_700_000_000_100),
+                approx_tokens: Some(42),
+                metadata_json: serde_json::Value::Null,
+                messages: vec![Message {
+                    id: None,
+                    idx: 0,
+                    role: MessageRole::User,
+                    author: Some("user".into()),
+                    created_at: Some(1_700_000_000_050),
+                    content: "message that should remain queryable".into(),
+                    extra_json: serde_json::Value::Null,
+                    snippets: Vec::new(),
+                }],
+                source_id: "local".into(),
+                origin_host: None,
+            };
+            storage.insert_conversation_tree(agent_id, None, &conversation)?;
         }
 
         let legacy_count_before: i64 = LegacyConnection::open(&db_path)?.query_row(
@@ -7434,6 +7719,20 @@ mod tests {
             legacy_count_before, 1,
             "legacy fixture should start with one sqlite_master entry"
         );
+        let duplicate_legacy_fts_sql = "CREATE VIRTUAL TABLE fts_messages USING fts5(content, title, agent, workspace, source_path, created_at UNINDEXED, message_id UNINDEXED, tokenize='porter')";
+        let conn = LegacyConnection::open(&db_path)?;
+        conn.execute_batch("PRAGMA writable_schema = ON;")?;
+        conn.execute(
+            "INSERT INTO sqlite_master(type, name, tbl_name, rootpage, sql)
+             VALUES('table', 'fts_messages', 'fts_messages', 0, ?1)",
+            [duplicate_legacy_fts_sql],
+        )?;
+        conn.execute(
+            "DELETE FROM meta WHERE key = ?1",
+            ["fts_frankensqlite_rebuild_generation"],
+        )?;
+        conn.execute_batch("PRAGMA writable_schema = OFF;")?;
+        drop(conn);
 
         let client = SearchClient {
             reader: None,
@@ -7475,91 +7774,72 @@ mod tests {
         let db_path = temp_dir.path().join("hyphenated-rusqlite-fallback.db");
 
         {
-            let conn = LegacyConnection::open(&db_path)?;
-            conn.execute_batch(
-                "CREATE TABLE sources (id TEXT PRIMARY KEY, kind TEXT);
-                 CREATE TABLE agents (id INTEGER PRIMARY KEY, slug TEXT NOT NULL UNIQUE);
-                 CREATE TABLE workspaces (id INTEGER PRIMARY KEY, path TEXT NOT NULL UNIQUE);
-                 CREATE TABLE conversations (
-                    id INTEGER PRIMARY KEY,
-                    agent_id INTEGER,
-                    workspace_id INTEGER,
-                    source_id TEXT,
-                    origin_host TEXT,
-                    title TEXT,
-                    source_path TEXT
-                 );
-                 CREATE TABLE messages (
-                    id INTEGER PRIMARY KEY,
-                    conversation_id INTEGER,
-                    idx INTEGER,
-                    content TEXT,
-                    created_at INTEGER
-                 );
-                 CREATE VIRTUAL TABLE fts_messages USING fts5(
-                    content,
-                    title,
-                    agent,
-                    workspace,
-                    source_path,
-                    created_at UNINDEXED,
-                    content='',
-                    tokenize='porter'
-                 );",
-            )?;
-            conn.execute("INSERT INTO sources(id, kind) VALUES('local', 'local')", [])?;
-            conn.execute("INSERT INTO agents(id, slug) VALUES(1, 'codex')", [])?;
+            let storage = FrankenStorage::open(&db_path)?;
+            let conn = storage.raw();
             conn.execute(
-                "INSERT INTO workspaces(id, path) VALUES(1, '/ws/alpha')",
-                [],
+                "INSERT INTO agents(id, slug, name, kind, created_at, updated_at)
+                 VALUES(1, 'codex', 'Codex', 'codex', 1, 1)",
             )?;
-            conn.execute("INSERT INTO workspaces(id, path) VALUES(2, '/ws/beta')", [])?;
+            conn.execute("INSERT INTO workspaces(id, path) VALUES(1, '/ws/alpha')")?;
+            conn.execute("INSERT INTO workspaces(id, path) VALUES(2, '/ws/beta')")?;
             conn.execute(
                 "INSERT INTO conversations(id, agent_id, workspace_id, source_id, origin_host, title, source_path)
                  VALUES(1, 1, 1, 'local', NULL, 'alpha bead', '/tmp/alpha.jsonl')",
-                [],
             )?;
             conn.execute(
                 "INSERT INTO conversations(id, agent_id, workspace_id, source_id, origin_host, title, source_path)
                  VALUES(2, 1, 2, 'local', NULL, 'beta bead', '/tmp/beta.jsonl')",
-                [],
             )?;
             conn.execute(
-                "INSERT INTO messages(id, conversation_id, idx, content, created_at)
-                 VALUES(11, 1, 0, 'Need follow-up on br-123 root cause', 100)",
-                [],
+                "INSERT INTO messages(id, conversation_id, idx, role, content, created_at)
+                 VALUES(11, 1, 0, 'user', 'Need follow-up on br-123 root cause', 100)",
             )?;
             conn.execute(
-                "INSERT INTO messages(id, conversation_id, idx, content, created_at)
-                 VALUES(12, 2, 0, 'Need follow-up on br-123 user report', 101)",
-                [],
+                "INSERT INTO messages(id, conversation_id, idx, role, content, created_at)
+                 VALUES(12, 2, 0, 'user', 'Need follow-up on br-123 user report', 101)",
             )?;
-            conn.execute(
+            conn.execute_compat(
                 "INSERT INTO fts_messages(rowid, content, title, agent, workspace, source_path, created_at)
                  VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![
-                    11_i64,
-                    "Need follow-up on br-123 root cause",
-                    "alpha bead",
-                    "codex",
-                    "/ws/alpha",
-                    "/tmp/alpha.jsonl",
-                    100_i64
+                &[
+                    ParamValue::from(11_i64),
+                    ParamValue::from("Need follow-up on br-123 root cause"),
+                    ParamValue::from("alpha bead"),
+                    ParamValue::from("codex"),
+                    ParamValue::from("/ws/alpha"),
+                    ParamValue::from("/tmp/alpha.jsonl"),
+                    ParamValue::from(100_i64),
                 ],
             )?;
-            conn.execute(
+            conn.execute_compat(
                 "INSERT INTO fts_messages(rowid, content, title, agent, workspace, source_path, created_at)
                  VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![
-                    12_i64,
-                    "Need follow-up on br-123 user report",
-                    "beta bead",
-                    "codex",
-                    "/ws/beta",
-                    "/tmp/beta.jsonl",
-                    101_i64
+                &[
+                    ParamValue::from(12_i64),
+                    ParamValue::from("Need follow-up on br-123 user report"),
+                    ParamValue::from("beta bead"),
+                    ParamValue::from("codex"),
+                    ParamValue::from("/ws/beta"),
+                    ParamValue::from("/tmp/beta.jsonl"),
+                    ParamValue::from(101_i64),
                 ],
             )?;
+            let preclose_total_rows = conn.query("SELECT rowid FROM fts_messages")?;
+            assert_eq!(
+                preclose_total_rows.len(),
+                2,
+                "freshly seeded file-backed FTS should retain the inserted rows"
+            );
+            let transpiled = transpile_to_fts5("br-123").expect("transpiled fallback query");
+            let preclose_rows = conn.query_with_params(
+                "SELECT rowid FROM fts_messages WHERE fts_messages MATCH ?",
+                &params_from_iter(vec![ParamValue::from(transpiled.as_str())]),
+            )?;
+            assert_eq!(
+                preclose_rows.len(),
+                2,
+                "freshly seeded file-backed FTS should match the transpiled hyphenated query before reopen"
+            );
         }
 
         let client = SearchClient {
@@ -7579,11 +7859,31 @@ mod tests {
             last_tantivy_total_count: Mutex::new(None),
         };
 
+        let guard = client.sqlite_guard()?;
+        let conn = guard.as_ref().expect("sqlite guard should reopen file db");
+        let reopened_total_rows = conn.query("SELECT rowid FROM fts_messages")?;
+        assert_eq!(
+            reopened_total_rows.len(),
+            2,
+            "reopened file-backed FTS should still contain the seeded rows"
+        );
+        let transpiled = transpile_to_fts5("br-123").expect("transpiled fallback query");
+        let raw_rows = conn.query_with_params(
+            "SELECT rowid FROM fts_messages WHERE fts_messages MATCH ?",
+            &params_from_iter(vec![ParamValue::from(transpiled.as_str())]),
+        )?;
+        assert_eq!(
+            raw_rows.len(),
+            2,
+            "reopened file-backed FTS should still match the transpiled hyphenated query"
+        );
+        drop(guard);
+
         let all_hits = client.search("br-123", SearchFilters::default(), 10, 0, FieldMask::FULL)?;
         assert_eq!(all_hits.len(), 2);
         assert!(
             all_hits.iter().all(|hit| hit.content.contains("br-123")),
-            "hyphenated bead IDs should survive the rusqlite fallback path"
+            "hyphenated bead IDs should survive the file-backed sqlite fallback path"
         );
 
         let leading_or_hits = client.search(
@@ -7706,7 +8006,6 @@ mod tests {
                 43_i64
             ],
         )?;
-
         let client = SearchClient {
             reader: None,
             sqlite: Mutex::new(Some(SendConnection(conn))),
@@ -7723,6 +8022,15 @@ mod tests {
             semantic: Mutex::new(None),
             last_tantivy_total_count: Mutex::new(None),
         };
+        let direct_hits = client.search_sqlite_fts5(
+            Path::new(":memory:"),
+            "auth",
+            SearchFilters::default(),
+            5,
+            0,
+            FieldMask::FULL,
+        )?;
+        assert_eq!(direct_hits.len(), 2);
 
         let hits = client.search("auth", SearchFilters::default(), 5, 0, FieldMask::FULL)?;
         assert_eq!(hits.len(), 2);
@@ -11341,19 +11649,19 @@ mod tests {
         assert_eq!(transpile_to_fts5("OR test"), Some("test".to_string()));
         assert_eq!(
             transpile_to_fts5("OR foo-bar"),
-            Some("\"foo-bar\"".to_string())
+            Some("(foo AND bar)".to_string())
         );
     }
 
     #[test]
-    fn transpile_to_fts5_quotes_hyphenated_subterms_after_sanitization_split() {
+    fn transpile_to_fts5_splits_hyphenated_subterms_for_sqlite_fts() {
         assert_eq!(
             transpile_to_fts5("br-123.jsonl"),
-            Some("(\"br-123\" AND jsonl)".to_string())
+            Some("(br AND 123 AND jsonl)".to_string())
         );
         assert_eq!(
             transpile_to_fts5("br-123.json*"),
-            Some("(\"br-123\" AND json*)".to_string())
+            Some("(br AND 123 AND json*)".to_string())
         );
     }
 
@@ -11365,12 +11673,12 @@ mod tests {
         );
         assert_eq!(
             transpile_to_fts5("foo NOT bar-baz"),
-            Some("foo NOT \"bar-baz\"".to_string())
+            Some("foo NOT (bar AND baz)".to_string())
         );
     }
 
     #[test]
-    fn search_sqlite_fts5_returns_empty_by_design() {
+    fn search_sqlite_fts5_returns_empty_when_sqlite_is_unavailable() {
         let client = SearchClient {
             reader: None,
             sqlite: Mutex::new(None),
@@ -11400,7 +11708,7 @@ mod tests {
         assert!(hits.is_ok(), "disabled FTS5 path should stay non-fatal");
         assert!(
             hits.unwrap().is_empty(),
-            "disabled FTS5 path should keep returning an empty result set"
+            "unavailable SQLite fallback should keep returning an empty result set"
         );
     }
 
@@ -11757,7 +12065,7 @@ mod tests {
     }
 
     #[test]
-    fn search_punctuation_splits_into_terms() -> Result<()> {
+    fn search_dot_punctuation_splits_terms_but_hyphens_preserve_compound_semantics() -> Result<()> {
         let dir = TempDir::new()?;
         let mut index = TantivyIndex::open_or_create(dir.path())?;
 
@@ -11790,7 +12098,7 @@ mod tests {
         assert_eq!(hits.len(), 1);
 
         let hits = client.search("foo-bar", SearchFilters::default(), 10, 0, FieldMask::FULL)?;
-        assert_eq!(hits.len(), 1);
+        assert_eq!(hits.len(), 0);
 
         Ok(())
     }
@@ -13669,7 +13977,8 @@ mod tests {
     fn special_char_regex_char_class() {
         let sanitized = sanitize_query("[a-z]+");
         let parts: Vec<&str> = sanitized.split_whitespace().collect();
-        assert_eq!(parts, vec!["a", "z"]);
+        assert_eq!(parts, vec!["a-z"]);
+        assert_eq!(normalize_term_parts("[a-z]+"), vec!["a", "z"]);
     }
 
     #[test]
@@ -13748,7 +14057,8 @@ mod tests {
         let sanitized = sanitize_query("| rm -rf /");
         let parts: Vec<&str> = sanitized.split_whitespace().collect();
         assert!(parts.contains(&"rm"));
-        assert!(parts.contains(&"rf"));
+        assert!(parts.contains(&"-rf"));
+        assert_eq!(normalize_term_parts("| rm -rf /"), vec!["rm", "rf"]);
         assert!(!sanitized.contains('|'));
         assert!(!sanitized.contains('/'));
     }
@@ -14901,23 +15211,23 @@ mod tests {
         assert_eq!(transpile_to_fts5("*foo"), None);
         assert_eq!(transpile_to_fts5("f*o"), None);
 
-        // Hyphens are preserved by cass_sanitize_query, then quoted for FTS5
-        // so stock SQLite parses the term instead of treating `-bar` as syntax.
+        // SQLite FTS5's porter tokenizer splits punctuation into separate
+        // fragments, so fallback queries must do the same.
         assert_eq!(
             transpile_to_fts5("foo-bar"),
-            Some("\"foo-bar\"".to_string())
+            Some("(foo AND bar)".to_string())
         );
         assert_eq!(
             transpile_to_fts5("foo-bar*"),
-            Some("\"foo-bar\"*".to_string())
+            Some("(foo AND bar*)".to_string())
         );
         assert_eq!(
             transpile_to_fts5("br-123.jsonl"),
-            Some("(\"br-123\" AND jsonl)".to_string())
+            Some("(br AND 123 AND jsonl)".to_string())
         );
         assert_eq!(
             transpile_to_fts5("br-123.json*"),
-            Some("(\"br-123\" AND json*)".to_string())
+            Some("(br AND 123 AND json*)".to_string())
         );
 
         // Leading unary-NOT forms are not valid FTS5 queries.

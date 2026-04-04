@@ -47,6 +47,7 @@
 //! ```
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -306,11 +307,16 @@ impl TwoTierIndex {
         builder.set_fast_embedder_id(&fast_embedder_id);
         builder.set_quality_embedder_id(&quality_embedder_id);
 
-        let mut doc_ids = Vec::with_capacity(doc_count);
-        let mut message_ids = Vec::with_capacity(doc_count);
+        let mut metadata_by_encoded_id = HashMap::with_capacity(doc_count);
 
         for entry in entries {
             let doc_id_str = entry.doc_id.encode();
+            if metadata_by_encoded_id
+                .insert(doc_id_str.clone(), (entry.doc_id.clone(), entry.message_id))
+                .is_some()
+            {
+                bail!("duplicate document id encountered while building two-tier index: {doc_id_str}");
+            }
             let fast_f32: Vec<f32> = entry.fast_embedding.iter().map(|v| f32::from(*v)).collect();
             let quality_f32: Vec<f32> = entry
                 .quality_embedding
@@ -321,13 +327,30 @@ impl TwoTierIndex {
             builder
                 .add_record(&doc_id_str, &fast_f32, Some(&quality_f32))
                 .map_err(|e| anyhow::anyhow!("failed to add record {doc_id_str}: {e}"))?;
-            doc_ids.push(entry.doc_id);
-            message_ids.push(entry.message_id);
         }
 
         let fs_index = builder
             .finish()
             .map_err(|e| anyhow::anyhow!("failed to finish fs index: {e}"))?;
+
+        // frankensearch persists records sorted by doc_id hash/doc_id, so hit indices
+        // are in fast-index order rather than cass insertion order. Rebuild our side
+        // tables to match that canonical order before any search results are exposed.
+        let mut doc_ids = Vec::with_capacity(doc_count);
+        let mut message_ids = Vec::with_capacity(doc_count);
+        for idx in 0..doc_count {
+            let encoded = fs_index
+                .doc_id_at(idx)
+                .map_err(|e| anyhow::anyhow!("failed to read fs doc_id at index {idx}: {e}"))?;
+            let (doc_id, message_id) =
+                metadata_by_encoded_id.remove(encoded).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "frankensearch index returned unknown doc_id at index {idx}: {encoded}"
+                    )
+                })?;
+            doc_ids.push(doc_id);
+            message_ids.push(message_id);
+        }
 
         Ok(Self {
             metadata: TwoTierMetadata {
@@ -1008,6 +1031,45 @@ mod tests {
         // Results should be sorted by score descending
         for window in results.windows(2) {
             assert!(window[0].score >= window[1].score);
+        }
+    }
+
+    #[test]
+    fn test_side_tables_follow_frankensearch_index_order() {
+        let config = TwoTierConfig::default();
+        let entries = vec![
+            TwoTierEntry {
+                doc_id: DocumentId::Session("session-z".into()),
+                message_id: 300,
+                fast_embedding: vec![f16::from_f32(1.0); config.fast_dimension],
+                quality_embedding: vec![f16::from_f32(1.0); config.quality_dimension],
+            },
+            TwoTierEntry {
+                doc_id: DocumentId::Session("session-a".into()),
+                message_id: 100,
+                fast_embedding: vec![f16::from_f32(0.5); config.fast_dimension],
+                quality_embedding: vec![f16::from_f32(0.5); config.quality_dimension],
+            },
+            TwoTierEntry {
+                doc_id: DocumentId::Session("session-m".into()),
+                message_id: 200,
+                fast_embedding: vec![f16::from_f32(0.25); config.fast_dimension],
+                quality_embedding: vec![f16::from_f32(0.25); config.quality_dimension],
+            },
+        ];
+        let expected_by_encoded = HashMap::from([
+            ("s:session-z".to_string(), 300_u64),
+            ("s:session-a".to_string(), 100_u64),
+            ("s:session-m".to_string(), 200_u64),
+        ]);
+
+        let index = TwoTierIndex::build("fast-256", "quality-384", &config, entries).unwrap();
+        let fs_index = index.fs_index.as_ref().expect("non-empty fs index");
+
+        for idx in 0..index.len() {
+            let encoded = fs_index.doc_id_at(idx).expect("fs doc_id");
+            assert_eq!(index.doc_ids[idx].encode(), encoded);
+            assert_eq!(index.message_ids[idx], expected_by_encoded[encoded]);
         }
     }
 

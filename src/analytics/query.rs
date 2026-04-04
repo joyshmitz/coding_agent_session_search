@@ -3334,35 +3334,6 @@ pub fn query_session_scatter(
         ));
     }
 
-    // Time filters use message timestamp (or conversation started_at fallback),
-    // Time filters prefer the best available raw event timestamp, with
-    // message_metrics/token_usage fallback for legacy rows where messages.created_at is missing.
-    let raw_timestamp_expr = match (has_mm_created_at, has_tu_timestamp) {
-        (true, true) => {
-            "COALESCE(m.created_at, mm.created_at_ms, tu.timestamp_ms, c.started_at, 0)"
-        }
-        (true, false) => "COALESCE(m.created_at, mm.created_at_ms, c.started_at, 0)",
-        (false, true) => "COALESCE(m.created_at, tu.timestamp_ms, c.started_at, 0)",
-        (false, false) => "COALESCE(m.created_at, c.started_at, 0)",
-    };
-    let timestamp_expr = format!(
-        "CASE WHEN {raw_timestamp_expr} BETWEEN 0 AND 100000000000 THEN {raw_timestamp_expr} * 1000 ELSE {raw_timestamp_expr} END"
-    );
-    if let Some(min) = filter.since_ms {
-        bind_values.push(ParamValue::from(min));
-        where_parts.push(format!("{} >= ?{}", timestamp_expr, bind_values.len()));
-    }
-    if let Some(max) = filter.until_ms {
-        bind_values.push(ParamValue::from(max));
-        where_parts.push(format!("{} <= ?{}", timestamp_expr, bind_values.len()));
-    }
-
-    let where_clause = if where_parts.is_empty() {
-        String::new()
-    } else {
-        format!(" WHERE {}", where_parts.join(" AND "))
-    };
-
     let has_conv_rollup = table_has_column(conn, "conversations", "grand_total_tokens");
     let has_mm_api_source =
         has_message_metrics && table_has_column(conn, "message_metrics", "api_data_source");
@@ -3395,38 +3366,105 @@ pub fn query_session_scatter(
             mm.api_cache_creation_tokens,
             mm.api_thinking_tokens
         ) IS NOT NULL";
-    let mm_api_source_is_api_or_legacy =
-        "LOWER(TRIM(COALESCE(mm.api_data_source, 'api'))) != 'estimated'";
-    let detailed_token_expr = if has_message_metrics && has_token_usage {
+    let message_token_expr = if has_message_metrics && has_token_usage {
         if has_mm_api_source {
             format!(
-                "SUM(CASE
-                    WHEN mm.message_id IS NOT NULL
-                        AND {mm_api_source_is_api_or_legacy}
-                        AND {mm_has_api_values}
-                    THEN {mm_api_sum}
+                "CASE
+                    WHEN mm.message_id IS NULL THEN COALESCE(tu.total_tokens, 0)
+                    WHEN LOWER(TRIM(COALESCE(mm.api_data_source, 'api'))) = 'estimated'
+                        THEN COALESCE(tu.total_tokens, 0)
+                    WHEN {mm_has_api_values} THEN {mm_api_sum}
                     ELSE COALESCE(tu.total_tokens, 0)
-                 END)"
+                 END"
             )
         } else {
             format!(
-                "SUM(CASE
-                    WHEN mm.message_id IS NOT NULL
-                        AND {mm_has_api_values}
-                    THEN {mm_api_sum}
+                "CASE
+                    WHEN mm.message_id IS NULL THEN COALESCE(tu.total_tokens, 0)
+                    WHEN {mm_has_api_values} THEN {mm_api_sum}
                     ELSE COALESCE(tu.total_tokens, 0)
-                 END)"
+                 END"
             )
         }
     } else if has_message_metrics {
-        format!("SUM({mm_api_sum})")
+        format!(
+            "CASE
+                WHEN mm.message_id IS NOT NULL THEN {mm_api_sum}
+                ELSE 0
+             END"
+        )
     } else if has_token_usage {
-        "SUM(COALESCE(tu.total_tokens, 0))".to_string()
+        "COALESCE(tu.total_tokens, 0)".to_string()
     } else {
-        // Use SUM(0) instead of bare 0 — frankensqlite requires all non-GROUP-BY
-        // columns in a grouped query to be aggregate expressions.
-        "SUM(0)".to_string()
+        "0".to_string()
     };
+    let normalize_sql = |expr: &str| {
+        format!("CASE WHEN {expr} BETWEEN 0 AND 100000000000 THEN {expr} * 1000 ELSE {expr} END")
+    };
+    let normalized_created_at = normalize_sql("m.created_at");
+    let normalized_mm_created_at = normalize_sql("mm.created_at_ms");
+    let normalized_tu_timestamp = normalize_sql("tu.timestamp_ms");
+    let normalized_started_at = normalize_sql("c_msg.started_at");
+    let message_timestamp_expr = match (has_mm_created_at, has_tu_timestamp) {
+        (true, true) => format!(
+            "CASE
+                WHEN m.created_at IS NOT NULL THEN {normalized_created_at}
+                WHEN mm.created_at_ms IS NOT NULL THEN {normalized_mm_created_at}
+                WHEN tu.timestamp_ms IS NOT NULL THEN {normalized_tu_timestamp}
+                WHEN c_msg.started_at IS NOT NULL THEN {normalized_started_at}
+                ELSE 0
+             END"
+        ),
+        (true, false) => format!(
+            "CASE
+                WHEN m.created_at IS NOT NULL THEN {normalized_created_at}
+                WHEN mm.created_at_ms IS NOT NULL THEN {normalized_mm_created_at}
+                WHEN c_msg.started_at IS NOT NULL THEN {normalized_started_at}
+                ELSE 0
+             END"
+        ),
+        (false, true) => format!(
+            "CASE
+                WHEN m.created_at IS NOT NULL THEN {normalized_created_at}
+                WHEN tu.timestamp_ms IS NOT NULL THEN {normalized_tu_timestamp}
+                WHEN c_msg.started_at IS NOT NULL THEN {normalized_started_at}
+                ELSE 0
+             END"
+        ),
+        (false, false) => format!(
+            "CASE
+                WHEN m.created_at IS NOT NULL THEN {normalized_created_at}
+                WHEN c_msg.started_at IS NOT NULL THEN {normalized_started_at}
+                ELSE 0
+             END"
+        ),
+    };
+    let per_message_sql = format!(
+        "(SELECT m.id AS message_id,
+                 m.conversation_id AS conversation_id,
+                 {message_token_expr} AS message_api_tokens,
+                 {message_timestamp_expr} AS event_ts_ms
+          FROM messages m
+          JOIN conversations c_msg ON c_msg.id = m.conversation_id
+          {message_metrics_join}
+          {token_usage_join}) msg"
+    );
+    if let Some(min) = filter.since_ms {
+        bind_values.push(ParamValue::from(min));
+        where_parts.push(format!("msg.event_ts_ms >= ?{}", bind_values.len()));
+    }
+    if let Some(max) = filter.until_ms {
+        bind_values.push(ParamValue::from(max));
+        where_parts.push(format!("msg.event_ts_ms <= ?{}", bind_values.len()));
+    }
+
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_parts.join(" AND "))
+    };
+
+    let detailed_token_expr = "SUM(COALESCE(msg.message_api_tokens, 0))";
     let token_expr = if has_conv_rollup {
         format!(
             "CASE
@@ -3436,7 +3474,7 @@ pub fn query_session_scatter(
              END"
         )
     } else {
-        detailed_token_expr
+        detailed_token_expr.to_string()
     };
 
     let agents_join = if has_agents {
@@ -3448,16 +3486,14 @@ pub fn query_session_scatter(
     let sql = format!(
         "SELECT {normalized_source_sql},
                 c.source_path,
-                COUNT(m.id) AS message_count,
+                COUNT(msg.message_id) AS message_count,
                 {token_expr} AS api_tokens_total
          FROM conversations c
-         JOIN messages m ON m.conversation_id = c.id
+         JOIN {per_message_sql} ON msg.conversation_id = c.id
          {agents_join}
-         {message_metrics_join}
-         {token_usage_join}
          {where_clause}
          GROUP BY c.id, {normalized_source_sql}, c.source_path
-         HAVING COUNT(m.id) > 0
+         HAVING COUNT(msg.message_id) > 0
          ORDER BY api_tokens_total DESC, message_count DESC
          LIMIT {limit}"
     );
