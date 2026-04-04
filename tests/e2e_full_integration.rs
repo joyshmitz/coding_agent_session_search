@@ -8,12 +8,12 @@
 //!
 //! Bead: coding_agent_session_search-1p9xd
 
-use assert_cmd::cargo::cargo_bin_cmd;
 use coding_agent_search::storage::sqlite::SqliteStorage;
 use frankensqlite::compat::{ConnectionExt, RowExt};
 use serde_json::Value;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 #[macro_use]
 mod util;
@@ -91,6 +91,12 @@ fn parse_search_hits(output: &[u8]) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+fn cass_bin() -> String {
+    std::env::var("CARGO_BIN_EXE_cass")
+        .ok()
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_cass").to_string())
+}
+
 // ============================================================================
 // 1. FULL PIPELINE: Index + Search with Multiple Agents
 // ============================================================================
@@ -134,7 +140,7 @@ fn e2e_multi_agent_index_and_search() {
     );
 
     // ---- Phase 2: Full index ----
-    let index_result = cargo_bin_cmd!("cass")
+    let index_result = Command::new(cass_bin())
         .args(["index", "--full", "--data-dir"])
         .arg(&data_dir)
         .current_dir(home)
@@ -181,7 +187,7 @@ fn e2e_multi_agent_index_and_search() {
     );
 
     // ---- Phase 4: Lexical search for Codex content ----
-    let codex_search = cargo_bin_cmd!("cass")
+    let codex_search = Command::new(cass_bin())
         .args([
             "search",
             "authentication_flow_alpha",
@@ -220,7 +226,7 @@ fn e2e_multi_agent_index_and_search() {
     );
 
     // ---- Phase 5: Lexical search for Claude content ----
-    let claude_search = cargo_bin_cmd!("cass")
+    let claude_search = Command::new(cass_bin())
         .args(["search", "database_query_beta", "--robot", "--data-dir"])
         .arg(&data_dir)
         .current_dir(home)
@@ -243,7 +249,7 @@ fn e2e_multi_agent_index_and_search() {
     );
 
     // ---- Phase 6: Search for non-existent term ----
-    let empty_search = cargo_bin_cmd!("cass")
+    let empty_search = Command::new(cass_bin())
         .args([
             "search",
             "zzz_nonexistent_term_zzz",
@@ -304,7 +310,7 @@ fn e2e_robot_mode_json_structure() {
         1733097600000,
     );
 
-    cargo_bin_cmd!("cass")
+    let index_output = Command::new(cass_bin())
         .args(["index", "--full", "--data-dir"])
         .arg(&data_dir)
         .current_dir(home)
@@ -312,10 +318,16 @@ fn e2e_robot_mode_json_structure() {
         .env("HOME", home)
         .env("XDG_DATA_HOME", &xdg_data)
         .env("XDG_CONFIG_HOME", &xdg_config)
-        .assert()
-        .success();
+        .output()
+        .expect("index command should execute");
 
-    let output = cargo_bin_cmd!("cass")
+    assert!(
+        index_output.status.success(),
+        "Index should succeed. stderr: {}",
+        String::from_utf8_lossy(&index_output.stderr)
+    );
+
+    let output = Command::new(cass_bin())
         .args([
             "search",
             "unique_json_structure_token",
@@ -385,7 +397,7 @@ fn e2e_database_integrity() {
         1731744000000,
     );
 
-    cargo_bin_cmd!("cass")
+    let index_output = Command::new(cass_bin())
         .args(["index", "--full", "--data-dir"])
         .arg(&data_dir)
         .current_dir(home)
@@ -393,8 +405,14 @@ fn e2e_database_integrity() {
         .env("HOME", home)
         .env("XDG_DATA_HOME", &xdg_data)
         .env("XDG_CONFIG_HOME", &xdg_config)
-        .assert()
-        .success();
+        .output()
+        .expect("index command should execute");
+
+    assert!(
+        index_output.status.success(),
+        "Index should succeed. stderr: {}",
+        String::from_utf8_lossy(&index_output.stderr)
+    );
 
     let db_path = data_dir.join("agent_search.db");
     let storage = SqliteStorage::open(&db_path).expect("open db");
@@ -465,7 +483,7 @@ fn e2e_stats_after_index() {
         1732118400000,
     );
 
-    cargo_bin_cmd!("cass")
+    let index_output = Command::new(cass_bin())
         .args(["index", "--full", "--data-dir"])
         .arg(&data_dir)
         .current_dir(home)
@@ -473,11 +491,17 @@ fn e2e_stats_after_index() {
         .env("HOME", home)
         .env("XDG_DATA_HOME", &xdg_data)
         .env("XDG_CONFIG_HOME", &xdg_config)
-        .assert()
-        .success();
+        .output()
+        .expect("index command should execute");
+
+    assert!(
+        index_output.status.success(),
+        "Index should succeed. stderr: {}",
+        String::from_utf8_lossy(&index_output.stderr)
+    );
 
     // Run stats command (exercises the frankensqlite-migrated run_stats path)
-    let stats_output = cargo_bin_cmd!("cass")
+    let stats_output = Command::new(cass_bin())
         .args(["stats", "--data-dir"])
         .arg(&data_dir)
         .current_dir(home)
@@ -527,7 +551,7 @@ fn e2e_diag_after_index() {
         1732118400000,
     );
 
-    cargo_bin_cmd!("cass")
+    let index_output = Command::new(cass_bin())
         .args(["index", "--full", "--data-dir"])
         .arg(&data_dir)
         .current_dir(home)
@@ -535,11 +559,17 @@ fn e2e_diag_after_index() {
         .env("HOME", home)
         .env("XDG_DATA_HOME", &xdg_data)
         .env("XDG_CONFIG_HOME", &xdg_config)
-        .assert()
-        .success();
+        .output()
+        .expect("index command should execute");
+
+    assert!(
+        index_output.status.success(),
+        "Index should succeed. stderr: {}",
+        String::from_utf8_lossy(&index_output.stderr)
+    );
 
     // Run diag command
-    let diag_output = cargo_bin_cmd!("cass")
+    let diag_output = Command::new(cass_bin())
         .args(["diag", "--data-dir"])
         .arg(&data_dir)
         .current_dir(home)

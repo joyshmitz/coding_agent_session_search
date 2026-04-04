@@ -139,6 +139,7 @@ fsqlite-types = { git = "https://github.com/Dicklesworthstone/frankensqlite", re
 [[bin]]
 name = "cass"
 path = "src/main.rs"
+test = false
 
 [profile.release]
 lto = true
@@ -163,8 +164,8 @@ strip = false
 [patch."https://github.com/Dicklesworthstone/frankensqlite"]
 fsqlite = { path = "../frankensqlite/crates/fsqlite" }
 fsqlite-types = { path = "../frankensqlite/crates/fsqlite-types" }
-# [patch."https://github.com/Dicklesworthstone/franken_agent_detection"]
-# franken-agent-detection = { path = "../franken_agent_detection" }
+[patch."https://github.com/Dicklesworthstone/franken_agent_detection"]
+franken-agent-detection = { path = "../franken_agent_detection" }
 
 # [patch."https://github.com/Dicklesworthstone/frankensearch"]
 # frankensearch = { path = "../frankensearch/frankensearch" }

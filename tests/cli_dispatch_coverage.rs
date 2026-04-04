@@ -2256,10 +2256,12 @@ fn analytics_subcommands_emit_uniform_json_envelope() {
     let data_dir = tmp_home.path().join("cass_data");
     fs::create_dir_all(&data_dir).expect("create data dir");
     let data_dir_str = data_dir.to_string_lossy().to_string();
-    // Create an empty-but-valid SQLite database so analytics commands can open
+    // Create an empty-but-valid cass database so analytics commands can open
     // it without requiring a full `cass index --full` run.
     let db_path = data_dir.join("agent_search.db");
-    rusqlite::Connection::open(&db_path).expect("create sqlite db");
+    let storage = coding_agent_search::storage::sqlite::FrankenStorage::open(&db_path)
+        .expect("create cass db");
+    drop(storage);
 
     let shared: Vec<&str> = vec![
         "--json",

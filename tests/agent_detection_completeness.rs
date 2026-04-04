@@ -134,20 +134,19 @@ fn connector_factories_all_instantiate_and_detect() {
     }
 }
 
-/// Feature-gated connectors (chatgpt, cursor, opencode) are available
-/// because cass enables all three features in Cargo.toml.
+/// Feature-gated connectors (chatgpt, cursor, opencode, crush) are available
+/// because cass enables all four features in Cargo.toml.
 #[test]
 fn feature_gated_connectors_available() {
     let slugs = factory_fad_slugs();
-    for gated in ["chatgpt", "cursor", "opencode"] {
+    for gated in ["chatgpt", "cursor", "opencode", "crush"] {
         assert!(
             slugs.contains(gated),
             "Feature-gated connector '{gated}' not found. \
              Check Cargo.toml enables the feature for franken-agent-detection"
         );
     }
-    // Update expected count to 18 to match the actual number of connectors
-    assert_eq!(slugs.len(), 18, "Expected 18 connector factories");
+    assert_eq!(slugs.len(), 19, "Expected 19 connector factories");
 }
 
 // ---------------------------------------------------------------------------
@@ -226,7 +225,7 @@ fn detect_installed_agents_report_structure() {
     let report = franken_agent_detection::detect_installed_agents(&opts)
         .expect("detect_installed_agents should not fail");
 
-    // Must cover all KNOWN_CONNECTORS (currently 18)
+    // Must cover the full KNOWN_CONNECTORS set.
     assert!(
         report.installed_agents.len() >= 15,
         "Expected >=15 agents in report, got {}",

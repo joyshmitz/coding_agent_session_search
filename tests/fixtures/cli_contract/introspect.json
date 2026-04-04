@@ -1682,6 +1682,12 @@
             "description": "Token usage, cost, tool, and model analytics",
             "arguments": [],
             "has_json_output": false
+        },
+        {
+            "name": "daemon",
+            "description": "Run the semantic model daemon (Unix only)",
+            "arguments": [],
+            "has_json_output": false
         }
     ],
     "response_schemas": {

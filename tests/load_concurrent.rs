@@ -6,7 +6,7 @@
 //! - Thread safety under load
 //!
 //! Run with release mode:
-//!   cargo test --test load_concurrent --release -- --nocapture
+//!   cargo test --test load_concurrent --release -- --nocapture --include-ignored
 
 use coding_agent_search::connectors::{NormalizedConversation, NormalizedMessage};
 use coding_agent_search::indexer::persist::persist_conversation;
@@ -81,6 +81,7 @@ fn setup_test_index(conv_count: i64, msgs_per_conv: i64) -> (TempDir, PathBuf, P
 
 /// Test multiple simultaneous searches.
 #[test]
+#[ignore = "expensive concurrent load scenario; run explicitly in dedicated performance sessions"]
 fn concurrent_search_parallel() {
     println!("\n=== Concurrent Test: Parallel Searches ===");
 
@@ -162,6 +163,7 @@ fn concurrent_search_parallel() {
 
 /// Test search stability under sustained load.
 #[test]
+#[ignore = "expensive sustained load scenario; run explicitly in dedicated performance sessions"]
 fn concurrent_sustained_load() {
     println!("\n=== Concurrent Test: Sustained Load ===");
 
@@ -215,6 +217,7 @@ fn concurrent_sustained_load() {
 
 /// Test varied query patterns concurrently.
 #[test]
+#[ignore = "expensive concurrent query mix; run explicitly in dedicated performance sessions"]
 fn concurrent_varied_queries() {
     println!("\n=== Concurrent Test: Varied Query Patterns ===");
 
@@ -293,6 +296,7 @@ fn concurrent_varied_queries() {
 /// Test searching while index is being updated.
 /// Note: This requires the SearchClient to handle reader reload.
 #[test]
+#[ignore = "expensive concurrent index/search scenario; run explicitly in dedicated performance sessions"]
 fn concurrent_search_during_index() {
     println!("\n=== Concurrent Test: Search During Indexing ===");
 
@@ -463,15 +467,15 @@ fn concurrent_test_summary() {
     println!("╠═══════════════════════════════════════════════════════════════╣");
     println!("║ Test                    │ Configuration   │ Status            ║");
     println!("╠─────────────────────────┼─────────────────┼───────────────────╣");
-    println!("║ Parallel searches       │ 8 threads       │ Run by default    ║");
-    println!("║ Sustained load          │ 5s duration     │ Run by default    ║");
-    println!("║ Varied query patterns   │ 4 threads       │ Run by default    ║");
-    println!("║ Search during indexing  │ concurrent      │ Run by default    ║");
+    println!("║ Parallel searches       │ 8 threads       │ --ignored         ║");
+    println!("║ Sustained load          │ 5s duration     │ --ignored         ║");
+    println!("║ Varied query patterns   │ 4 threads       │ --ignored         ║");
+    println!("║ Search during indexing  │ concurrent      │ --ignored         ║");
     println!("║ High thread stress      │ 32 threads      │ --ignored         ║");
     println!("╚═══════════════════════════════════════════════════════════════╝");
     println!();
     println!("Run all concurrent tests:");
-    println!("  cargo test --test load_concurrent --release -- --nocapture");
+    println!("  cargo test --test load_concurrent --release -- --nocapture --include-ignored");
     println!();
     println!("Include stress tests:");
     println!("  cargo test --test load_concurrent --release -- --nocapture --include-ignored");

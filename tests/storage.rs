@@ -568,16 +568,42 @@ fn fts_messages_is_fts5_virtual_table() {
 }
 
 #[test]
-fn fresh_database_fts_messages_is_queryable_via_rusqlite() {
+fn fresh_database_fts_messages_is_queryable_via_frankensqlite() {
     let tmp = tempfile::TempDir::new().unwrap();
     let db_path = tmp.path().join("fresh-fts.db");
-    let _storage = SqliteStorage::open(&db_path).expect("open");
+    let storage = SqliteStorage::open(&db_path).expect("open");
 
-    let conn = rusqlite::Connection::open(&db_path).expect("open rusqlite");
-    let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM fts_messages", [], |row| row.get(0))
-        .expect("fresh FTS table should be queryable via rusqlite");
+    let count: i64 = storage
+        .raw()
+        .query_row_map("SELECT COUNT(*) FROM fts_messages", &[], |row| {
+            row.get_typed(0)
+        })
+        .expect("fresh FTS table should be queryable via frankensqlite");
     assert_eq!(count, 0, "fresh FTS table should start empty");
+}
+
+#[test]
+fn open_disables_frankensqlite_autocommit_retain() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("autocommit-retain.db");
+    let storage = SqliteStorage::open(&db_path).expect("open");
+
+    let namespaced: i64 = storage
+        .raw()
+        .query_row_map("PRAGMA fsqlite.autocommit_retain;", &[], |row| {
+            row.get_typed(0)
+        })
+        .expect("fsqlite.autocommit_retain pragma should be queryable");
+    assert_eq!(
+        namespaced, 0,
+        "storage open should disable retained autocommit"
+    );
+
+    let alias: i64 = storage
+        .raw()
+        .query_row_map("PRAGMA autocommit_retain;", &[], |row| row.get_typed(0))
+        .expect("autocommit_retain pragma alias should be queryable");
+    assert_eq!(alias, 0, "autocommit_retain alias should also be disabled");
 }
 
 #[test]

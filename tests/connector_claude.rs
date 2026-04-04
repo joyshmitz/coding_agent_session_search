@@ -443,7 +443,7 @@ fn claude_connector_handles_empty_directory() {
     assert!(convs.is_empty());
 }
 
-/// Test `external_id` is filename
+/// Test `external_id` preserves the project-relative path under `projects/`
 #[test]
 fn claude_connector_sets_external_id() {
     let dir = create_claude_temp();
@@ -465,7 +465,7 @@ fn claude_connector_sets_external_id() {
     assert_eq!(convs.len(), 1);
     assert_eq!(
         convs[0].external_id,
-        Some("unique-session-id.jsonl".to_string())
+        Some("projects/test-proj/unique-session-id.jsonl".to_string())
     );
 }
 
