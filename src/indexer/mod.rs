@@ -2959,6 +2959,7 @@ pub fn run_index(
         let watch_recycle_interval: u32 = dotenvy::var("CASS_WATCH_RECYCLE_INTERVAL")
             .ok()
             .and_then(|v| v.parse().ok())
+            .filter(|&v| v > 0) // guard against division by zero
             .unwrap_or(50); // recycle every 50 watch callbacks
 
         // Semantic embedding cooldown state for watch mode.
@@ -6050,9 +6051,16 @@ pub mod persist {
         use fsqlite_types::value::SqliteValue;
         use serial_test::serial;
 
+        static ENV_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+            std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+        std::thread_local! {
+            static ENV_LOCK_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        }
+
         struct EnvGuard {
             key: &'static str,
             previous: Option<String>,
+            _lock: Option<std::sync::MutexGuard<'static, ()>>,
         }
 
         impl Drop for EnvGuard {
@@ -6068,16 +6076,38 @@ pub mod persist {
                         std::env::remove_var(self.key);
                     }
                 }
+                ENV_LOCK_DEPTH.with(|depth| {
+                    let current = depth.get();
+                    debug_assert!(current > 0, "env lock depth underflow");
+                    depth.set(current.saturating_sub(1));
+                });
             }
         }
 
+        fn acquire_env_lock() -> Option<std::sync::MutexGuard<'static, ()>> {
+            let mut guard = None;
+            ENV_LOCK_DEPTH.with(|depth| {
+                let current = depth.get();
+                if current == 0 {
+                    guard = Some(ENV_LOCK.lock().expect("env mutation lock"));
+                }
+                depth.set(current + 1);
+            });
+            guard
+        }
+
         fn set_env(key: &'static str, value: &str) -> EnvGuard {
+            let _lock = acquire_env_lock();
             let previous = dotenvy::var(key).ok();
             // SAFETY: isolated test mutates a process env var and restores via guard.
             unsafe {
                 std::env::set_var(key, value);
             }
-            EnvGuard { key, previous }
+            EnvGuard {
+                key,
+                previous,
+                _lock,
+            }
         }
 
         #[test]
