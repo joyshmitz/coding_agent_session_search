@@ -1,6 +1,5 @@
-use coding_agent_search::storage::sqlite::{CURRENT_SCHEMA_VERSION, MigrationError, SqliteStorage};
+use coding_agent_search::storage::sqlite::{MigrationError, SqliteStorage};
 use frankensqlite::Connection;
-use frankensqlite::compat::{ConnectionExt, RowExt};
 use std::path::Path;
 use tempfile::TempDir;
 
@@ -88,105 +87,26 @@ fn create_v1_db(path: &Path) {
 }
 
 #[test]
-fn test_migration_v1_to_current_preserves_data() {
+fn test_migration_v1_requires_rebuild() {
     let tmp = TempDir::new().unwrap();
     let db_path = tmp.path().join("v1_to_curr.db");
 
     create_v1_db(&db_path);
 
-    // Perform migration
-    let storage = SqliteStorage::open(&db_path).expect("open and migrate");
+    match SqliteStorage::open_or_rebuild(&db_path) {
+        Err(MigrationError::RebuildRequired {
+            reason,
+            backup_path,
+        }) => {
+            assert!(reason.contains("too old for in-place migration"));
 
-    // Check version
-    assert_eq!(storage.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
-
-    // Verify data preservation
-    let conn = storage.raw();
-
-    // Check Agent
-    let agent_name: String = conn
-        .query_row_map("SELECT name FROM agents WHERE slug = 'claude'", &[], |r| {
-            r.get_typed(0)
-        })
-        .unwrap();
-    assert_eq!(agent_name, "Claude");
-
-    // Check Conversation
-    let title: String = conn
-        .query_row_map(
-            "SELECT title FROM conversations WHERE source_path = '/logs/v1.jsonl'",
-            &[],
-            |r| r.get_typed(0),
-        )
-        .unwrap();
-    assert_eq!(title, "V1 Conversation");
-
-    // Check Message
-    let content: String = conn
-        .query_row_map(
-            "SELECT content FROM messages WHERE content = 'Hello from V1'",
-            &[],
-            |r| r.get_typed(0),
-        )
-        .unwrap();
-    assert_eq!(content, "Hello from V1");
-
-    // Verify V2+ features (FTS)
-    let fts_count: i64 = conn
-        .query_row_map("SELECT COUNT(*) FROM fts_messages", &[], |r| r.get_typed(0))
-        .unwrap();
-    // V1 migration should populate FTS?
-    // The migration V2 script does: INSERT INTO fts_messages SELECT ... FROM messages ...
-    // So yes, it should be 1.
-    assert_eq!(fts_count, 1, "FTS should be backfilled");
-
-    // Verify V4 features (Sources)
-    let source_count: i64 = conn
-        .query_row_map(
-            "SELECT COUNT(*) FROM sources WHERE id = 'local'",
-            &[],
-            |r| r.get_typed(0),
-        )
-        .unwrap();
-    assert_eq!(source_count, 1, "Local source should be created");
-
-    // Verify V5 features (source_id)
-    let source_id: String = conn
-        .query_row_map(
-            "SELECT source_id FROM conversations WHERE source_path = '/logs/v1.jsonl'",
-            &[],
-            |r| r.get_typed(0),
-        )
-        .unwrap();
-    assert_eq!(
-        source_id, "local",
-        "Legacy conversations should be attributed to local source"
-    );
-
-    // Verify V7 features (binary columns) - should be NULL for legacy rows
-    let metadata_bin: Option<Vec<u8>> = conn
-        .query_row_map(
-            "SELECT metadata_bin FROM conversations WHERE source_path = '/logs/v1.jsonl'",
-            &[],
-            |r| r.get_typed::<Option<Vec<u8>>>(0),
-        )
-        .unwrap();
-    assert!(
-        metadata_bin.is_none(),
-        "Legacy rows should have NULL binary metadata"
-    );
-
-    let extra_bin: Option<Vec<u8>> = conn
-        .query_row_map(
-            "SELECT extra_bin FROM messages WHERE content = 'Hello from V1'",
-            &[],
-            |r| r.get_typed::<Option<Vec<u8>>>(0),
-        )
-        .unwrap();
-    assert!(
-        extra_bin.is_none(),
-        "Legacy rows should have NULL binary extra"
-    );
+            let backup_path = backup_path.expect("legacy db should be backed up");
+            assert!(backup_path.exists());
+            assert!(!db_path.exists());
+        }
+        Ok(_) => panic!("expected rebuild-required result for V1 schema, got Ok(_)"),
+        Err(err) => panic!("expected rebuild-required result for V1 schema, got {err}"),
+    }
 }
 
 #[test]

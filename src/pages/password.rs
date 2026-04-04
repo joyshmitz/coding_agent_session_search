@@ -110,7 +110,7 @@ pub struct PasswordChecks {
 /// # Example
 ///
 /// ```
-/// use cass::pages::password::validate_password;
+/// use coding_agent_search::pages::password::{PasswordStrength, validate_password};
 ///
 /// let result = validate_password("MySecureP@ssw0rd!");
 /// assert_eq!(result.strength, PasswordStrength::Strong);

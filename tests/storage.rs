@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use coding_agent_search::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
 use coding_agent_search::sources::provenance::{LOCAL_SOURCE_ID, Source, SourceKind};
-use coding_agent_search::storage::sqlite::SqliteStorage;
+use coding_agent_search::storage::sqlite::{MigrationError, SqliteStorage};
 use frankensqlite::compat::{ConnectionExt, ParamValue, RowExt};
 
 fn sample_agent() -> Agent {
@@ -47,7 +47,7 @@ fn msg(idx: i64, created_at: i64) -> Message {
 }
 
 #[test]
-fn schema_version_created_on_open() {
+fn schema_version_uses_schema_migrations_after_open() {
     let tmp = tempfile::TempDir::new().unwrap();
     let db_path = tmp.path().join("store.db");
     let storage = SqliteStorage::open(&db_path).expect("open");
@@ -57,11 +57,15 @@ fn schema_version_created_on_open() {
         coding_agent_search::storage::sqlite::CURRENT_SCHEMA_VERSION
     );
 
-    // If meta row is removed, the getter surfaces an error.
+    // `_schema_migrations` is authoritative now, so removing the legacy
+    // compatibility row must not break schema version reporting.
     storage.raw().execute("DELETE FROM meta").unwrap();
     assert!(
-        storage.schema_version().is_err(),
-        "schema_version should return error after meta table is deleted, got: {:?}",
+        matches!(
+            storage.schema_version(),
+            Ok(coding_agent_search::storage::sqlite::CURRENT_SCHEMA_VERSION)
+        ),
+        "schema_version should continue reading from _schema_migrations after meta cleanup, got: {:?}",
         storage.schema_version()
     );
 }
@@ -92,15 +96,19 @@ fn rebuild_fts_repopulates_rows() {
         .unwrap();
     assert_eq!(fts_count, count_messages);
 
-    storage
+    storage.raw().execute("DROP TABLE fts_messages").unwrap();
+    let fts_table_count: i64 = storage
         .raw()
-        .execute("INSERT INTO fts_messages(fts_messages) VALUES('delete-all')")
+        .query_row_map(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name='fts_messages' AND type='table'",
+            &[],
+            |r| r.get_typed(0),
+        )
         .unwrap();
-    fts_count = storage
-        .raw()
-        .query_row_map("SELECT COUNT(*) FROM fts_messages", &[], |r| r.get_typed(0))
-        .unwrap();
-    assert_eq!(fts_count, 0);
+    assert_eq!(
+        fts_table_count, 0,
+        "fts_messages should be absent after drop"
+    );
 
     storage.rebuild_fts().unwrap();
     fts_count = storage
@@ -111,18 +119,17 @@ fn rebuild_fts_repopulates_rows() {
 }
 
 #[test]
-fn transaction_rolls_back_on_duplicate_idx() {
+fn duplicate_idx_within_new_conversation_keeps_first_message() {
     let tmp = tempfile::TempDir::new().unwrap();
     let db_path = tmp.path().join("rollback.db");
     let storage = SqliteStorage::open(&db_path).expect("open");
 
     let agent_id = storage.ensure_agent(&sample_agent()).unwrap();
-
-    // Duplicate idx inside the same conversation should trigger UNIQUE constraint
-    // and leave the database unchanged after rollback.
     let conv = sample_conv(None, vec![msg(0, 1), msg(0, 2)]);
-    let result = storage.insert_conversation_tree(agent_id, None, &conv);
-    assert!(result.is_err());
+    let outcome = storage
+        .insert_conversation_tree(agent_id, None, &conv)
+        .expect("duplicate idx insert should keep the first canonical message");
+    assert_eq!(outcome.inserted_indices, vec![0]);
 
     let conv_count: i64 = storage
         .raw()
@@ -135,12 +142,15 @@ fn transaction_rolls_back_on_duplicate_idx() {
         .query_row_map("SELECT COUNT(*) FROM messages", &[], |c| c.get_typed(0))
         .unwrap();
 
-    assert_eq!(conv_count, 0);
-    assert_eq!(msg_count, 0);
+    assert_eq!(conv_count, 1, "conversation should still be inserted");
+    assert_eq!(
+        msg_count, 1,
+        "only the first duplicate idx should be retained"
+    );
 }
 
 #[test]
-fn insert_conversation_tree_rolls_back_when_fts_insert_fails() {
+fn insert_conversation_tree_succeeds_without_db_resident_fts() {
     let tmp = tempfile::TempDir::new().unwrap();
     let db_path = tmp.path().join("fts_tree_rollback.db");
     let storage = SqliteStorage::open(&db_path).expect("open");
@@ -151,8 +161,8 @@ fn insert_conversation_tree_rolls_back_when_fts_insert_fails() {
     let conv = sample_conv(None, vec![msg(0, 1)]);
     let result = storage.insert_conversation_tree(agent_id, None, &conv);
     assert!(
-        result.is_err(),
-        "FTS write failure should abort the whole insert"
+        result.is_ok(),
+        "missing db-resident FTS should not abort authoritative storage inserts"
     );
 
     let conv_count: i64 = storage
@@ -166,12 +176,22 @@ fn insert_conversation_tree_rolls_back_when_fts_insert_fails() {
         .query_row_map("SELECT COUNT(*) FROM messages", &[], |r| r.get_typed(0))
         .unwrap();
 
-    assert_eq!(conv_count, 0, "conversation insert should roll back");
-    assert_eq!(msg_count, 0, "message insert should roll back");
+    let fts_table_count: i64 = storage
+        .raw()
+        .query_row_map(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name='fts_messages' AND type='table'",
+            &[],
+            |r| r.get_typed(0),
+        )
+        .unwrap();
+
+    assert_eq!(conv_count, 1, "conversation insert should succeed");
+    assert_eq!(msg_count, 1, "message insert should succeed");
+    assert_eq!(fts_table_count, 0, "db-resident FTS should remain absent");
 }
 
 #[test]
-fn insert_conversations_batched_rolls_back_when_fts_insert_fails() {
+fn insert_conversations_batched_succeeds_without_db_resident_fts() {
     let tmp = tempfile::TempDir::new().unwrap();
     let db_path = tmp.path().join("fts_batch_rollback.db");
     let storage = SqliteStorage::open(&db_path).expect("open");
@@ -188,8 +208,8 @@ fn insert_conversations_batched_rolls_back_when_fts_insert_fails() {
 
     let result = storage.insert_conversations_batched(&refs);
     assert!(
-        result.is_err(),
-        "batched insert should abort when FTS rows cannot be written"
+        result.is_ok(),
+        "batched insert should continue when db-resident FTS maintenance is unavailable"
     );
 
     let conv_count: i64 = storage
@@ -203,8 +223,21 @@ fn insert_conversations_batched_rolls_back_when_fts_insert_fails() {
         .query_row_map("SELECT COUNT(*) FROM messages", &[], |r| r.get_typed(0))
         .unwrap();
 
-    assert_eq!(conv_count, 0, "batched conversations should roll back");
-    assert_eq!(msg_count, 0, "batched messages should roll back");
+    let fts_table_count: i64 = storage
+        .raw()
+        .query_row_map(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name='fts_messages' AND type='table'",
+            &[],
+            |r| r.get_typed(0),
+        )
+        .unwrap();
+
+    assert_eq!(
+        conv_count, 2,
+        "batched conversations should still be stored"
+    );
+    assert_eq!(msg_count, 2, "batched messages should still be stored");
+    assert_eq!(fts_table_count, 0, "db-resident FTS should remain absent");
 }
 
 #[test]
@@ -327,7 +360,7 @@ fn last_scan_ts_overwrite() {
 }
 
 #[test]
-fn unsupported_schema_version_errors() {
+fn open_ignores_stale_meta_schema_version_once_schema_migrations_exist() {
     let tmp = tempfile::TempDir::new().unwrap();
     let db_path = tmp.path().join("schema.db");
 
@@ -342,8 +375,12 @@ fn unsupported_schema_version_errors() {
 
     let reopen = SqliteStorage::open(&db_path);
     assert!(
-        reopen.is_err(),
-        "opening with unsupported schema_version should error"
+        reopen.is_ok(),
+        "open() should rely on _schema_migrations, not the legacy meta mirror"
+    );
+    assert_eq!(
+        reopen.unwrap().schema_version().unwrap(),
+        coding_agent_search::storage::sqlite::CURRENT_SCHEMA_VERSION
     );
 }
 
@@ -554,7 +591,7 @@ fn fts_messages_is_fts5_virtual_table() {
         "fts_messages should have workspace"
     );
     assert!(
-        sql.contains("content=''"),
+        sql.contains("content=''") || sql.contains("content = ''"),
         "fts_messages should use contentless storage"
     );
     assert!(
@@ -607,7 +644,7 @@ fn open_disables_frankensqlite_autocommit_retain() {
 }
 
 #[test]
-fn migration_from_v1_applies_v2_and_v3() {
+fn migration_from_v1_requires_rebuild() {
     use rusqlite::Connection;
 
     let tmp = tempfile::TempDir::new().unwrap();
@@ -691,31 +728,29 @@ fn migration_from_v1_applies_v2_and_v3() {
         .expect("create v1 schema");
     }
 
-    // Open with SqliteStorage - should apply v2, v3, and v4 migrations
-    let storage = SqliteStorage::open(&db_path).expect("open v1 db");
-
-    // Verify migration completed
-    assert_eq!(
-        storage.schema_version().unwrap(),
-        coding_agent_search::storage::sqlite::CURRENT_SCHEMA_VERSION,
-        "should migrate to current schema version"
+    let result = SqliteStorage::open_or_rebuild(&db_path);
+    match result {
+        Err(MigrationError::RebuildRequired {
+            reason,
+            backup_path,
+        }) => {
+            assert!(
+                reason.contains("too old for in-place migration"),
+                "unexpected rebuild reason: {reason}"
+            );
+            assert!(backup_path.is_some(), "legacy schema should be backed up");
+        }
+        Ok(_) => panic!("expected rebuild requirement for v1 schema"),
+        Err(err) => panic!("expected rebuild requirement for v1 schema, got {err}"),
+    }
+    assert!(
+        !db_path.exists(),
+        "legacy v1 database should be removed after rebuild requirement"
     );
-
-    // Verify FTS5 table was created
-    let tables: Vec<String> = storage
-        .raw()
-        .query_map_collect(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='fts_messages'",
-            &[],
-            |r| r.get_typed(0),
-        )
-        .unwrap();
-
-    assert_eq!(tables.len(), 1, "fts_messages should exist after migration");
 }
 
 #[test]
-fn migration_from_v2_applies_v3() {
+fn migration_from_v2_requires_rebuild() {
     use rusqlite::Connection;
 
     let tmp = tempfile::TempDir::new().unwrap();
@@ -811,14 +846,24 @@ fn migration_from_v2_applies_v3() {
         .expect("create v2 schema");
     }
 
-    // Open with SqliteStorage - should apply v3 and v4 migrations
-    let storage = SqliteStorage::open(&db_path).expect("open v2 db");
-
-    // Verify migration completed
-    assert_eq!(
-        storage.schema_version().unwrap(),
-        coding_agent_search::storage::sqlite::CURRENT_SCHEMA_VERSION,
-        "should migrate to current schema version"
+    let result = SqliteStorage::open_or_rebuild(&db_path);
+    match result {
+        Err(MigrationError::RebuildRequired {
+            reason,
+            backup_path,
+        }) => {
+            assert!(
+                reason.contains("too old for in-place migration"),
+                "unexpected rebuild reason: {reason}"
+            );
+            assert!(backup_path.is_some(), "legacy schema should be backed up");
+        }
+        Ok(_) => panic!("expected rebuild requirement for v2 schema"),
+        Err(err) => panic!("expected rebuild requirement for v2 schema, got {err}"),
+    }
+    assert!(
+        !db_path.exists(),
+        "legacy v2 database should be removed after rebuild requirement"
     );
 }
 
@@ -1076,7 +1121,7 @@ fn sources_table_has_correct_columns() {
 }
 
 #[test]
-fn migration_from_v3_creates_sources_table() {
+fn migration_from_v3_requires_rebuild() {
     use rusqlite::Connection;
 
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1171,21 +1216,24 @@ fn migration_from_v3_creates_sources_table() {
         .expect("create v3 schema");
     }
 
-    // Open with SqliteStorage - should apply v4 migration
-    let storage = SqliteStorage::open(&db_path).expect("open v3 db");
-
-    // Verify migration completed
-    assert_eq!(
-        storage.schema_version().unwrap(),
-        coding_agent_search::storage::sqlite::CURRENT_SCHEMA_VERSION,
-        "should migrate to current schema version"
-    );
-
-    // Verify sources table was created with local source
-    let sources = storage.list_sources().expect("list_sources");
+    let result = SqliteStorage::open_or_rebuild(&db_path);
+    match result {
+        Err(MigrationError::RebuildRequired {
+            reason,
+            backup_path,
+        }) => {
+            assert!(
+                reason.contains("too old for in-place migration"),
+                "unexpected rebuild reason: {reason}"
+            );
+            assert!(backup_path.is_some(), "legacy schema should be backed up");
+        }
+        Ok(_) => panic!("expected rebuild requirement for v3 schema"),
+        Err(err) => panic!("expected rebuild requirement for v3 schema, got {err}"),
+    }
     assert!(
-        sources.iter().any(|s| s.id == LOCAL_SOURCE_ID),
-        "local source should exist after migration"
+        !db_path.exists(),
+        "legacy v3 database should be removed after rebuild requirement"
     );
 }
 
@@ -1194,7 +1242,7 @@ fn migration_from_v3_creates_sources_table() {
 // -------------------------------------------------------------------------
 
 use coding_agent_search::storage::sqlite::{
-    CURRENT_SCHEMA_VERSION, MigrationError, cleanup_old_backups, create_backup, is_user_data_file,
+    CURRENT_SCHEMA_VERSION, cleanup_old_backups, create_backup, is_user_data_file,
 };
 
 #[test]
@@ -1316,7 +1364,7 @@ fn open_or_rebuild_creates_fresh_db() {
 }
 
 #[test]
-fn open_or_rebuild_migrates_compatible_schema() {
+fn open_or_rebuild_requires_rebuild_for_legacy_v4_schema() {
     use rusqlite::Connection;
 
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1415,12 +1463,24 @@ fn open_or_rebuild_migrates_compatible_schema() {
     }
 
     // Open with open_or_rebuild - should migrate successfully
-    let storage = SqliteStorage::open_or_rebuild(&db_path).expect("open_or_rebuild");
-
-    assert_eq!(
-        storage.schema_version().unwrap(),
-        CURRENT_SCHEMA_VERSION,
-        "should migrate to current version"
+    let result = SqliteStorage::open_or_rebuild(&db_path);
+    match result {
+        Err(MigrationError::RebuildRequired {
+            reason,
+            backup_path,
+        }) => {
+            assert!(
+                reason.contains("too old for in-place migration"),
+                "unexpected rebuild reason: {reason}"
+            );
+            assert!(backup_path.is_some(), "legacy schema should be backed up");
+        }
+        Ok(_) => panic!("expected rebuild requirement for v4 schema"),
+        Err(err) => panic!("expected rebuild requirement for v4 schema, got {err}"),
+    }
+    assert!(
+        !db_path.exists(),
+        "legacy v4 database should be removed after rebuild requirement"
     );
 }
 

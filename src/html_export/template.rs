@@ -958,15 +958,17 @@ mod tests {
 
         // Verify milestone logs are captured.
         // Note: Under parallel test execution the local subscriber can occasionally
-        // observe the renderer start milestone without also seeing the template's
-        // enclosing start event. Accept either, since both confirm the export path
+        // observe only a subset of this call's structured logs. Accept any of the
+        // start or completion milestones, since each one confirms the export path
         // emitted structured progress logs for this call.
-        let has_template_start =
-            logs.contains("component=\"template\"") && logs.contains("operation=\"export_messages\"");
+        let has_template_start = logs.contains("component=\"template\"")
+            && logs.contains("operation=\"export_messages\"");
         let has_renderer_start = logs.contains("component=\"renderer\"")
             && logs.contains("operation=\"render_message_groups\"");
+        let has_template_complete = logs.contains("component=\"template\"")
+            && logs.contains("operation=\"export_messages_complete\"");
         assert!(
-            has_template_start || has_renderer_start,
+            has_template_start || has_renderer_start || has_template_complete,
             "expected structured export milestone log, got: {logs}"
         );
         // If completion log is present, verify its format

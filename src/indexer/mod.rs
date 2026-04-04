@@ -1125,6 +1125,31 @@ fn refresh_completed_lexical_rebuild_checkpoint(
     persist_lexical_rebuild_state(&index_path, &state)
 }
 
+fn refresh_completed_lexical_rebuild_checkpoint_for_final_state(
+    storage: &mut FrankenStorage,
+    db_path: &Path,
+    data_dir: &Path,
+    keep_storage_open: bool,
+) -> Result<()> {
+    if keep_storage_open {
+        return refresh_completed_lexical_rebuild_checkpoint(storage, db_path, data_dir);
+    }
+
+    // The lexical checkpoint fingerprint is derived from the DB/WAL files on
+    // disk. On some platforms the final close flush mutates those metadata
+    // stamps, so refresh the checkpoint after the writer handle has settled.
+    storage.close_best_effort_in_place();
+    let mut settled = FrankenStorage::open_readonly(db_path).with_context(|| {
+        format!(
+            "reopening readonly storage to refresh settled lexical checkpoint for {}",
+            db_path.display()
+        )
+    })?;
+    let refresh_result = refresh_completed_lexical_rebuild_checkpoint(&settled, db_path, data_dir);
+    settled.close_best_effort_in_place();
+    refresh_result
+}
+
 #[cfg(test)]
 pub(crate) fn load_lexical_rebuild_snapshot(
     index_path: &Path,
@@ -2924,13 +2949,18 @@ pub fn run_index(
         )
     })?;
     tracing::info!(now_ms, "updated last_indexed_at for status display");
-    refresh_completed_lexical_rebuild_checkpoint(&storage, &opts.db_path, &opts.data_dir)
-        .with_context(|| {
-            format!(
-                "refreshing completed lexical checkpoint after index run for {}",
-                opts.db_path.display()
-            )
-        })?;
+    refresh_completed_lexical_rebuild_checkpoint_for_final_state(
+        &mut storage,
+        &opts.db_path,
+        &opts.data_dir,
+        opts.watch || opts.watch_once_paths.is_some(),
+    )
+    .with_context(|| {
+        format!(
+            "refreshing completed lexical checkpoint after index run for {}",
+            opts.db_path.display()
+        )
+    })?;
 
     if opts.full {
         tracing::info!(
@@ -3129,28 +3159,28 @@ pub fn run_index(
                 // autocommit_retain could not be disabled.
                 let count = watch_recycle_counter.get().wrapping_add(1);
                 watch_recycle_counter.set(count);
-                if count % watch_recycle_interval == 0 {
-                    if let Ok(mut guard) = storage_for_watch.lock() {
-                        let db_path = guard.database_path().ok();
-                        guard.close_best_effort_in_place();
-                        if let Some(path) = db_path {
-                            match FrankenStorage::open(&path) {
-                                Ok(new_storage) => {
-                                    *guard = new_storage;
-                                    tracing::debug!(
-                                        cycle = count,
-                                        "recycled long-lived storage handle to shed MVCC state"
-                                    );
-                                }
-                                Err(err) => {
-                                    tracing::warn!(
-                                        error = %err,
-                                        cycle = count,
-                                        "failed to reopen storage handle after recycle; \
-                                         next watch cycle will use the closed handle \
-                                         and likely fail"
-                                    );
-                                }
+                if count.is_multiple_of(watch_recycle_interval)
+                    && let Ok(mut guard) = storage_for_watch.lock()
+                {
+                    let db_path = guard.database_path().ok();
+                    guard.close_best_effort_in_place();
+                    if let Some(path) = db_path {
+                        match FrankenStorage::open(&path) {
+                            Ok(new_storage) => {
+                                *guard = new_storage;
+                                tracing::debug!(
+                                    cycle = count,
+                                    "recycled long-lived storage handle to shed MVCC state"
+                                );
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    error = %err,
+                                    cycle = count,
+                                    "failed to reopen storage handle after recycle; \
+                                     next watch cycle will use the closed handle \
+                                     and likely fail"
+                                );
                             }
                         }
                     }
@@ -10074,6 +10104,94 @@ mod tests {
             i64::try_from(total_conversations).unwrap_or(i64::MAX)
         );
         assert_eq!(checkpoint.indexed_docs, total_messages);
+    }
+
+    #[test]
+    fn final_checkpoint_refresh_uses_settled_storage_fingerprint() {
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        let db_path = data_dir.join("agent_search.db");
+        let mut storage = FrankenStorage::open(&db_path).unwrap();
+        ensure_fts_schema(&storage);
+
+        let agent = crate::model::types::Agent {
+            id: None,
+            slug: "tester".into(),
+            name: "Tester".into(),
+            version: None,
+            kind: crate::model::types::AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).unwrap();
+        let conv = norm_conv(
+            Some("checkpoint-settled"),
+            vec![norm_msg(0, 1_700_000_000_000)],
+        );
+        storage
+            .insert_conversation_tree(
+                agent_id,
+                None,
+                &crate::model::types::Conversation {
+                    id: None,
+                    agent_slug: conv.agent_slug.clone(),
+                    workspace: conv.workspace.clone(),
+                    external_id: conv.external_id.clone(),
+                    title: conv.title.clone(),
+                    source_path: conv.source_path.clone(),
+                    started_at: conv.started_at,
+                    ended_at: conv.ended_at,
+                    approx_tokens: None,
+                    metadata_json: conv.metadata.clone(),
+                    messages: conv
+                        .messages
+                        .iter()
+                        .map(|m| crate::model::types::Message {
+                            id: None,
+                            idx: m.idx,
+                            role: crate::model::types::MessageRole::User,
+                            author: m.author.clone(),
+                            created_at: m.created_at,
+                            content: m.content.clone(),
+                            extra_json: m.extra.clone(),
+                            snippets: Vec::new(),
+                        })
+                        .collect(),
+                    source_id: "local".to_string(),
+                    origin_host: None,
+                },
+            )
+            .unwrap();
+
+        let index_path = index_dir(&data_dir).unwrap();
+        fs::create_dir_all(&index_path).unwrap();
+        fs::write(index_path.join("meta.json"), b"stable-meta").unwrap();
+
+        storage
+            .set_last_indexed_at(FrankenStorage::now_millis())
+            .unwrap();
+        let mut state = LexicalRebuildState::new(
+            lexical_rebuild_db_state(&storage, &db_path).unwrap(),
+            LEXICAL_REBUILD_PAGE_SIZE,
+        );
+        state.mark_completed(index_meta_fingerprint(&index_path).unwrap());
+        persist_lexical_rebuild_state(&index_path, &state).unwrap();
+
+        refresh_completed_lexical_rebuild_checkpoint_for_final_state(
+            &mut storage,
+            &db_path,
+            &data_dir,
+            false,
+        )
+        .unwrap();
+
+        let checkpoint = load_lexical_rebuild_checkpoint(&index_path)
+            .unwrap()
+            .expect("refreshed checkpoint");
+        assert!(checkpoint.completed);
+        assert_eq!(
+            checkpoint.storage_fingerprint,
+            lexical_rebuild_storage_fingerprint(&db_path).unwrap()
+        );
     }
 
     #[test]

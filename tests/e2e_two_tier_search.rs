@@ -237,8 +237,7 @@ fn fast_search_matches_ground_truth() {
     // same topical cluster. Require the same dominant topic rather than an exact
     // document-id match.
     assert_eq!(
-        documents[results[0].idx].expected_rank_topic,
-        documents[expected[0].0].expected_rank_topic,
+        documents[results[0].idx].expected_rank_topic, documents[expected[0].0].expected_rank_topic,
         "top result should stay within the same topical cluster: got doc {} ({}) expected doc {} ({})",
         results[0].idx, documents[results[0].idx].id, expected[0].0, documents[expected[0].0].id
     );
@@ -390,14 +389,17 @@ fn two_tier_progressive_search_correctness() {
                 "refined results should be sorted by descending score"
             );
 
-            let quality_query = quality_embedder.embed_sync(query).expect("embed quality query");
+            let quality_query = quality_embedder
+                .embed_sync(query)
+                .expect("embed quality query");
             let fast_query = fast_embedder.embed_sync(query).expect("embed fast query");
             let fast_candidates = index.search_fast(&fast_query, 5);
             let candidate_indices: Vec<usize> = fast_candidates.iter().map(|r| r.idx).collect();
-            let quality_scores = index.quality_scores_for_indices(&quality_query, &candidate_indices);
+            let quality_scores =
+                index.quality_scores_for_indices(&quality_query, &candidate_indices);
             let mut expected_pairs: Vec<(usize, f32)> = candidate_indices
                 .into_iter()
-                .zip(quality_scores.into_iter())
+                .zip(quality_scores)
                 .collect();
             expected_pairs.sort_by(|a, b| {
                 b.1.partial_cmp(&a.1)

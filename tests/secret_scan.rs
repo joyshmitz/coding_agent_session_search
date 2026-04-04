@@ -200,6 +200,49 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn detects_secret_in_message_snippet() -> Result<()> {
+        let temp = TempDir::new()?;
+        let db_path = temp.path().join("scan.db");
+        setup_db(&db_path, "harmless content")?;
+
+        let conn = Connection::open(&db_path)?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE snippets (
+                id INTEGER PRIMARY KEY,
+                message_id INTEGER NOT NULL,
+                file_path TEXT,
+                start_line INTEGER,
+                end_line INTEGER,
+                language TEXT,
+                snippet_text TEXT NOT NULL
+            );
+            "#,
+        )?;
+        conn.execute(
+            r#"INSERT INTO snippets (
+                id, message_id, file_path, start_line, end_line, language, snippet_text
+            ) VALUES (
+                1, 1, '/tmp/project/src/lib.rs', 10, 12, 'rust',
+                'const OPENAI = \"sk-TESTabcdefghijklmnopqrstuvwxyz012345\";'
+            )"#,
+            [],
+        )?;
+        drop(conn);
+
+        let report = scan(&db_path)?;
+        assert!(
+            report.findings.iter().any(|f| {
+                f.kind == "openai_key"
+                    && f.location
+                        == coding_agent_search::pages::secret_scan::SecretLocation::MessageSnippet
+            }),
+            "should detect secrets present only in snippets"
+        );
+        Ok(())
+    }
+
     // =========================================================================
     // Built-in pattern detection tests (br-ig84)
     // =========================================================================

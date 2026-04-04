@@ -71,7 +71,7 @@ pub struct FilenameMetadata {
 ///
 /// # Examples
 /// ```
-/// use cass::html_export::filename::normalize_topic;
+/// use coding_agent_search::html_export::normalize_topic;
 /// assert_eq!(normalize_topic("My Cool Topic"), "my_cool_topic");
 /// assert_eq!(normalize_topic("HTML Export Feature"), "html_export_feature");
 /// ```

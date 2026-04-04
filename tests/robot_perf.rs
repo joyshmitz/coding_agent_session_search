@@ -5,12 +5,20 @@
 //! Targets: <200ms for --robot-help, <300ms for robot-docs topics.
 
 use assert_cmd::Command;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 fn base_cmd() -> Command {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("cass"));
     cmd.env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1");
     cmd
+}
+
+fn health_fixture_data_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("search_demo_data")
 }
 
 /// Measure execution time of a command.
@@ -307,9 +315,16 @@ fn typical_agent_discovery_workflow_under_1sec() {
 
 #[test]
 fn health_check_latency_under_100ms() {
-    let _ = base_cmd().args(["health", "--json"]).output();
+    let data_dir = health_fixture_data_dir();
+    let data_dir = data_dir
+        .to_str()
+        .expect("fixture path should be valid UTF-8");
 
-    let median = measure_median(&["health", "--json"], 5);
+    let _ = base_cmd()
+        .args(["health", "--json", "--data-dir", data_dir])
+        .output();
+
+    let median = measure_median(&["health", "--json", "--data-dir", data_dir], 5);
 
     assert!(
         median < Duration::from_millis(100),

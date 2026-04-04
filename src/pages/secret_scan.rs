@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use console::{Term, style};
-use frankensqlite::compat::{ParamValue, RowExt, params_from_iter};
+use frankensqlite::compat::{ConnectionExt, ParamValue, RowExt, params_from_iter};
+use frankensqlite::params;
 use indicatif::{ProgressBar, ProgressStyle};
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -399,7 +400,7 @@ pub fn scan_database<P: AsRef<Path>>(
         }
     }
 
-    if !truncated {
+    if !truncated && table_exists(&conn, "snippets") {
         let (snip_where, snip_params) = build_where_clause(filters)?;
         let snip_sql = format!(
             "SELECT s.snippet_text, m.id, m.idx, c.id, c.source_path, a.slug, w.path\n             FROM snippets s\n             JOIN messages m ON s.message_id = m.id\n             JOIN conversations c ON m.conversation_id = c.id\n             JOIN agents a ON c.agent_id = a.id\n             LEFT JOIN workspaces w ON c.workspace_id = w.id{}",
@@ -479,6 +480,20 @@ pub fn scan_database<P: AsRef<Path>>(
         },
         findings,
     })
+}
+
+fn table_exists(conn: &frankensqlite::Connection, table_name: &str) -> bool {
+    if !table_name
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return false;
+    }
+
+    let pragma = format!("PRAGMA table_info({table_name})");
+    conn.query_map_collect(&pragma, params![], |row| row.get_typed::<String>(1))
+        .map(|columns| !columns.is_empty())
+        .unwrap_or(false)
 }
 
 pub fn print_human_report(

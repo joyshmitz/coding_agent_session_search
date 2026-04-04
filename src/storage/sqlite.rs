@@ -316,8 +316,12 @@ pub(crate) fn open_franken_raw_readonly_connection_with_timeout(
     let mut backoff = Duration::from_millis(4);
     loop {
         match open_franken_with_flags(&path_str, FrankenOpenFlags::SQLITE_OPEN_READ_ONLY)
-            .with_context(|| format!("opening raw frankensqlite db readonly at {}", path.display()))
-        {
+            .with_context(|| {
+                format!(
+                    "opening raw frankensqlite db readonly at {}",
+                    path.display()
+                )
+            }) {
             Ok(conn) => return Ok(conn),
             Err(err) if retryable_franken_anyhow(&err) => {
                 let now = Instant::now();
@@ -1622,7 +1626,8 @@ fn probe_historical_bundle(
             |row| row.get(0),
         )
         .ok();
-    let fts_queryable = historical_bundle_fts_queryable_via_frankensqlite(root_path, fts_schema_rows);
+    let fts_queryable =
+        historical_bundle_fts_queryable_via_frankensqlite(root_path, fts_schema_rows);
     let max_message_id = conn
         .query_row("SELECT COALESCE(MAX(id), 0) FROM messages", [], |row| {
             row.get(0)
@@ -1925,12 +1930,11 @@ fn finalize_seeded_canonical_bundle_via_rusqlite(
 
     if let Some(version) = schema_version
         && version < CURRENT_SCHEMA_VERSION
+        && version != 13
     {
-        if version != 13 {
-            anyhow::bail!(
-                "seeded canonical bundle schema_version {version} is too old for baseline import and cannot be finalized automatically"
-            );
-        }
+        anyhow::bail!(
+            "seeded canonical bundle schema_version {version} is too old for baseline import and cannot be finalized automatically"
+        );
     }
 
     let conn = rusqlite::Connection::open(canonical_db_path).with_context(|| {
@@ -2295,6 +2299,7 @@ fn is_backup_root_name(name: &str, prefix: &str) -> bool {
 
 /// Public schema version constant for external checks.
 pub const CURRENT_SCHEMA_VERSION: i64 = 14;
+const MIN_IN_PLACE_MIGRATION_SCHEMA_VERSION: i64 = 13;
 
 /// Result of checking schema compatibility.
 #[derive(Debug, Clone)]
@@ -2389,7 +2394,15 @@ fn check_schema_compatibility(
 
         match version {
             Some(v) if v == SCHEMA_VERSION => Ok(SchemaCheck::Compatible),
-            Some(v) if v < SCHEMA_VERSION => Ok(SchemaCheck::NeedsMigration),
+            Some(v) if (MIN_IN_PLACE_MIGRATION_SCHEMA_VERSION..SCHEMA_VERSION).contains(&v) => {
+                Ok(SchemaCheck::NeedsMigration)
+            }
+            Some(v) if v > 0 && v < MIN_IN_PLACE_MIGRATION_SCHEMA_VERSION => {
+                Ok(SchemaCheck::NeedsRebuild(format!(
+                    "Schema version {} is too old for in-place migration; supported upgrade path starts at version {}",
+                    v, MIN_IN_PLACE_MIGRATION_SCHEMA_VERSION
+                )))
+            }
             Some(v) => {
                 // v > SCHEMA_VERSION - database is from a newer version
                 Ok(SchemaCheck::NeedsRebuild(format!(
@@ -5740,11 +5753,8 @@ impl FrankenStorage {
             ConversationInsertStatus::Existing(existing_id) => {
                 let mut existing_messages =
                     franken_existing_message_fingerprints_by_idx(&tx, existing_id, &conv.messages)?;
-                let mut existing_replay_fingerprints = franken_existing_message_replay_fingerprints(
-                    &tx,
-                    existing_id,
-                    &conv.messages,
-                )?;
+                let mut existing_replay_fingerprints =
+                    franken_existing_message_replay_fingerprints(&tx, existing_id, &conv.messages)?;
                 let mut inserted_indices = Vec::new();
                 let mut fts_entries = Vec::new();
                 let mut fts_pending_chars = 0usize;
@@ -6640,11 +6650,11 @@ impl FrankenStorage {
                 {
                     fingerprints.clone()
                 } else {
-                        let fingerprints = franken_existing_message_replay_fingerprints(
-                            &tx,
-                            existing_id,
-                            &conv.messages,
-                        )?;
+                    let fingerprints = franken_existing_message_replay_fingerprints(
+                        &tx,
+                        existing_id,
+                        &conv.messages,
+                    )?;
                     pending_message_replay_fingerprints.insert(existing_id, fingerprints.clone());
                     fingerprints
                 };
@@ -7569,8 +7579,16 @@ fn franken_existing_message_fingerprints_by_idx(
         return Ok(HashMap::new());
     }
 
-    let min_idx = incoming_messages.iter().map(|msg| msg.idx).min().unwrap_or(0);
-    let max_idx = incoming_messages.iter().map(|msg| msg.idx).max().unwrap_or(min_idx);
+    let min_idx = incoming_messages
+        .iter()
+        .map(|msg| msg.idx)
+        .min()
+        .unwrap_or(0);
+    let max_idx = incoming_messages
+        .iter()
+        .map(|msg| msg.idx)
+        .max()
+        .unwrap_or(min_idx);
 
     // Incremental rescans can legitimately revisit an entire large session file when the file's
     // mtime is newer than the previous scan watermark. Scope the lookup to the incoming idx range
@@ -12041,10 +12059,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(
-            reopened_conversation_ids,
-            vec![outcomes[0].conversation_id]
-        );
+        assert_eq!(reopened_conversation_ids, vec![outcomes[0].conversation_id]);
         assert_eq!(
             reopened_conversation_ids_not_indexed,
             vec![outcomes[0].conversation_id]
@@ -13695,7 +13710,9 @@ mod tests {
                 [duplicate_legacy_fts_sql],
             )
             .unwrap();
-        legacy.execute_batch("PRAGMA writable_schema = OFF;").unwrap();
+        legacy
+            .execute_batch("PRAGMA writable_schema = OFF;")
+            .unwrap();
         drop(legacy);
 
         let duplicated_source = open_historical_bundle_readonly(&source_db).unwrap();

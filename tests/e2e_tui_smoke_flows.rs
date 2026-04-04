@@ -2333,9 +2333,9 @@ fn tui_typing_writes_latency_trace() {
                 .unwrap_or_default()
                 > 1
                 && sample
-                .get("input_to_first_visible_us")
-                .and_then(|value| value.as_u64())
-                .is_some()
+                    .get("input_to_first_visible_us")
+                    .and_then(|value| value.as_u64())
+                    .is_some()
         }),
         "Expected a post-startup interaction sample with end-to-end visible latency: {latency_json}"
     );

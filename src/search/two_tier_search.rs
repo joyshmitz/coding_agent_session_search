@@ -315,7 +315,9 @@ impl TwoTierIndex {
                 .insert(doc_id_str.clone(), (entry.doc_id.clone(), entry.message_id))
                 .is_some()
             {
-                bail!("duplicate document id encountered while building two-tier index: {doc_id_str}");
+                bail!(
+                    "duplicate document id encountered while building two-tier index: {doc_id_str}"
+                );
             }
             let fast_f32: Vec<f32> = entry.fast_embedding.iter().map(|v| f32::from(*v)).collect();
             let quality_f32: Vec<f32> = entry
@@ -342,12 +344,11 @@ impl TwoTierIndex {
             let encoded = fs_index
                 .doc_id_at(idx)
                 .map_err(|e| anyhow::anyhow!("failed to read fs doc_id at index {idx}: {e}"))?;
-            let (doc_id, message_id) =
-                metadata_by_encoded_id.remove(encoded).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "frankensearch index returned unknown doc_id at index {idx}: {encoded}"
-                    )
-                })?;
+            let (doc_id, message_id) = metadata_by_encoded_id.remove(encoded).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "frankensearch index returned unknown doc_id at index {idx}: {encoded}"
+                )
+            })?;
             doc_ids.push(doc_id);
             message_ids.push(message_id);
         }

@@ -20,8 +20,11 @@ fn test_path_to_safe_dirname_stability() {
     // They must be identical
     assert_eq!(safe_name_1, safe_name_2);
 
-    // Verify hashing structure
-    assert!(safe_name_1.starts_with("claude_projects_"));
+    // Hidden-directory components are preserved; only path separators/traversal
+    // syntax are sanitized.
+    assert!(safe_name_1.contains("claude_projects"));
+    assert!(safe_name_1.contains(".claude"));
+    assert_ne!(safe_name_1, configured_path);
 }
 
 #[test]
@@ -42,5 +45,8 @@ fn test_path_to_safe_dirname_distinct_configs() {
 
     // But both should look reasonable
     assert!(safe_1.contains("claude_projects"));
-    assert!(safe_2.contains("home_user_claude_projects"));
+    assert!(safe_1.contains(".claude"));
+    assert!(safe_2.contains("home_user"));
+    assert!(safe_2.contains("claude_projects"));
+    assert!(safe_2.contains(".claude"));
 }

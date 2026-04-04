@@ -8865,21 +8865,12 @@ fn run_stats(
         "SELECT COUNT(*) FROM messages m JOIN conversations c ON m.conversation_id = c.id{source_where}"
     );
 
-    let mut conversation_count: i64 = franken_query_row_map_retry(
-        &conn,
-        &conversation_sql,
-        &params,
-        |r| r.get_typed(0),
-    )
-    .unwrap_or(0);
+    let mut conversation_count: i64 =
+        franken_query_row_map_retry(&conn, &conversation_sql, &params, |r| r.get_typed(0))
+            .unwrap_or(0);
 
-    let mut message_count: i64 = franken_query_row_map_retry(
-        &conn,
-        &message_sql,
-        &params,
-        |r| r.get_typed(0),
-    )
-    .unwrap_or(0);
+    let mut message_count: i64 =
+        franken_query_row_map_retry(&conn, &message_sql, &params, |r| r.get_typed(0)).unwrap_or(0);
     if conversation_count == 0 {
         conversation_count = fresh_franken_count_retry(
             &db_path,
@@ -8915,13 +8906,11 @@ fn run_stats(
     let ws_sql = format!(
         "SELECT w.path, COUNT(*) FROM conversations c JOIN workspaces w ON c.workspace_id = w.id{source_where} GROUP BY w.path ORDER BY COUNT(*) DESC LIMIT 10"
     );
-    let ws_rows: Vec<(String, i64)> = franken_query_map_collect_retry(
-        &conn,
-        &ws_sql,
-        &params,
-        |r| Ok((r.get_typed::<String>(0)?, r.get_typed::<i64>(1)?)),
-    )
-    .map_err(|e| CliError::unknown(format!("query: {e}")))?;
+    let ws_rows: Vec<(String, i64)> =
+        franken_query_map_collect_retry(&conn, &ws_sql, &params, |r| {
+            Ok((r.get_typed::<String>(0)?, r.get_typed::<i64>(1)?))
+        })
+        .map_err(|e| CliError::unknown(format!("query: {e}")))?;
 
     // Get date range with source filter.
     // Note: source_where already includes a leading " WHERE ...", so when it is present we must
@@ -9096,11 +9085,13 @@ fn run_diag(
                     |r| r.get_typed(0),
                 )
                 .unwrap_or(0);
-                let mut msgs: i64 =
-                    franken_query_row_map_retry(&conn, "SELECT COUNT(*) FROM messages", params![], |r| {
-                        r.get_typed(0)
-                    })
-                    .unwrap_or(0);
+                let mut msgs: i64 = franken_query_row_map_retry(
+                    &conn,
+                    "SELECT COUNT(*) FROM messages",
+                    params![],
+                    |r| r.get_typed(0),
+                )
+                .unwrap_or(0);
                 if convs == 0 {
                     convs = fresh_franken_count_retry(
                         &db_path,
@@ -15113,9 +15104,8 @@ fn run_export_html(
             }
         } else if prefers_direct_jsonl_file(session_path, source_id) {
             let (parsed_messages, parsed_start, parsed_end) =
-                parse_followup_jsonl_messages(session_path).map_err(|err| {
-                    emit_structured_error(&err);
-                    err
+                parse_followup_jsonl_messages(session_path).inspect_err(|err| {
+                    emit_structured_error(err);
                 })?;
             raw_messages = parsed_messages;
             session_start = parsed_start;

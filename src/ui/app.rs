@@ -23165,10 +23165,9 @@ mod tests {
         fn install(config: Option<SourcesConfig>, editor_cmd: Option<&str>) -> Self {
             let prev_config =
                 swap_test_action_sources_config(config).expect("set action sources config");
-            let prev_editor_command = swap_test_action_editor_command(
-                editor_cmd.map(std::string::ToString::to_string),
-            )
-            .expect("set action editor command");
+            let prev_editor_command =
+                swap_test_action_editor_command(editor_cmd.map(std::string::ToString::to_string))
+                    .expect("set action editor command");
             Self {
                 prev_config,
                 prev_editor_command,
@@ -26096,7 +26095,9 @@ mod tests {
         // Should NOT have fired SearchRequested yet; the remaining debounce
         // window should stay armed.
         assert!(
-            !msgs.iter().any(|msg| matches!(msg, CassMsg::SearchRequested)),
+            !msgs
+                .iter()
+                .any(|msg| matches!(msg, CassMsg::SearchRequested)),
             "tick should not fire SearchRequested when debounce has not elapsed"
         );
         assert!(

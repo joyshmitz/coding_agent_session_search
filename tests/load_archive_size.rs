@@ -526,8 +526,6 @@ fn load_test_summary() {
     println!("╚═══════════════════════════════════════════════════════════════╝");
     println!();
     println!("Run all tests (including expensive):");
-    println!(
-        "  cargo test --test load_archive_size --release -- --nocapture --include-ignored"
-    );
+    println!("  cargo test --test load_archive_size --release -- --nocapture --include-ignored");
     println!();
 }

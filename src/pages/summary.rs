@@ -569,9 +569,8 @@ impl<'a> SummaryGenerator<'a> {
             .map(ParamValue::from)
             .collect();
         let placeholders = vec!["?"; params.len()].join(", ");
-        let query = format!(
-            "SELECT COUNT(*) FROM messages WHERE conversation_id IN ({placeholders})"
-        );
+        let query =
+            format!("SELECT COUNT(*) FROM messages WHERE conversation_id IN ({placeholders})");
         let count: i64 = self
             .db
             .query_row_map(&query, &params, |row: &Row| row.get_typed(0))?;
@@ -797,7 +796,8 @@ impl<'a> SummaryGenerator<'a> {
 
         let mut workspaces = Vec::new();
         for (workspace, aggregate) in aggregates {
-            let msg_count = self.count_messages_for_conversation_ids(&aggregate.conversation_ids)?;
+            let msg_count =
+                self.count_messages_for_conversation_ids(&aggregate.conversation_ids)?;
             // Extract display name
             let display_name = std::path::Path::new(&workspace)
                 .file_name()
@@ -940,14 +940,14 @@ impl<'a> SummaryGenerator<'a> {
                 .map(ParamValue::from)
                 .collect();
             let placeholders = vec!["?"; workspace_params.len()].join(", ");
-            let workspace_query = format!(
-                "SELECT id, path FROM workspaces WHERE id IN ({placeholders})"
-            );
-            self.db.query_map_collect(&workspace_query, &workspace_params, |row: &Row| {
-                Ok((row.get_typed::<i64>(0)?, row.get_typed::<String>(1)?))
-            })?
-            .into_iter()
-            .collect()
+            let workspace_query =
+                format!("SELECT id, path FROM workspaces WHERE id IN ({placeholders})");
+            self.db
+                .query_map_collect(&workspace_query, &workspace_params, |row: &Row| {
+                    Ok((row.get_typed::<i64>(0)?, row.get_typed::<String>(1)?))
+                })?
+                .into_iter()
+                .collect()
         };
 
         let mut included_conversation_ids = Vec::new();
@@ -996,7 +996,11 @@ impl<'a> SummaryGenerator<'a> {
             .next()
             .unwrap_or((0, 0));
 
-        Ok((included_conversation_ids.len(), msg_count as usize, char_count as usize))
+        Ok((
+            included_conversation_ids.len(),
+            msg_count as usize,
+            char_count as usize,
+        ))
     }
 }
 
@@ -1240,15 +1244,18 @@ mod tests {
         conn.execute(
             "INSERT INTO conversations (id, agent_id, workspace_id, title, source_path, started_at)
              VALUES (1, 1, 1, 'Fix authentication bug', '/path/a.jsonl', 1700000000000);",
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO conversations (id, agent_id, workspace_id, title, source_path, started_at)
              VALUES (2, 1, 1, 'Add user profile', '/path/b.jsonl', 1700100000000);",
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO conversations (id, agent_id, workspace_id, title, source_path, started_at)
              VALUES (3, 2, 2, 'Setup database', '/path/c.jsonl', 1700200000000);",
-        ).unwrap();
+        )
+        .unwrap();
 
         // Insert messages
         for conv_id in 1..=3i64 {

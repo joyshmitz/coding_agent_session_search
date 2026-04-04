@@ -11,6 +11,15 @@ import { isOpfsEnabled } from './storage.js';
 let sqlite3 = null;
 let db = null;
 let isInitialized = false;
+const CANONICAL_SEARCH_TABLES = Object.freeze({
+    prose: 'messages_fts',
+    code: 'messages_code_fts',
+});
+const FALLBACK_SEARCH_TABLES = Object.freeze({
+    prose: 'browser_messages_fts',
+    code: 'browser_messages_code_fts',
+});
+let activeSearchTables = CANONICAL_SEARCH_TABLES;
 
 /**
  * Initialize sqlite-wasm with decrypted database bytes
@@ -33,6 +42,7 @@ export async function initDatabase(dbBytes) {
         try {
             await writeBytesToOPFS(dbBytes);
             db = new sqlite3.oo1.OpfsDb('/cass-archive.sqlite3');
+            ensureSearchIndexes();
             console.log('[DB] Loaded from OPFS');
             isInitialized = true;
             return;
@@ -48,6 +58,7 @@ export async function initDatabase(dbBytes) {
     const ptr = sqlite3.wasm.allocFromTypedArray(dbBytes);
     try {
         db.deserialize(ptr, dbBytes.length);
+        ensureSearchIndexes();
         console.log('[DB] Loaded into memory');
     } finally {
         sqlite3.wasm.dealloc(ptr);
@@ -159,6 +170,83 @@ export function execute(sql, params = []) {
 
     db.exec(sql, { bind: params });
     return db.changes();
+}
+
+function tableExists(name) {
+    return Boolean(
+        queryValue(
+            'SELECT 1 FROM sqlite_master WHERE type = ? AND name = ? LIMIT 1',
+            ['table', name]
+        )
+    );
+}
+
+function canQueryFtsTable(name) {
+    if (!tableExists(name)) {
+        return false;
+    }
+
+    try {
+        queryValue(`SELECT COUNT(*) FROM ${name}`);
+        return true;
+    } catch (error) {
+        console.warn(`[DB] FTS table ${name} is not queryable:`, error.message);
+        return false;
+    }
+}
+
+function areSearchTablesQueryable(tables) {
+    return canQueryFtsTable(tables.prose) && canQueryFtsTable(tables.code);
+}
+
+function rebuildSearchTables(tables, dropExisting = false) {
+    if (dropExisting) {
+        execute(`DROP TABLE IF EXISTS ${tables.prose}`);
+        execute(`DROP TABLE IF EXISTS ${tables.code}`);
+    }
+
+    execute(`
+        CREATE VIRTUAL TABLE ${tables.prose} USING fts5(
+            content,
+            tokenize='porter unicode61 remove_diacritics 2'
+        )
+    `);
+    execute(`
+        CREATE VIRTUAL TABLE ${tables.code} USING fts5(
+            content,
+            tokenize="unicode61 tokenchars '-_./:@#$%\\\\'"
+        )
+    `);
+    execute(`
+        INSERT INTO ${tables.prose}(rowid, content)
+        SELECT id, content FROM messages
+    `);
+    execute(`
+        INSERT INTO ${tables.code}(rowid, content)
+        SELECT id, content FROM messages
+    `);
+}
+
+function ensureSearchIndexes() {
+    activeSearchTables = CANONICAL_SEARCH_TABLES;
+    if (areSearchTablesQueryable(CANONICAL_SEARCH_TABLES)) {
+        return;
+    }
+
+    console.warn('[DB] Rebuilding canonical FTS search tables for stock SQLite compatibility');
+
+    try {
+        rebuildSearchTables(CANONICAL_SEARCH_TABLES, true);
+        if (areSearchTablesQueryable(CANONICAL_SEARCH_TABLES)) {
+            return;
+        }
+    } catch (error) {
+        console.warn('[DB] Canonical FTS rebuild failed, falling back to browser-local tables:', error.message);
+    }
+
+    rebuildSearchTables(FALLBACK_SEARCH_TABLES, true);
+    activeSearchTables = FALLBACK_SEARCH_TABLES;
+    console.warn('[DB] Using browser-local FTS tables:', activeSearchTables);
 }
 
 // ============================================
@@ -350,12 +438,12 @@ export function searchConversations(query, options = {}) {
     // Route to appropriate FTS table based on search mode
     let ftsTable;
     if (searchMode === 'code') {
-        ftsTable = 'messages_code_fts';
+        ftsTable = activeSearchTables.code;
     } else if (searchMode === 'prose') {
-        ftsTable = 'messages_fts';
+        ftsTable = activeSearchTables.prose;
     } else {
         // Auto mode - detect based on query content
-        ftsTable = isCodeQuery(query) ? 'messages_code_fts' : 'messages_fts';
+        ftsTable = isCodeQuery(query) ? activeSearchTables.code : activeSearchTables.prose;
     }
 
     let sql = `
@@ -489,6 +577,7 @@ export function closeDatabase() {
         db.close();
         db = null;
         isInitialized = false;
+        activeSearchTables = CANONICAL_SEARCH_TABLES;
         console.log('[DB] Closed');
     }
 }

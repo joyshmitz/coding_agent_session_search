@@ -1,6 +1,6 @@
 [package]
 name = "coding-agent-search"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2024"
 authors = ["Jeffrey Emanuel"]
 description = "Unified TUI search over local coding agent histories"
@@ -139,6 +139,11 @@ fsqlite-types = { git = "https://github.com/Dicklesworthstone/frankensqlite", re
 [[bin]]
 name = "cass"
 path = "src/main.rs"
+test = false
+
+[[bin]]
+name = "cass-pages-perf-bundle"
+path = "src/bin/cass-pages-perf-bundle.rs"
 test = false
 
 [profile.release]

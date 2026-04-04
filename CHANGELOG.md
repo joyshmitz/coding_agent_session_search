@@ -7,7 +7,28 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Repository: <https://github.com/Dicklesworthstone/coding_agent_session_search>
 
-> **Releases vs. tags**: Only [v0.1.64](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.1.64), [v0.2.0](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.0), [v0.2.1](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.1), [v0.2.2](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.2), [v0.2.3](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.3), [v0.2.4](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.4), and [v0.2.5](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.5) have published GitHub Releases with downloadable binaries. All other version numbers below are git tags only (no release artifacts).
+> **Releases vs. tags**: Only [v0.1.64](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.1.64), [v0.2.0](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.0), [v0.2.1](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.1), [v0.2.2](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.2), [v0.2.3](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.3), [v0.2.4](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.4), [v0.2.5](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.5), and [v0.2.6](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.6) have published GitHub Releases with downloadable binaries. All other version numbers below are git tags only (no release artifacts).
+
+---
+
+## [v0.2.6](https://github.com/Dicklesworthstone/coding_agent_session_search/releases/tag/v0.2.6) -- 2026-04-03
+
+**GitHub Release** with downloadable binaries.
+
+Stability release focused on hard database failures in the 0.2.5 upgrade path, incremental indexing reliability, and getting the full test suite back to green.
+
+### Bug fixes
+
+- **V14 FTS migration repair**: Fix duplicate `fts_messages` schema rows left behind by older upgrade paths and harden the frankensqlite-owned rebuild/recovery flow so upgraded databases remain readable instead of tripping `malformed database schema (fts_messages)` on open
+- **Incremental source FK guard**: Register non-`local` `source_id` values during batched incremental persistence so watcher-driven indexing no longer crash-loops on `FOREIGN KEY constraint failed`
+- **Incremental writer memory stability**: Disable `autocommit_retain` on supported frankensqlite connections and tighten writer lifecycle behavior to stop the watch/index incremental path from retaining unbounded MVCC snapshots and running out of memory
+- **Readonly/maintenance-state regressions**: Scope maintenance locks to the active database, prefer heartbeat timestamps in fallback metadata, and fix several readonly/write-path regressions that were cascading through UI, export, and search tests
+- **Watch/index correctness**: Harden watch-once semantics, checkpoint refresh behavior, and fixture validity so incremental indexing matches the intended runtime contract
+
+### Test and release engineering
+
+- Reconcile outdated integration expectations with current frankensqlite behavior, including storage migration, watch E2E, pages/search, and robot-mode coverage
+- Fix doctests, clippy regressions, and non-test utility bins so `cargo test`, `cargo check --all-targets`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check` all pass cleanly before release
 
 ---
 

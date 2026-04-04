@@ -44,9 +44,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use frankensqlite::Connection;
-use frankensqlite::compat::{
-    ConnectionExt, ParamValue, RowExt, params_from_iter,
-};
+use frankensqlite::compat::{ConnectionExt, ParamValue, RowExt, params_from_iter};
 #[cfg(test)]
 use frankensqlite::params;
 
@@ -2875,7 +2873,9 @@ impl SearchClient {
                 "search_start"
             );
             let hits = self.search_sqlite_fts5(
-                self.sqlite_path.as_deref().unwrap_or_else(|| Path::new(":memory:")),
+                self.sqlite_path
+                    .as_deref()
+                    .unwrap_or_else(|| Path::new(":memory:")),
                 query,
                 filters.clone(),
                 fallback_fetch_limit,
@@ -4771,11 +4771,9 @@ impl SearchClient {
                 raw_origin_kind.as_deref().unwrap_or_default(),
                 origin_host.as_deref(),
             );
-            let origin_kind = normalized_search_hit_origin_kind(
-                source_id.as_str(),
-                raw_origin_kind.as_deref(),
-            )
-            .to_string();
+            let origin_kind =
+                normalized_search_hit_origin_kind(source_id.as_str(), raw_origin_kind.as_deref())
+                    .to_string();
             let line_number = idx
                 .and_then(|i| usize::try_from(i).ok())
                 .map(|i| i.saturating_add(1));
