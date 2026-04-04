@@ -1792,7 +1792,12 @@ fn run_streaming_consumer(
                     // the next run does a delta scan from this point instead of
                     // a full rescan that may OOM again (infinite-OOM-loop fix).
                     if let Some(ts) = scan_start_ts
-                        && let Err(e) = storage.set_last_scan_ts(ts)
+                        && let Err(e) = persist::with_ephemeral_writer(
+                            storage,
+                            false,
+                            "updating streaming incremental last_scan_ts",
+                            |writer| writer.set_last_scan_ts(ts),
+                        )
                     {
                         tracing::warn!("incremental last_scan_ts save failed: {}", e);
                     }
@@ -2247,7 +2252,12 @@ fn run_batch_index(
         // Periodically persist scan_start_ts so that if the process is killed,
         // the next run does a delta scan instead of a full rescan (infinite-OOM-loop fix).
         if last_scan_ts_save.elapsed() >= Duration::from_secs(10) {
-            if let Err(e) = storage.set_last_scan_ts(scan_start_ts) {
+            if let Err(e) = persist::with_ephemeral_writer(
+                storage,
+                false,
+                "updating batch incremental last_scan_ts",
+                |writer| writer.set_last_scan_ts(scan_start_ts),
+            ) {
                 tracing::warn!("batch incremental last_scan_ts save failed: {}", e);
             }
             last_scan_ts_save = std::time::Instant::now();
@@ -2792,7 +2802,15 @@ pub fn run_index(
 
             // Set watermark so incremental watch-mode embedding only sees new messages
             if let Some(max_id) = embedding_inputs.iter().map(|e| e.message_id).max() {
-                storage.set_last_embedded_message_id(i64::try_from(max_id).unwrap_or(i64::MAX))?;
+                persist::with_ephemeral_writer(
+                    &storage,
+                    false,
+                    "updating semantic indexing watermark",
+                    |writer| {
+                        writer
+                            .set_last_embedded_message_id(i64::try_from(max_id).unwrap_or(i64::MAX))
+                    },
+                )?;
             }
         }
     }
@@ -2801,7 +2819,12 @@ pub fn run_index(
     // runs intentionally preserve the previous scan watermark.
     if performed_scan {
         persist::with_concurrent_retry(persist::begin_concurrent_retry_limit(), || {
-            storage.set_last_scan_ts(scan_start_ts)
+            persist::with_ephemeral_writer(
+                &storage,
+                false,
+                "updating final last_scan_ts after index run",
+                |writer| writer.set_last_scan_ts(scan_start_ts),
+            )
         })
         .with_context(|| {
             format!(
@@ -2823,7 +2846,12 @@ pub fn run_index(
     // Update last_indexed_at so `cass status` reflects the latest index time
     let now_ms = FrankenStorage::now_millis();
     persist::with_concurrent_retry(persist::begin_concurrent_retry_limit(), || {
-        storage.set_last_indexed_at(now_ms)
+        persist::with_ephemeral_writer(
+            &storage,
+            false,
+            "updating final last_indexed_at after index run",
+            |writer| writer.set_last_indexed_at(now_ms),
+        )
     })
     .with_context(|| {
         format!(
@@ -3154,10 +3182,15 @@ fn incremental_semantic_embed(
 
     if embedding_inputs.is_empty() {
         // All messages were filtered out; advance watermark to avoid re-fetching
-        storage
+        let guard = storage
             .lock()
-            .map_err(|e| anyhow::anyhow!("lock storage for watermark write: {e}"))?
-            .set_last_embedded_message_id(raw_max_id)?;
+            .map_err(|e| anyhow::anyhow!("lock storage for watermark write: {e}"))?;
+        persist::with_ephemeral_writer(
+            &guard,
+            false,
+            "advancing incremental semantic watermark for filtered batch",
+            |writer| writer.set_last_embedded_message_id(raw_max_id),
+        )?;
         return Ok(0);
     }
 
@@ -3168,10 +3201,15 @@ fn incremental_semantic_embed(
     let count = semantic_indexer.append_to_index(embedded, data_dir)?;
 
     // 5. Update watermark to highest raw DB id (not filtered embedding id)
-    storage
+    let guard = storage
         .lock()
-        .map_err(|e| anyhow::anyhow!("lock storage for watermark write: {e}"))?
-        .set_last_embedded_message_id(raw_max_id)?;
+        .map_err(|e| anyhow::anyhow!("lock storage for watermark write: {e}"))?;
+    persist::with_ephemeral_writer(
+        &guard,
+        false,
+        "updating incremental semantic watermark",
+        |writer| writer.set_last_embedded_message_id(raw_max_id),
+    )?;
 
     Ok(count)
 }
@@ -3822,15 +3860,9 @@ fn ingest_batch(
     lexical_strategy: LexicalPopulationStrategy,
     defer_checkpoints: bool,
 ) -> Result<()> {
-    // The serial writer path reuses the long-lived storage connection, so the
-    // caller's checkpoint intent must be applied here for each ingest batch.
-    // This lets `cass index --watch` defer WAL auto-checkpoints during the
-    // initial startup import while still restoring the tighter steady-state
-    // policy for later incremental watch reindexes.
-    persist::apply_index_writer_checkpoint_policy(storage, defer_checkpoints);
-
-    // Use batched insert for better SQLite performance (single transaction)
-    // This also handles daily_stats updates incrementally via InsertOutcome deltas.
+    // Persistence now uses short-lived writer connections internally so the
+    // long-lived watch/session handle does not accumulate retained MVCC state
+    // on older frankensqlite builds that ignore autocommit_retain.
     persist::persist_conversations_batched(
         storage,
         t_index,
@@ -4298,7 +4330,12 @@ fn reindex_paths(
             t_index.commit()?;
 
             // Keep last_indexed_at current so `cass status` doesn't report stale during watch mode
-            storage.set_last_indexed_at(FrankenStorage::now_millis())?;
+            persist::with_ephemeral_writer(
+                &storage,
+                false,
+                "updating watch last_indexed_at",
+                |writer| writer.set_last_indexed_at(FrankenStorage::now_millis()),
+            )?;
         }
 
         // Track total indexed for stale detection
@@ -4702,36 +4739,49 @@ fn sync_sources_config_to_db(storage: &FrankenStorage) {
         }
     };
 
-    for source in &config.sources {
-        let platform = source.platform.map(|p| match p {
-            Platform::Macos => "macos".to_string(),
-            Platform::Linux => "linux".to_string(),
-            Platform::Windows => "windows".to_string(),
-        });
+    let records: Vec<Source> = config
+        .sources
+        .iter()
+        .map(|source| {
+            let platform = source.platform.map(|p| match p {
+                Platform::Macos => "macos".to_string(),
+                Platform::Linux => "linux".to_string(),
+                Platform::Windows => "windows".to_string(),
+            });
 
-        let config_json = serde_json::json!({
-            "paths": source.paths.clone(),
-            "path_mappings": source.path_mappings.clone(),
-            "sync_schedule": source.sync_schedule,
-        });
+            let config_json = serde_json::json!({
+                "paths": source.paths.clone(),
+                "path_mappings": source.path_mappings.clone(),
+                "sync_schedule": source.sync_schedule,
+            });
 
-        let record = Source {
-            id: source.name.clone(),
-            kind: source.source_type,
-            host_label: source.host.clone(),
-            machine_id: None,
-            platform,
-            config_json: Some(config_json),
-            created_at: None,
-            updated_at: None,
-        };
+            Source {
+                id: source.name.clone(),
+                kind: source.source_type,
+                host_label: source.host.clone(),
+                machine_id: None,
+                platform,
+                config_json: Some(config_json),
+                created_at: None,
+                updated_at: None,
+            }
+        })
+        .collect();
 
-        if let Err(e) = storage.upsert_source(&record) {
-            tracing::warn!(
-                source_id = %record.id,
-                "failed to upsert source into db: {e}"
-            );
-        }
+    if let Err(err) =
+        persist::with_ephemeral_writer(storage, false, "syncing configured sources", |writer| {
+            for record in &records {
+                if let Err(e) = writer.upsert_source(record) {
+                    tracing::warn!(
+                        source_id = %record.id,
+                        "failed to upsert source into db: {e}"
+                    );
+                }
+            }
+            Ok(())
+        })
+    {
+        tracing::warn!(error = %err, "failed to sync configured sources with a fresh writer");
     }
 }
 
@@ -4820,7 +4870,9 @@ pub fn build_scan_roots(storage: &FrankenStorage, data_dir: &Path) -> Vec<ScanRo
                     if !local_path.exists() {
                         continue;
                     }
-                    let mut scan_root = ScanRoot::remote(local_path, origin.clone(), platform);
+                    let mut scan_root = ScanRoot::local(local_path);
+                    scan_root.origin = origin.clone();
+                    scan_root.platform = platform;
                     scan_root.workspace_rewrites = workspace_rewrites.clone();
                     roots.push(scan_root);
                 }
@@ -4832,11 +4884,6 @@ pub fn build_scan_roots(storage: &FrankenStorage, data_dir: &Path) -> Vec<ScanRo
     // Fallback: remote mirror roots from registered sources
     if let Ok(sources) = storage.list_sources() {
         for source in sources {
-            // Skip local source - already handled above
-            if !source.kind.is_remote() {
-                continue;
-            }
-
             // Parse platform from source
             let platform =
                 source
@@ -4922,7 +4969,9 @@ pub fn build_scan_roots(storage: &FrankenStorage, data_dir: &Path) -> Vec<ScanRo
                             kind: source.kind,
                             host: source.host_label.clone(),
                         };
-                        let mut scan_root = ScanRoot::remote(local_path, origin, platform);
+                        let mut scan_root = ScanRoot::local(local_path);
+                        scan_root.origin = origin;
+                        scan_root.platform = platform;
                         scan_root.workspace_rewrites = workspace_rewrites.clone();
                         roots.push(scan_root);
                     }
@@ -4933,7 +4982,7 @@ pub fn build_scan_roots(storage: &FrankenStorage, data_dir: &Path) -> Vec<ScanRo
             // Remote mirror directory: data_dir/remotes/<source_id>/mirror
             let mirror_path = data_dir.join("remotes").join(&source.id).join("mirror");
 
-            if mirror_path.exists() {
+            if source.kind.is_remote() && mirror_path.exists() {
                 let origin = Origin {
                     source_id: source.id.clone(),
                     kind: source.kind,
@@ -5040,10 +5089,12 @@ pub fn apply_workspace_rewrite(conv: &mut NormalizedConversation, root: &ScanRoo
 pub mod persist {
     use super::LexicalPopulationStrategy;
     use std::collections::{HashMap, HashSet};
+    use std::ops::Range;
     use std::time::Duration;
 
     use anyhow::{Context, Result, anyhow};
     use frankensqlite::FrankenError;
+    use rand::RngExt;
     use rayon::prelude::*;
 
     use crate::connectors::NormalizedConversation;
@@ -5151,6 +5202,58 @@ pub mod persist {
         }
     }
 
+    pub(super) fn with_ephemeral_writer<T, F>(
+        storage: &FrankenStorage,
+        defer_checkpoints: bool,
+        context: &str,
+        f: F,
+    ) -> Result<T>
+    where
+        F: FnOnce(&FrankenStorage) -> Result<T>,
+    {
+        let db_path = storage
+            .database_path()
+            .with_context(|| format!("resolving database path for {context}"))?;
+        // Keep the long-lived handle's connection-local checkpoint state aligned
+        // with the short-lived writer so watch-mode observability and follow-up
+        // policy transitions still reflect the active ingestion mode.
+        apply_index_writer_checkpoint_policy(storage, defer_checkpoints);
+        let writer = FrankenStorage::open_writer(&db_path).with_context(|| {
+            format!(
+                "opening short-lived frankensqlite writer for {context}: {}",
+                db_path.display()
+            )
+        })?;
+        apply_index_writer_busy_timeout(&writer);
+        apply_index_writer_checkpoint_policy(&writer, defer_checkpoints);
+
+        let result = f(&writer);
+        let close_result = writer.close().with_context(|| {
+            format!(
+                "closing short-lived frankensqlite writer for {context}: {}",
+                db_path.display()
+            )
+        });
+
+        match result {
+            Ok(value) => {
+                close_result?;
+                Ok(value)
+            }
+            Err(err) => {
+                if let Err(close_err) = close_result {
+                    tracing::warn!(
+                        error = %close_err,
+                        db_path = %db_path.display(),
+                        context,
+                        "failed to close short-lived writer cleanly after write error"
+                    );
+                }
+                Err(err)
+            }
+        }
+    }
+
     fn transient_franken_error(err: &anyhow::Error) -> Option<&FrankenError> {
         err.downcast_ref::<FrankenError>()
             .or_else(|| err.root_cause().downcast_ref::<FrankenError>())
@@ -5165,6 +5268,7 @@ pub mod persist {
                     | FrankenError::BusySnapshot { .. }
                     | FrankenError::WriteConflict { .. }
                     | FrankenError::SerializationFailure { .. }
+                    | FrankenError::DatabaseCorrupt { .. }
             )
         })
     }
@@ -5174,25 +5278,166 @@ pub mod persist {
     where
         F: FnMut() -> Result<T>,
     {
+        let mut rng = rand::rng();
         let mut backoff_ms = 4_u64;
         for attempt in 0..=max_retries {
             match f() {
                 Ok(val) => return Ok(val),
                 Err(err) if attempt < max_retries && is_retryable_franken_error(&err) => {
+                    let sleep_ms = backoff_ms + rng.random_range(0..=backoff_ms);
                     tracing::debug!(
                         attempt = attempt + 1,
                         max_retries,
-                        backoff_ms,
+                        backoff_ms = sleep_ms,
                         error = %err,
                         "begin_concurrent_retry"
                     );
-                    std::thread::sleep(Duration::from_millis(backoff_ms));
-                    backoff_ms = (backoff_ms * 2).min(128);
+                    std::thread::sleep(Duration::from_millis(sleep_ms));
+                    backoff_ms = (backoff_ms * 2).min(256);
                 }
                 Err(err) => return Err(err),
             }
         }
         Err(anyhow!("exhausted begin-concurrent retries"))
+    }
+
+    enum ChunkPersistResult {
+        Completed(Vec<(usize, InsertOutcome)>),
+        RetryableFallback {
+            completed: Vec<(usize, InsertOutcome)>,
+            remaining_range: Range<usize>,
+            error: anyhow::Error,
+        },
+    }
+
+    fn persist_chunk_with_writer(
+        franken: &FrankenStorage,
+        base_idx: usize,
+        chunk: &[NormalizedConversation],
+        max_retries: usize,
+    ) -> Result<ChunkPersistResult> {
+        let mut outcomes = Vec::with_capacity(chunk.len());
+        let mut agent_cache: HashMap<String, i64> = HashMap::new();
+        let mut workspace_cache: HashMap<std::path::PathBuf, i64> = HashMap::new();
+
+        for (offset, conv) in chunk.iter().enumerate() {
+            let idx = base_idx + offset;
+
+            // Wrap the entire ensure_agent + ensure_workspace +
+            // insert_conversation_tree sequence in the retry loop, since
+            // ensure_agent/workspace also write and can hit page conflicts.
+            let agent_slug = conv.agent_slug.clone();
+            let workspace = conv.workspace.clone();
+            let internal = map_to_internal(conv);
+
+            match with_concurrent_retry(max_retries, || {
+                let agent_id = if let Some(id) = agent_cache.get(&agent_slug) {
+                    *id
+                } else {
+                    let agent = Agent {
+                        id: None,
+                        slug: agent_slug.clone(),
+                        name: agent_slug.clone(),
+                        version: None,
+                        kind: AgentKind::Cli,
+                    };
+                    let id = franken.ensure_agent(&agent)?;
+                    agent_cache.insert(agent_slug.clone(), id);
+                    id
+                };
+                let workspace_id = if let Some(ws) = &workspace {
+                    if let Some(id) = workspace_cache.get(ws) {
+                        Some(*id)
+                    } else {
+                        let id = franken.ensure_workspace(ws, None)?;
+                        workspace_cache.insert(ws.clone(), id);
+                        Some(id)
+                    }
+                } else {
+                    None
+                };
+                franken.insert_conversation_tree(agent_id, workspace_id, &internal)
+            }) {
+                Ok(outcome) => outcomes.push((idx, outcome)),
+                Err(err) if is_retryable_franken_error(&err) => {
+                    return Ok(ChunkPersistResult::RetryableFallback {
+                        completed: outcomes,
+                        remaining_range: idx..(base_idx + chunk.len()),
+                        error: err,
+                    });
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        Ok(ChunkPersistResult::Completed(outcomes))
+    }
+
+    fn persist_chunk_serial_fallback(
+        db_path: &std::path::Path,
+        base_idx: usize,
+        chunk: &[NormalizedConversation],
+        max_retries: usize,
+        defer_checkpoints: bool,
+    ) -> Result<Vec<(usize, InsertOutcome)>> {
+        let franken = FrankenStorage::open_writer(db_path).with_context(|| {
+            format!(
+                "opening frankensqlite writer for begin-concurrent serial fallback: {}",
+                db_path.display()
+            )
+        })?;
+        apply_begin_concurrent_writer_tuning(&franken, defer_checkpoints);
+        let fallback_retries = max_retries.max(12);
+        let result = persist_chunk_with_writer(&franken, base_idx, chunk, fallback_retries);
+        let close_result = franken.close().with_context(|| {
+            format!(
+                "closing frankensqlite writer for begin-concurrent serial fallback: {}",
+                db_path.display()
+            )
+        });
+
+        match result {
+            Ok(ChunkPersistResult::Completed(outcomes)) => {
+                close_result?;
+                Ok(outcomes)
+            }
+            Ok(ChunkPersistResult::RetryableFallback {
+                completed,
+                remaining_range,
+                error,
+            }) => {
+                if let Err(close_err) = close_result {
+                    tracing::warn!(
+                        error = %close_err,
+                        db_path = %db_path.display(),
+                        "failed to close serial fallback writer cleanly after retry exhaustion"
+                    );
+                }
+                ordered_bail_serial_fallback(completed.len(), remaining_range, error)
+            }
+            Err(err) => {
+                if let Err(close_err) = close_result {
+                    tracing::warn!(
+                        error = %close_err,
+                        db_path = %db_path.display(),
+                        "failed to close serial fallback writer cleanly after index error"
+                    );
+                }
+                Err(err)
+            }
+        }
+    }
+
+    fn ordered_bail_serial_fallback(
+        completed: usize,
+        remaining_range: Range<usize>,
+        error: anyhow::Error,
+    ) -> Result<Vec<(usize, InsertOutcome)>> {
+        Err(anyhow!(
+            "begin-concurrent serial fallback exhausted retryable conflicts after persisting {completed} conversations; remaining range {}..{}: {error}",
+            remaining_range.start,
+            remaining_range.end
+        ))
     }
 
     fn duplicate_conversation_keys_present(convs: &[NormalizedConversation]) -> bool {
@@ -5233,10 +5478,11 @@ pub mod persist {
         let max_retries = begin_concurrent_retry_limit();
         let chunk_size = begin_concurrent_chunk_size().min(convs.len().max(1));
 
-        let indexed_chunks: Vec<Result<Vec<(usize, InsertOutcome)>>> = convs
+        let indexed_chunks: Vec<Result<ChunkPersistResult>> = convs
             .par_chunks(chunk_size)
             .enumerate()
             .map(|(chunk_idx, chunk)| {
+                let base_idx = chunk_idx * chunk_size;
                 let franken = FrankenStorage::open_writer(db_path).with_context(|| {
                     format!(
                         "opening frankensqlite writer for begin-concurrent mode: {}",
@@ -5244,54 +5490,7 @@ pub mod persist {
                     )
                 })?;
                 apply_begin_concurrent_writer_tuning(&franken, defer_checkpoints);
-                let result: Result<Vec<(usize, InsertOutcome)>> = (|| {
-                    let mut outcomes = Vec::with_capacity(chunk.len());
-                    let mut agent_cache: HashMap<String, i64> = HashMap::new();
-                    let mut workspace_cache: HashMap<std::path::PathBuf, i64> = HashMap::new();
-
-                    for (offset, conv) in chunk.iter().enumerate() {
-                        let idx = chunk_idx * chunk_size + offset;
-
-                        // Wrap the entire ensure_agent + ensure_workspace +
-                        // insert_conversation_tree sequence in the retry loop, since
-                        // ensure_agent/workspace also write and can hit page conflicts.
-                        let agent_slug = conv.agent_slug.clone();
-                        let workspace = conv.workspace.clone();
-                        let internal = map_to_internal(conv);
-
-                        let outcome = with_concurrent_retry(max_retries, || {
-                            let agent_id = if let Some(id) = agent_cache.get(&agent_slug) {
-                                *id
-                            } else {
-                                let agent = Agent {
-                                    id: None,
-                                    slug: agent_slug.clone(),
-                                    name: agent_slug.clone(),
-                                    version: None,
-                                    kind: AgentKind::Cli,
-                                };
-                                let id = franken.ensure_agent(&agent)?;
-                                agent_cache.insert(agent_slug.clone(), id);
-                                id
-                            };
-                            let workspace_id = if let Some(ws) = &workspace {
-                                if let Some(id) = workspace_cache.get(ws) {
-                                    Some(*id)
-                                } else {
-                                    let id = franken.ensure_workspace(ws, None)?;
-                                    workspace_cache.insert(ws.clone(), id);
-                                    Some(id)
-                                }
-                            } else {
-                                None
-                            };
-                            franken.insert_conversation_tree(agent_id, workspace_id, &internal)
-                        })?;
-                        outcomes.push((idx, outcome));
-                    }
-
-                    Ok(outcomes)
-                })();
+                let result = persist_chunk_with_writer(&franken, base_idx, chunk, max_retries);
                 let close_result = franken.close().with_context(|| {
                     format!(
                         "closing frankensqlite writer for begin-concurrent mode: {}",
@@ -5318,8 +5517,38 @@ pub mod persist {
             .collect();
 
         let mut ordered = Vec::with_capacity(convs.len());
+        let mut fallback_ranges = Vec::new();
         for chunk in indexed_chunks {
-            ordered.extend(chunk?);
+            match chunk? {
+                ChunkPersistResult::Completed(outcomes) => ordered.extend(outcomes),
+                ChunkPersistResult::RetryableFallback {
+                    completed,
+                    remaining_range,
+                    error,
+                } => {
+                    tracing::warn!(
+                        error = %error,
+                        completed = completed.len(),
+                        remaining = remaining_range.len(),
+                        start = remaining_range.start,
+                        end = remaining_range.end,
+                        "begin-concurrent chunk exhausted retryable conflicts; falling back to serial replay"
+                    );
+                    ordered.extend(completed);
+                    fallback_ranges.push(remaining_range);
+                }
+            }
+        }
+
+        for remaining_range in fallback_ranges {
+            let fallback_outcomes = persist_chunk_serial_fallback(
+                db_path,
+                remaining_range.start,
+                &convs[remaining_range.clone()],
+                max_retries,
+                defer_checkpoints,
+            )?;
+            ordered.extend(fallback_outcomes);
         }
         ordered.sort_by_key(|(idx, _)| *idx);
 
@@ -5472,27 +5701,28 @@ pub mod persist {
         conv: &NormalizedConversation,
     ) -> Result<()> {
         tracing::info!(agent = %conv.agent_slug, messages = conv.messages.len(), "persist_conversation");
-        let agent = Agent {
-            id: None,
-            slug: conv.agent_slug.clone(),
-            name: conv.agent_slug.clone(),
-            version: None,
-            kind: AgentKind::Cli,
-        };
-        let agent_id = storage.ensure_agent(&agent)?;
-
-        let workspace_id = if let Some(ws) = &conv.workspace {
-            Some(storage.ensure_workspace(ws, None)?)
-        } else {
-            None
-        };
-
-        let internal_conv = map_to_internal(conv);
-
         let InsertOutcome {
             conversation_id,
             inserted_indices,
-        } = storage.insert_conversation_tree(agent_id, workspace_id, &internal_conv)?;
+        } = with_ephemeral_writer(storage, false, "persist_conversation", |writer| {
+            let agent = Agent {
+                id: None,
+                slug: conv.agent_slug.clone(),
+                name: conv.agent_slug.clone(),
+                version: None,
+                kind: AgentKind::Cli,
+            };
+            let agent_id = writer.ensure_agent(&agent)?;
+
+            let workspace_id = if let Some(ws) = &conv.workspace {
+                Some(writer.ensure_workspace(ws, None)?)
+            } else {
+                None
+            };
+
+            let internal_conv = map_to_internal(conv);
+            writer.insert_conversation_tree(agent_id, workspace_id, &internal_conv)
+        })?;
 
         // Only add newly inserted messages to the Tantivy index (incremental)
         if !defer_lexical_updates_enabled() && !inserted_indices.is_empty() {
@@ -5551,101 +5781,102 @@ pub mod persist {
             );
         }
 
-        let cache_enabled = IndexingCache::is_enabled();
-        let mut cache = IndexingCache::new();
+        let outcomes = with_ephemeral_writer(
+            storage,
+            defer_checkpoints,
+            "serial batched indexing",
+            |writer| {
+                let cache_enabled = IndexingCache::is_enabled();
+                let mut cache = IndexingCache::new();
 
-        // Prepare data for batched insert: (agent_id, workspace_id, Conversation)
-        let mut prepared: Vec<(i64, Option<i64>, Conversation)> = Vec::with_capacity(convs.len());
+                // Prepare data for batched insert: (agent_id, workspace_id, Conversation)
+                let mut prepared: Vec<(i64, Option<i64>, Conversation)> =
+                    Vec::with_capacity(convs.len());
 
-        for conv in convs {
-            let agent = Agent {
-                id: None,
-                slug: conv.agent_slug.clone(),
-                name: conv.agent_slug.clone(),
-                version: None,
-                kind: AgentKind::Cli,
-            };
+                for conv in convs {
+                    let agent = Agent {
+                        id: None,
+                        slug: conv.agent_slug.clone(),
+                        name: conv.agent_slug.clone(),
+                        version: None,
+                        kind: AgentKind::Cli,
+                    };
 
-            let agent_id = if cache_enabled {
-                cache.get_or_insert_agent(storage, &agent)?
-            } else {
-                storage.ensure_agent(&agent)?
-            };
+                    let agent_id = if cache_enabled {
+                        cache.get_or_insert_agent(writer, &agent)?
+                    } else {
+                        writer.ensure_agent(&agent)?
+                    };
 
-            let workspace_id = if let Some(ws) = &conv.workspace {
-                if cache_enabled {
-                    Some(cache.get_or_insert_workspace(storage, ws, None)?)
-                } else {
-                    Some(storage.ensure_workspace(ws, None)?)
+                    let workspace_id = if let Some(ws) = &conv.workspace {
+                        if cache_enabled {
+                            Some(cache.get_or_insert_workspace(writer, ws, None)?)
+                        } else {
+                            Some(writer.ensure_workspace(ws, None)?)
+                        }
+                    } else {
+                        None
+                    };
+
+                    let internal_conv = map_to_internal(conv);
+                    prepared.push((agent_id, workspace_id, internal_conv));
                 }
-            } else {
-                None
-            };
 
-            let internal_conv = map_to_internal(conv);
-            prepared.push((agent_id, workspace_id, internal_conv));
-        }
+                if cache_enabled {
+                    let (hits, misses, hit_rate) = cache.stats();
+                    tracing::debug!(
+                        hits,
+                        misses,
+                        hit_rate = format!("{:.1}%", hit_rate * 100.0),
+                        agents = cache.agent_count(),
+                        workspaces = cache.workspace_count(),
+                        "IndexingCache stats"
+                    );
+                }
 
-        // Log cache statistics if enabled
-        if cache_enabled {
-            let (hits, misses, hit_rate) = cache.stats();
-            tracing::debug!(
-                hits,
-                misses,
-                hit_rate = format!("{:.1}%", hit_rate * 100.0),
-                agents = cache.agent_count(),
-                workspaces = cache.workspace_count(),
-                "IndexingCache stats"
-            );
-        }
+                let refs: Vec<(i64, Option<i64>, &Conversation)> =
+                    prepared.iter().map(|(a, w, c)| (*a, *w, c)).collect();
+                let chunk_size = serial_batch_chunk_size().min(refs.len().max(1));
+                let mut outcomes = Vec::with_capacity(refs.len());
 
-        // Build references for the batched call
-        let refs: Vec<(i64, Option<i64>, &Conversation)> =
-            prepared.iter().map(|(a, w, c)| (*a, *w, c)).collect();
+                for start in (0..refs.len()).step_by(chunk_size) {
+                    let end = (start + chunk_size).min(refs.len());
+                    let chunk_refs = &refs[start..end];
+                    outcomes.extend(writer.insert_conversations_batched(chunk_refs)?);
+                }
 
-        let chunk_size = serial_batch_chunk_size().min(refs.len().max(1));
-        let mut outcomes = Vec::with_capacity(refs.len());
+                Ok(outcomes)
+            },
+        )?;
         let defer_lexical_updates = defer_lexical_updates_enabled();
-
-        for start in (0..refs.len()).step_by(chunk_size) {
-            let end = (start + chunk_size).min(refs.len());
-            let chunk_refs = &refs[start..end];
-            let chunk_convs = &convs[start..end];
-
-            let chunk_outcomes = storage.insert_conversations_batched(chunk_refs)?;
-
-            if !defer_lexical_updates {
-                for (conv, outcome) in chunk_convs.iter().zip(chunk_outcomes.iter()) {
-                    match lexical_strategy {
-                        LexicalPopulationStrategy::DeferredAuthoritativeDbRebuild => continue,
-                        LexicalPopulationStrategy::InlineRebuildFromScan => {
-                            // Rebuild path: the Tantivy index is known-empty, so index all messages.
+        if !defer_lexical_updates {
+            for (conv, outcome) in convs.iter().zip(outcomes.iter()) {
+                match lexical_strategy {
+                    LexicalPopulationStrategy::DeferredAuthoritativeDbRebuild => continue,
+                    LexicalPopulationStrategy::InlineRebuildFromScan => {
+                        t_index.add_messages_with_conversation_id(
+                            conv,
+                            &conv.messages,
+                            Some(outcome.conversation_id),
+                        )?;
+                    }
+                    LexicalPopulationStrategy::IncrementalInline => {
+                        if !outcome.inserted_indices.is_empty() {
+                            let new_msgs: Vec<_> = conv
+                                .messages
+                                .iter()
+                                .filter(|m| outcome.inserted_indices.contains(&m.idx))
+                                .cloned()
+                                .collect();
                             t_index.add_messages_with_conversation_id(
                                 conv,
-                                &conv.messages,
+                                &new_msgs,
                                 Some(outcome.conversation_id),
                             )?;
-                        }
-                        LexicalPopulationStrategy::IncrementalInline => {
-                            if !outcome.inserted_indices.is_empty() {
-                                let new_msgs: Vec<_> = conv
-                                    .messages
-                                    .iter()
-                                    .filter(|m| outcome.inserted_indices.contains(&m.idx))
-                                    .cloned()
-                                    .collect();
-                                t_index.add_messages_with_conversation_id(
-                                    conv,
-                                    &new_msgs,
-                                    Some(outcome.conversation_id),
-                                )?;
-                            }
                         }
                     }
                 }
             }
-
-            outcomes.extend(chunk_outcomes);
         }
 
         Ok(())
@@ -5846,13 +6077,42 @@ pub mod persist {
                     row.get_typed(0)
                 })
                 .unwrap();
-            assert_eq!(count, 10, "all 10 conversations should be persisted");
+            let persisted_conversations: Vec<(i64, i64, Option<String>, String)> = reader
+                .raw()
+                .query_map_collect(
+                    "SELECT id, agent_id, external_id, source_path FROM conversations ORDER BY id",
+                    &[],
+                    |row| {
+                        Ok((
+                            row.get_typed(0)?,
+                            row.get_typed(1)?,
+                            row.get_typed(2)?,
+                            row.get_typed(3)?,
+                        ))
+                    },
+                )
+                .unwrap();
+            let persisted_message_counts: Vec<(i64, i64)> = reader
+                .raw()
+                .query_map_collect(
+                    "SELECT conversation_id, COUNT(*) FROM messages GROUP BY conversation_id ORDER BY conversation_id",
+                    &[],
+                    |row| Ok((row.get_typed(0)?, row.get_typed(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                count, 10,
+                "all 10 conversations should be persisted; rows={persisted_conversations:?}; per_conversation_messages={persisted_message_counts:?}"
+            );
 
             let msg_count: i64 = reader
                 .raw()
                 .query_row_map("SELECT COUNT(*) FROM messages", &[], |row| row.get_typed(0))
                 .unwrap();
-            assert_eq!(msg_count, 30, "all 30 messages should be persisted");
+            assert_eq!(
+                msg_count, 30,
+                "all 30 messages should be persisted; per_conversation={persisted_message_counts:?}"
+            );
 
             let agent_count: i64 = reader
                 .raw()
@@ -6250,6 +6510,151 @@ pub mod persist {
         }
 
         #[test]
+        #[serial]
+        fn persist_conversations_batched_registers_missing_remote_source_in_serial_path() {
+            use crate::connectors::{NormalizedConversation, NormalizedMessage};
+            use crate::search::tantivy::TantivyIndex;
+            use frankensqlite::compat::{ConnectionExt, RowExt};
+
+            let _begin_guard = set_env("CASS_INDEXER_BEGIN_CONCURRENT", "0");
+
+            let dir = tempfile::TempDir::new().unwrap();
+            let db_path = dir.path().join("serial-source.db");
+            let index_path = dir.path().join("tantivy");
+
+            let storage = create_franken_db(&db_path);
+            let mut t_index = TantivyIndex::open_or_create(&index_path).unwrap();
+            let convs = vec![NormalizedConversation {
+                agent_slug: "codex".into(),
+                external_id: Some("remote-serial-session".into()),
+                title: Some("Remote serial session".into()),
+                workspace: Some(std::path::PathBuf::from("/ws/remote")),
+                source_path: std::path::PathBuf::from("/log/remote-serial.jsonl"),
+                started_at: Some(1_000),
+                ended_at: Some(1_010),
+                metadata: serde_json::json!({
+                    "cass": {
+                        "origin": {
+                            "source_id": "remote-source",
+                            "host": "builder-1"
+                        }
+                    }
+                }),
+                messages: vec![NormalizedMessage {
+                    idx: 0,
+                    role: "assistant".into(),
+                    author: Some("tester".into()),
+                    created_at: Some(1_005),
+                    content: "serial remote content".into(),
+                    extra: serde_json::json!({}),
+                    snippets: vec![],
+                    invocations: Vec::new(),
+                }],
+            }];
+
+            persist_conversations_batched(
+                &storage,
+                &mut t_index,
+                &convs,
+                LexicalPopulationStrategy::IncrementalInline,
+                false,
+            )
+            .expect("serial batched path should auto-register embedded remote sources");
+
+            let reader = FrankenStorage::open(&db_path).unwrap();
+            let source_ids = reader.get_source_ids().unwrap();
+            assert_eq!(source_ids, vec!["remote-source".to_string()]);
+
+            let provenance: Vec<(String, Option<String>)> = reader
+                .raw()
+                .query_map_collect(
+                    "SELECT source_id, origin_host FROM conversations",
+                    &[],
+                    |row| Ok((row.get_typed(0)?, row.get_typed(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                provenance,
+                vec![("remote-source".to_string(), Some("builder-1".to_string()))]
+            );
+        }
+
+        #[test]
+        #[serial]
+        fn persist_conversations_batched_registers_missing_remote_source_in_begin_concurrent_path()
+        {
+            use crate::connectors::{NormalizedConversation, NormalizedMessage};
+            use crate::search::tantivy::TantivyIndex;
+            use frankensqlite::compat::{ConnectionExt, RowExt};
+
+            let _begin_guard = set_env("CASS_INDEXER_BEGIN_CONCURRENT", "1");
+            let _chunk_guard = set_env("CASS_INDEXER_BEGIN_CONCURRENT_CHUNK_SIZE", "1");
+
+            let dir = tempfile::TempDir::new().unwrap();
+            let db_path = dir.path().join("begin-concurrent-source.db");
+            let index_path = dir.path().join("tantivy");
+
+            let storage = create_franken_db(&db_path);
+            let mut t_index = TantivyIndex::open_or_create(&index_path).unwrap();
+            let convs = vec![NormalizedConversation {
+                agent_slug: "codex".into(),
+                external_id: Some("remote-begin-session".into()),
+                title: Some("Remote begin-concurrent session".into()),
+                workspace: Some(std::path::PathBuf::from("/ws/remote")),
+                source_path: std::path::PathBuf::from("/log/remote-begin.jsonl"),
+                started_at: Some(2_000),
+                ended_at: Some(2_010),
+                metadata: serde_json::json!({
+                    "cass": {
+                        "origin": {
+                            "source_id": "remote-begin-source",
+                            "host": "builder-2"
+                        }
+                    }
+                }),
+                messages: vec![NormalizedMessage {
+                    idx: 0,
+                    role: "assistant".into(),
+                    author: Some("tester".into()),
+                    created_at: Some(2_005),
+                    content: "begin-concurrent remote content".into(),
+                    extra: serde_json::json!({}),
+                    snippets: vec![],
+                    invocations: Vec::new(),
+                }],
+            }];
+
+            persist_conversations_batched(
+                &storage,
+                &mut t_index,
+                &convs,
+                LexicalPopulationStrategy::IncrementalInline,
+                false,
+            )
+            .expect("begin-concurrent path should auto-register embedded remote sources");
+
+            let reader = FrankenStorage::open(&db_path).unwrap();
+            let source_ids = reader.get_source_ids().unwrap();
+            assert_eq!(source_ids, vec!["remote-begin-source".to_string()]);
+
+            let provenance: Vec<(String, Option<String>)> = reader
+                .raw()
+                .query_map_collect(
+                    "SELECT source_id, origin_host FROM conversations",
+                    &[],
+                    |row| Ok((row.get_typed(0)?, row.get_typed(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                provenance,
+                vec![(
+                    "remote-begin-source".to_string(),
+                    Some("builder-2".to_string())
+                )]
+            );
+        }
+
+        #[test]
         fn duplicate_conversation_keys_present_for_shared_source_path_without_external_id() {
             use crate::connectors::{NormalizedConversation, NormalizedMessage};
 
@@ -6397,15 +6802,32 @@ mod tests {
     }
 
     fn ensure_fts_schema(storage: &FrankenStorage) {
-        let count: i64 = storage
+        let db_path = storage
             .raw()
-            .query_row_map(
+            .query_map_collect("PRAGMA database_list", &[] as &[ParamValue], |row| {
+                Ok((row.get_typed::<String>(1)?, row.get_typed::<String>(2)?))
+            })
+            .unwrap()
+            .into_iter()
+            .find(|(name, path)| name == "main" && !path.is_empty())
+            .map(|(_, path)| std::path::PathBuf::from(path))
+            .expect("file-backed main database path");
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let count: i64 = conn
+            .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE name = 'fts_messages'",
-                &[] as &[ParamValue],
-                |row| row.get_typed(0),
+                [],
+                |row| row.get(0),
             )
             .unwrap();
         assert_eq!(count, 1, "fts_messages should exist after migrations");
+        assert!(
+            conn.prepare("SELECT rowid FROM fts_messages LIMIT 1")
+                .and_then(|mut stmt| stmt.exists([]))
+                .is_ok(),
+            "fts_messages should remain queryable via stock SQLite"
+        );
     }
 
     fn norm_msg(idx: i64, created_at: i64) -> NormalizedMessage {
@@ -7068,7 +7490,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn ingest_batch_applies_checkpoint_policy_for_serial_writer_path() {
+        let _guard = set_env("CASS_INDEX_WRITER_WAL_AUTOCHECKPOINT_PAGES", "-1");
         let tmp = TempDir::new().unwrap();
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
@@ -7479,15 +7903,16 @@ mod tests {
             .unwrap();
 
         reset_storage(&storage, &db_path).unwrap();
+        let reopened = FrankenStorage::open(&db_path).unwrap();
 
-        let msg_count: i64 = storage
+        let msg_count: i64 = reopened
             .raw()
             .query_row_map("SELECT COUNT(*) FROM messages", &[] as &[ParamValue], |r| {
                 r.get_typed(0)
             })
             .unwrap();
         assert_eq!(msg_count, 0);
-        let daily_count: i64 = storage
+        let daily_count: i64 = reopened
             .raw()
             .query_row_map(
                 "SELECT COUNT(*) FROM daily_stats",
@@ -7496,7 +7921,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(daily_count, 0);
-        let usage_daily_count: i64 = storage
+        let usage_daily_count: i64 = reopened
             .raw()
             .query_row_map(
                 "SELECT COUNT(*) FROM usage_daily",
@@ -7505,7 +7930,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(usage_daily_count, 0);
-        let fts_count: i64 = storage
+        let fts_count: i64 = reopened
             .raw()
             .query_row_map(
                 "SELECT COUNT(*) FROM fts_messages",
@@ -7515,7 +7940,7 @@ mod tests {
             .unwrap();
         assert_eq!(fts_count, 0, "reset should recreate an empty FTS table");
         assert_eq!(
-            storage.schema_version().unwrap(),
+            reopened.schema_version().unwrap(),
             crate::storage::sqlite::CURRENT_SCHEMA_VERSION
         );
     }
