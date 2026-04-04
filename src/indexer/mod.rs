@@ -4155,7 +4155,7 @@ fn watch_sources<F: Fn(Vec<PathBuf>, &[(ConnectorKind, ScanRoot)], bool) -> Resu
 }
 
 #[cfg(test)]
-fn reset_storage(storage: &FrankenStorage, db_path: &Path) -> Result<()> {
+fn reset_storage(storage: &FrankenStorage) -> Result<()> {
     // Wrap the canonical-table reset in a transaction so partial clears roll back.
     // The derived FTS table is recreated explicitly afterward because the
     // frankensqlite writer path does not implement the FTS5 control-column
@@ -4179,10 +4179,7 @@ fn reset_storage(storage: &FrankenStorage, db_path: &Path) -> Result<()> {
          DELETE FROM meta WHERE key = 'last_scan_ts';
          COMMIT;",
     )?;
-    let _ = storage
-        .raw()
-        .execute_batch("DROP TABLE IF EXISTS fts_messages;");
-    crate::storage::sqlite::materialize_fresh_fts_schema_via_rusqlite(db_path)?;
+    storage.rebuild_fts()?;
     Ok(())
 }
 
@@ -7902,7 +7899,7 @@ mod tests {
             )
             .unwrap();
 
-        reset_storage(&storage, &db_path).unwrap();
+        reset_storage(&storage).unwrap();
         let reopened = FrankenStorage::open(&db_path).unwrap();
 
         let msg_count: i64 = reopened

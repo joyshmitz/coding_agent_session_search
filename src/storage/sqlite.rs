@@ -2700,33 +2700,17 @@ impl FrankenStorage {
             .with_context(|| format!("opening frankensqlite db at {}", path.display()))?;
         let storage = Self { conn };
         storage.run_migrations()?;
-        storage.close().with_context(|| {
+        let rebuilt_rows = storage.rebuild_fts_via_frankensqlite().with_context(|| {
             format!(
-                "closing frankensqlite db after migrations before rusqlite FTS verification: {}",
+                "rebuilding canonical FTS via frankensqlite after migrations for {}",
                 path.display()
             )
         })?;
-
-        let repair = ensure_fts_consistency_via_rusqlite(path).with_context(|| {
-            format!(
-                "verifying and repairing FTS consistency via rusqlite for {}",
-                path.display()
-            )
-        })?;
-        if !matches!(repair, FtsConsistencyRepair::AlreadyHealthy { .. }) {
-            tracing::info!(
-                db_path = %path.display(),
-                repair = ?repair,
-                "repaired canonical FTS schema/content after migration open"
-            );
-        }
-
-        let conn = FrankenConnection::open(&path_str)
-            .with_context(|| format!("reopening frankensqlite db at {}", path.display()))?;
-        let storage = Self { conn };
-        // Keep the canonical stock-SQLite FTS schema authoritative on disk.
-        // Persisting a frankensqlite-only positive-rootpage helper row here
-        // creates duplicate `fts_messages` entries in sqlite_schema.
+        tracing::info!(
+            db_path = %path.display(),
+            rebuilt_rows,
+            "rebuilt canonical FTS schema/content after migration open"
+        );
         storage.repair_missing_current_schema_objects()?;
         storage.apply_config()?;
         Ok(storage)
@@ -5800,8 +5784,28 @@ impl FrankenStorage {
 
     /// Rebuild the FTS5 index from scratch (chunked to avoid OOM on large databases, #110).
     pub fn rebuild_fts(&self) -> Result<()> {
-        let db_path = self.database_path()?;
-        rebuild_fts_via_rusqlite(&db_path).map(|_| ())
+        self.rebuild_fts_via_frankensqlite().map(|_| ())
+    }
+
+    fn rebuild_fts_via_frankensqlite(&self) -> Result<usize> {
+        self.conn
+            .execute("DROP TABLE IF EXISTS fts_messages;")
+            .with_context(|| "dropping derived fts_messages before frankensqlite rebuild")?;
+        self.conn
+            .execute_compat(FTS5_REGISTER_SQL, fparams![])
+            .with_context(|| "creating derived fts_messages via frankensqlite rebuild")?;
+        self.conn
+            .execute_compat(
+                "INSERT INTO fts_messages(rowid, content, title, agent, workspace, source_path, created_at)
+                 SELECT m.id, m.content, c.title, a.slug, w.path, c.source_path, m.created_at
+                 FROM messages m
+                 JOIN conversations c ON m.conversation_id = c.id
+                 JOIN agents a ON c.agent_id = a.id
+                 LEFT JOIN workspaces w ON c.workspace_id = w.id
+                 ORDER BY m.rowid",
+                fparams![],
+            )
+            .with_context(|| "populating derived fts_messages via frankensqlite rebuild")
     }
 
     /// Fetch all messages for embedding generation.
