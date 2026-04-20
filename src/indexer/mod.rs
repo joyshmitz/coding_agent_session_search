@@ -5183,7 +5183,8 @@ pub fn run_index(
                         "watch incremental reindex",
                     )?;
 
-                    if let Ok(mut guard) = t_index.lock()
+                    if indexed > 0
+                        && let Ok(mut guard) = t_index.lock()
                         && let Err(e) = guard.optimize_if_idle()
                     {
                         tracing::warn!(error = %e, "segment merge failed during watch");
@@ -5211,7 +5212,8 @@ pub fn run_index(
                     // continuous watch mode operation. The cooldown logic inside
                     // optimize_if_idle() (300s, 4-segment threshold) prevents
                     // over-merging. See issue #87.
-                    if let Ok(mut guard) = t_index.lock()
+                    if indexed > 0
+                        && let Ok(mut guard) = t_index.lock()
                         && let Err(e) = guard.optimize_if_idle()
                     {
                         tracing::warn!(error = %e, "segment merge failed during watch");
@@ -6559,13 +6561,17 @@ fn rebuild_tantivy_from_db_with_options(
         }
         return Ok(LexicalRebuildOutcome {
             indexed_docs: rebuild_state.indexed_docs,
-            observed_messages: Some(rebuild_state.db.total_messages.max(rebuild_state.indexed_docs)),
+            observed_messages: Some(
+                rebuild_state
+                    .db
+                    .total_messages
+                    .max(rebuild_state.indexed_docs),
+            ),
             exact_checkpoint_persisted: false,
         });
     }
 
-    let restart_from_zero =
-        rebuild_state.committed_offset == 0 && rebuild_state.pending.is_none();
+    let restart_from_zero = rebuild_state.committed_offset == 0 && rebuild_state.pending.is_none();
     if restart_from_zero {
         if let Err(err) = fs::remove_dir_all(&index_path)
             && err.kind() != std::io::ErrorKind::NotFound
@@ -7604,6 +7610,10 @@ fn reindex_paths(
             );
         } else {
             tracing::info!(?kind, conversations = conv_count, since_ts, "watch_scan");
+        }
+
+        if conv_count == 0 {
+            continue;
         }
 
         // INGEST PHASE: Acquire locks briefly
@@ -10664,7 +10674,7 @@ mod tests {
     };
     use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
     use crate::sources::provenance::SourceKind;
-    use frankensqlite::compat::{ConnectionExt, ParamValue, RowExt};
+    use frankensqlite::compat::{ConnectionExt, OptionalExtension, ParamValue, RowExt};
     use fsqlite_types::value::SqliteValue;
     use serial_test::serial;
     use tempfile::TempDir;
@@ -14261,7 +14271,7 @@ mod tests {
 
         let opts = super::IndexOptions {
             full: false,
-            watch: false,
+            watch: true,
             force_rebuild: false,
             watch_once_paths: None,
             db_path: data_dir.join("db.sqlite"),
@@ -14361,6 +14371,30 @@ mod tests {
         );
         let guard = state.lock().unwrap();
         assert_eq!(guard.get(&ConnectorKind::Amp), Some(&10_000));
+        drop(guard);
+
+        let storage = storage.lock().unwrap();
+        let last_indexed_at: Option<String> = storage
+            .raw()
+            .query_row_map(
+                "SELECT value FROM meta WHERE key = 'last_indexed_at'",
+                &[] as &[ParamValue],
+                |row| row.get_typed(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(
+            last_indexed_at.is_none(),
+            "empty watch scans should not update last_indexed_at"
+        );
+        drop(storage);
+
+        let t_index = t_index.lock().unwrap();
+        assert_eq!(
+            t_index.segment_count(),
+            0,
+            "empty watch scans should not create Tantivy segments"
+        );
 
         if let Some(prev) = prev {
             unsafe { std::env::set_var("XDG_DATA_HOME", prev) };
