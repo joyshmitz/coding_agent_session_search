@@ -3179,14 +3179,16 @@ impl LexicalRebuildStagedMergeController {
                     ),
                 )
             } else if runtime.ordered_buffered_pages > 0 || runtime.queue_depth > 0 {
-                let trickle_budget = active_jobs.max(1).min(self.max_workers);
+                let debt_budget = ready_groups.div_ceil(self.max_workers).max(1);
+                let trickle_budget = active_jobs.max(debt_budget).min(self.max_workers);
                 (
                     trickle_budget,
                     format!(
-                        "builder_handoff_pressure_trickling_staged_merge_budget_{}_active_jobs_{}_ready_groups_{}_buffered_pages_{}_queue_depth_{}",
+                        "builder_handoff_pressure_scaling_staged_merge_budget_{}_active_jobs_{}_ready_groups_{}_debt_budget_{}_buffered_pages_{}_queue_depth_{}",
                         trickle_budget,
                         active_jobs,
                         ready_groups,
+                        debt_budget,
                         runtime.ordered_buffered_pages,
                         runtime.queue_depth
                     ),
@@ -21656,7 +21658,41 @@ mod tests {
         assert_eq!(decision.ready_groups, 1);
         assert_eq!(
             decision.controller_reason,
-            "builder_handoff_pressure_trickling_staged_merge_budget_1_active_jobs_0_ready_groups_1_buffered_pages_1_queue_depth_2"
+            "builder_handoff_pressure_scaling_staged_merge_budget_1_active_jobs_0_ready_groups_1_debt_budget_1_buffered_pages_1_queue_depth_2"
+        );
+    }
+
+    #[test]
+    fn lexical_rebuild_staged_merge_controller_scales_under_large_merge_debt() {
+        let controller = LexicalRebuildStagedMergeController::new(4, Some(7_000));
+        let merge_coordinator = LexicalRebuildShardMergeCoordinator {
+            stage_root: PathBuf::from("/tmp/eager-merge"),
+            ready_levels: vec![(0..64)
+                .map(|idx| LexicalRebuildShardMergeArtifact {
+                    first_shard_index: idx,
+                    last_shard_index: idx,
+                    index_path: PathBuf::from(format!("/tmp/shard-{idx}")),
+                })
+                .collect()],
+            next_output_seq_by_level: vec![0, 0],
+            pending_merge_jobs: 1,
+            allowed_pending_merge_jobs: 1,
+        };
+        let pressured_runtime = LexicalRebuildPipelineRuntimeSnapshot {
+            ordered_buffered_pages: 150,
+            ..LexicalRebuildPipelineRuntimeSnapshot::default()
+        };
+
+        let decision = controller.decide(false, &pressured_runtime, &merge_coordinator);
+
+        assert_eq!(decision.workers_max, 4);
+        assert_eq!(decision.allowed_jobs, 4);
+        assert_eq!(decision.active_jobs, 1);
+        assert_eq!(decision.ready_artifacts, 64);
+        assert_eq!(decision.ready_groups, 16);
+        assert_eq!(
+            decision.controller_reason,
+            "builder_handoff_pressure_scaling_staged_merge_budget_4_active_jobs_1_ready_groups_16_debt_budget_4_buffered_pages_150_queue_depth_0"
         );
     }
 
