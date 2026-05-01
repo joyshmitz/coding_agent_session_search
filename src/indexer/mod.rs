@@ -5546,7 +5546,9 @@ fn validate_lexical_rebuild_shard_build_result(
     // a hard error is correct. If observed_docs <= message_count,
     // the gap is filter-induced and we log the count for operator
     // audit instead of failing the rebuild.
-    if observed_docs > result.shard.message_count {
+    if lexical_shard_message_count_is_known(result.shard.message_count)
+        && observed_docs > result.shard.message_count
+    {
         return Err(anyhow::anyhow!(
             "built lexical rebuild shard {} indexed {} docs which EXCEEDS its shard plan's \
              {} source messages — the lexical sink should never produce more docs than \
@@ -5556,16 +5558,25 @@ fn validate_lexical_rebuild_shard_build_result(
             result.shard.message_count
         ));
     }
-    let filtered = result.shard.message_count.saturating_sub(observed_docs);
-    if filtered > 0 {
+    if lexical_shard_message_count_is_known(result.shard.message_count) {
+        let filtered = result.shard.message_count.saturating_sub(observed_docs);
+        if filtered > 0 {
+            tracing::debug!(
+                target: "cass::indexer::lexical_rebuild",
+                shard_index = result.shard.shard_index,
+                observed_docs,
+                planned_message_count = result.shard.message_count,
+                filtered_messages = filtered,
+                "lexical rebuild shard indexed fewer docs than the shard plan's message count; \
+                 gap is hard-noise/empty-content filtering applied by cass_document_for_message"
+            );
+        }
+    } else {
         tracing::debug!(
             target: "cass::indexer::lexical_rebuild",
             shard_index = result.shard.shard_index,
             observed_docs,
-            planned_message_count = result.shard.message_count,
-            filtered_messages = filtered,
-            "lexical rebuild shard indexed fewer docs than the shard plan's message count; \
-             gap is hard-noise/empty-content filtering applied by cass_document_for_message"
+            "lexical rebuild shard used conversation-only planning; source message count validation deferred to exact indexed-doc accounting"
         );
     }
 
@@ -5611,7 +5622,9 @@ fn validate_complete_lexical_rebuild_shard_artifacts(
         // filter-induced doc < message gaps; only fail on the
         // impossible case where docs > raw messages. See the comment
         // there for the full rationale.
-        if observed_docs > expected.message_count {
+        if lexical_shard_message_count_is_known(expected.message_count)
+            && observed_docs > expected.message_count
+        {
             return Err(anyhow::anyhow!(
                 "validated lexical rebuild shard {} has {} docs which EXCEEDS its shard plan's \
                  {} source messages — investigate fan-out or duplicate-document bugs",
@@ -5619,6 +5632,9 @@ fn validate_complete_lexical_rebuild_shard_artifacts(
                 observed_docs,
                 expected.message_count
             ));
+        }
+        if !lexical_shard_message_count_is_known(expected.message_count) {
+            continue;
         }
         let filtered = expected.message_count.saturating_sub(observed_docs);
         if filtered > 0 {
@@ -6514,6 +6530,12 @@ pub(crate) struct LexicalShardPlan {
     pub shards: Vec<LexicalShardPlanShard>,
 }
 
+const LEXICAL_SHARD_UNKNOWN_MESSAGE_COUNT: usize = usize::MAX;
+
+fn lexical_shard_message_count_is_known(message_count: usize) -> bool {
+    message_count != LEXICAL_SHARD_UNKNOWN_MESSAGE_COUNT
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn plan_lexical_rebuild_shards(
     conversations: &[LexicalShardPlannerConversation],
@@ -6768,6 +6790,7 @@ fn lexical_rebuild_default_shard_planner_budgets_for_totals(
     }
 }
 
+#[cfg(test)]
 fn lexical_rebuild_shard_planner_conversations_from_storage(
     storage: &FrankenStorage,
 ) -> Result<Vec<LexicalShardPlannerConversation>> {
@@ -6783,27 +6806,57 @@ fn lexical_rebuild_shard_planner_conversations_from_storage(
         .collect())
 }
 
+fn plan_lexical_rebuild_shards_from_conversation_ids(
+    conversation_ids: &[i64],
+    budgets: LexicalShardPlannerBudgets,
+) -> LexicalShardPlan {
+    let conversations: Vec<LexicalShardPlannerConversation> = conversation_ids
+        .iter()
+        .map(|conversation_id| LexicalShardPlannerConversation {
+            conversation_id: *conversation_id,
+            message_count: 0,
+            message_bytes: 0,
+        })
+        .collect();
+    let mut plan = plan_lexical_rebuild_shards(&conversations, budgets);
+    let mut next_conversation = 0usize;
+    for shard in &mut plan.shards {
+        let start = next_conversation;
+        let end = start.saturating_add(shard.conversation_count);
+        next_conversation = end;
+        shard.message_count = LEXICAL_SHARD_UNKNOWN_MESSAGE_COUNT;
+        shard.conversation_id_fingerprint =
+            lexical_shard_conversation_ids_fingerprint(&conversation_ids[start..end]);
+    }
+    plan.plan_id = lexical_shard_plan_id(
+        plan.budgets,
+        &plan.shards,
+        plan.total_conversations,
+        plan.total_messages,
+        plan.total_message_bytes,
+        &plan.oversized_conversation_ids,
+    );
+    plan
+}
+
 fn plan_lexical_rebuild_shards_from_storage_with_settings(
     storage: &FrankenStorage,
     settings: &LexicalRebuildPipelineSettingsSnapshot,
 ) -> Result<LexicalShardPlan> {
-    let conversations = lexical_rebuild_shard_planner_conversations_from_storage(storage)?;
-    let total_conversations = conversations.len();
-    let total_messages = conversations
-        .iter()
-        .map(|conversation| conversation.message_count)
-        .sum();
-    let total_message_bytes = conversations
-        .iter()
-        .map(|conversation| conversation.message_bytes)
-        .sum();
+    let conversation_ids = storage
+        .list_conversation_ids_for_lexical_rebuild()
+        .with_context(|| "listing canonical lexical rebuild conversation ids")?;
+    let total_conversations = conversation_ids.len();
     let budgets = lexical_rebuild_default_shard_planner_budgets_for_totals(
         settings,
         total_conversations,
-        total_messages,
-        total_message_bytes,
+        0,
+        0,
     );
-    Ok(plan_lexical_rebuild_shards(&conversations, budgets))
+    Ok(plan_lexical_rebuild_shards_from_conversation_ids(
+        &conversation_ids,
+        budgets,
+    ))
 }
 
 #[derive(Debug, Clone)]

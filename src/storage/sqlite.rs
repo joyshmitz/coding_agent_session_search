@@ -5903,14 +5903,7 @@ impl FrankenStorage {
     pub fn list_conversation_footprints_for_lexical_rebuild(
         &self,
     ) -> Result<Vec<LexicalRebuildConversationFootprintRow>> {
-        let conversation_ids: Vec<i64> = self
-            .conn
-            .query_map_collect(
-                "SELECT id FROM conversations ORDER BY id ASC",
-                fparams![],
-                |row| row.get_typed(0),
-            )
-            .with_context(|| "listing conversation ids for lexical rebuild footprints")?;
+        let conversation_ids = self.list_conversation_ids_for_lexical_rebuild()?;
         let aggregate_sql = format!(
             r"SELECT conversation_id,
                       COUNT(*),
@@ -5960,6 +5953,17 @@ impl FrankenStorage {
         }
 
         Ok(footprints)
+    }
+
+    /// List conversation ids in the stable order used by lexical rebuilds.
+    pub fn list_conversation_ids_for_lexical_rebuild(&self) -> Result<Vec<i64>> {
+        self.conn
+            .query_map_collect(
+                "SELECT id FROM conversations ORDER BY id ASC",
+                fparams![],
+                |row| row.get_typed(0),
+            )
+            .with_context(|| "listing conversation ids for lexical rebuild")
     }
 
     /// Legacy OFFSET-based traversal for one-time checkpoint migration only.
