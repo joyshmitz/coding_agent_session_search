@@ -3179,11 +3179,16 @@ impl LexicalRebuildStagedMergeController {
                     ),
                 )
             } else if runtime.ordered_buffered_pages > 0 || runtime.queue_depth > 0 {
+                let trickle_budget = active_jobs.max(1).min(self.max_workers);
                 (
-                    0,
+                    trickle_budget,
                     format!(
-                        "builder_handoff_pressure_buffered_pages_{}_queue_depth_{}",
-                        runtime.ordered_buffered_pages, runtime.queue_depth
+                        "builder_handoff_pressure_trickling_staged_merge_budget_{}_active_jobs_{}_ready_groups_{}_buffered_pages_{}_queue_depth_{}",
+                        trickle_budget,
+                        active_jobs,
+                        ready_groups,
+                        runtime.ordered_buffered_pages,
+                        runtime.queue_depth
                     ),
                 )
             } else if runtime.page_prep_workers > 0
@@ -21602,7 +21607,7 @@ mod tests {
     }
 
     #[test]
-    fn lexical_rebuild_staged_merge_controller_throttles_under_builder_pressure() {
+    fn lexical_rebuild_staged_merge_controller_trickles_under_builder_pressure() {
         let controller = LexicalRebuildStagedMergeController::new(3, Some(7_000));
         let merge_coordinator = LexicalRebuildShardMergeCoordinator {
             stage_root: PathBuf::from("/tmp/eager-merge"),
@@ -21646,12 +21651,12 @@ mod tests {
         let decision = controller.decide(false, &pressured_runtime, &merge_coordinator);
 
         assert_eq!(decision.workers_max, 3);
-        assert_eq!(decision.allowed_jobs, 0);
+        assert_eq!(decision.allowed_jobs, 1);
         assert_eq!(decision.ready_artifacts, 4);
         assert_eq!(decision.ready_groups, 1);
         assert_eq!(
             decision.controller_reason,
-            "builder_handoff_pressure_buffered_pages_1_queue_depth_2"
+            "builder_handoff_pressure_trickling_staged_merge_budget_1_active_jobs_0_ready_groups_1_buffered_pages_1_queue_depth_2"
         );
     }
 
