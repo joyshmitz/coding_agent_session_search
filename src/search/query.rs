@@ -390,6 +390,7 @@ const PROGRESSIVE_EMBEDDING_CACHE_CAPACITY: usize = 64;
 const ANN_CANDIDATE_MULTIPLIER: usize = 4;
 const HYBRID_NO_LIMIT_PLANNING_WINDOW: usize = 64;
 const HYBRID_NO_LIMIT_SEMANTIC_CAP: usize = 2048;
+const AUTOMATIC_WILDCARD_FALLBACK_MAX_TOKEN_CHARS: usize = 16;
 
 /// Upper bound on how many documents a `limit == 0` ("no limit") search is
 /// allowed to materialize. Each `SearchHit` carries the full message
@@ -2988,6 +2989,23 @@ fn should_try_wildcard_fallback(
     returned_hits < effective_sparse_threshold
 }
 
+fn should_skip_automatic_wildcard_fallback_for_long_zero_hit_query(
+    query: &str,
+    returned_hits: usize,
+) -> bool {
+    if returned_hits != 0 {
+        return false;
+    }
+
+    for token in normalize_phrase_terms(query) {
+        if token.chars().count() > AUTOMATIC_WILDCARD_FALLBACK_MAX_TOKEN_CHARS {
+            return true;
+        }
+    }
+
+    false
+}
+
 fn snippet_from_preview_without_full_content(
     field_mask: FieldMask,
     stored_preview: &str,
@@ -5045,6 +5063,22 @@ impl SearchClient {
             });
         }
 
+        if should_skip_automatic_wildcard_fallback_for_long_zero_hit_query(query, hits.len()) {
+            let suggestions = if hits.is_empty() {
+                self.generate_suggestions(query, &filters)
+            } else {
+                Vec::new()
+            };
+            return Ok(SearchResult {
+                hits,
+                wildcard_fallback: false,
+                cache_stats: baseline_stats,
+                suggestions,
+                ann_stats: None,
+                total_count: tantivy_total,
+            });
+        }
+
         // Try wildcard fallback: wrap each term in *term*
         let wildcard_query = query
             .split_whitespace()
@@ -5256,9 +5290,11 @@ impl SearchClient {
             }
         }
 
-        // 4. Suggest alternative agents if we have SQLite connection and no agent filter
+        // 4. Suggest alternative agents if SQLite is already open and no agent
+        // filter is set. Avoid lazy-opening storage solely for no-hit advice:
+        // large read-only frankensqlite opens can dominate fast lexical misses.
         if filters.agents.is_empty()
-            && let Ok(sqlite_guard) = self.sqlite_guard()
+            && let Ok(sqlite_guard) = self.sqlite.lock()
             && let Some(conn) = sqlite_guard.as_ref()
             && let Ok(rows) = conn.query_map_collect(
                 "SELECT a.slug
@@ -13337,6 +13373,140 @@ mod tests {
                 .all(|h| h.match_type == MatchType::ImplicitWildcard)
         );
         assert!(result.hits.iter().all(|h| h.content.contains("alphabet")));
+
+        Ok(())
+    }
+
+    #[test]
+    fn automatic_wildcard_fallback_skips_long_zero_hit_token() -> Result<()> {
+        let dir = TempDir::new()?;
+        let mut index = TantivyIndex::open_or_create(dir.path())?;
+
+        let conv = NormalizedConversation {
+            agent_slug: "codex".into(),
+            external_id: None,
+            title: Some("fruit".into()),
+            workspace: Some(std::path::PathBuf::from("/ws")),
+            source_path: dir.path().join("fruit.jsonl"),
+            started_at: Some(100),
+            ended_at: None,
+            metadata: serde_json::json!({}),
+            messages: vec![NormalizedMessage {
+                idx: 0,
+                role: "user".into(),
+                author: None,
+                created_at: Some(100),
+                content: "apple pear banana".into(),
+                extra: serde_json::json!({}),
+                snippets: vec![],
+                invocations: Vec::new(),
+            }],
+        };
+        index.add_conversation(&conv)?;
+        index.commit()?;
+
+        let client = SearchClient::open(dir.path(), None)?.expect("index present");
+
+        let result = client.search_with_fallback(
+            "zzzzzzunlikelyterm",
+            SearchFilters::default(),
+            10,
+            0,
+            1,
+            FieldMask::FULL,
+        )?;
+        assert!(result.hits.is_empty());
+        assert!(!result.wildcard_fallback);
+        assert!(
+            result
+                .suggestions
+                .iter()
+                .any(|s| matches!(s.kind, SuggestionKind::WildcardQuery)),
+            "manual wildcard suggestion should remain available"
+        );
+
+        let short_result = client.search_with_fallback(
+            "pple",
+            SearchFilters::default(),
+            10,
+            0,
+            1,
+            FieldMask::FULL,
+        )?;
+        assert!(short_result.wildcard_fallback);
+        assert_eq!(short_result.hits.len(), 1);
+        assert_eq!(short_result.hits[0].match_type, MatchType::ImplicitWildcard);
+
+        Ok(())
+    }
+
+    #[test]
+    fn nohit_suggestions_do_not_lazy_open_sqlite_when_tantivy_is_present() -> Result<()> {
+        let dir = TempDir::new()?;
+        let index_path = dir.path().join("index");
+        let db_path = dir.path().join("cass.db");
+
+        let storage = FrankenStorage::open(&db_path)?;
+        storage.close()?;
+
+        let mut index = TantivyIndex::open_or_create(&index_path)?;
+        let conv = NormalizedConversation {
+            agent_slug: "codex".into(),
+            external_id: None,
+            title: Some("fruit".into()),
+            workspace: Some(std::path::PathBuf::from("/ws")),
+            source_path: dir.path().join("fruit.jsonl"),
+            started_at: Some(100),
+            ended_at: None,
+            metadata: serde_json::json!({}),
+            messages: vec![NormalizedMessage {
+                idx: 0,
+                role: "user".into(),
+                author: None,
+                created_at: Some(100),
+                content: "apple pear banana".into(),
+                extra: serde_json::json!({}),
+                snippets: vec![],
+                invocations: Vec::new(),
+            }],
+        };
+        index.add_conversation(&conv)?;
+        index.commit()?;
+
+        let client = SearchClient::open(&index_path, Some(&db_path))?.expect("index present");
+        assert!(
+            client.sqlite.lock().map(|guard| guard.is_none()).unwrap_or(false),
+            "sqlite should start closed"
+        );
+
+        let result = client.search_with_fallback(
+            "zzzzzzunlikelyterm",
+            SearchFilters::default(),
+            10,
+            0,
+            1,
+            FieldMask::FULL,
+        )?;
+
+        assert!(result.hits.is_empty());
+        assert!(
+            result
+                .suggestions
+                .iter()
+                .any(|s| matches!(s.kind, SuggestionKind::WildcardQuery)),
+            "manual wildcard suggestion should remain available"
+        );
+        assert!(
+            result
+                .suggestions
+                .iter()
+                .all(|s| !matches!(s.kind, SuggestionKind::AlternateAgent)),
+            "alternate-agent suggestions should not force a SQLite open"
+        );
+        assert!(
+            client.sqlite.lock().map(|guard| guard.is_none()).unwrap_or(false),
+            "sqlite should stay closed after Tantivy no-hit suggestions"
+        );
 
         Ok(())
     }
