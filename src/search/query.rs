@@ -13475,7 +13475,11 @@ mod tests {
 
         let client = SearchClient::open(&index_path, Some(&db_path))?.expect("index present");
         assert!(
-            client.sqlite.lock().map(|guard| guard.is_none()).unwrap_or(false),
+            client
+                .sqlite
+                .lock()
+                .map(|guard| guard.is_none())
+                .unwrap_or(false),
             "sqlite should start closed"
         );
 
@@ -13504,7 +13508,11 @@ mod tests {
             "alternate-agent suggestions should not force a SQLite open"
         );
         assert!(
-            client.sqlite.lock().map(|guard| guard.is_none()).unwrap_or(false),
+            client
+                .sqlite
+                .lock()
+                .map(|guard| guard.is_none())
+                .unwrap_or(false),
             "sqlite should stay closed after Tantivy no-hit suggestions"
         );
 
