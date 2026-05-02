@@ -10562,15 +10562,29 @@ pub fn run_index(
         let state = Mutex::new(load_watch_state(&opts.data_dir));
         let storage = Rc::new(Mutex::new(storage));
         let storage_for_watch = Rc::clone(&storage);
-        let t_index = Mutex::new(match t_index {
-            Some(t_index) => t_index,
-            None => TantivyIndex::open_or_create(&index_path).with_context(|| {
-                format!(
-                    "opening Tantivy index before entering watch mode for {}",
-                    index_path.display()
-                )
-            })?,
+        let should_preopen_tantivy_for_watch = opts.watch;
+        let watch_once_defers_tantivy_open =
+            watch_once_mode && !should_preopen_tantivy_for_watch && t_index.is_none();
+        let t_index = Mutex::new(if should_preopen_tantivy_for_watch {
+            Some(match t_index {
+                Some(t_index) => t_index,
+                None => TantivyIndex::open_or_create(&index_path).with_context(|| {
+                    format!(
+                        "opening Tantivy index before entering watch mode for {}",
+                        index_path.display()
+                    )
+                })?,
+            })
+        } else {
+            t_index
         });
+        if watch_once_defers_tantivy_open {
+            tracing::info!(
+                index_path = %index_path.display(),
+                "deferring Tantivy open until one-shot watch-once ingest has conversations"
+            );
+        }
+        let index_path_for_watch = index_path.clone();
 
         // CASS #163 item 3: When autocommit_retain cannot be disabled, the
         // long-lived read handle accumulates MVCC snapshots. Periodically
@@ -10638,6 +10652,7 @@ pub fn run_index(
                         &state,
                         &storage_for_watch,
                         &t_index,
+                        &index_path_for_watch,
                         true,
                     );
                     finalize_watch_reindex_result(
@@ -10655,6 +10670,7 @@ pub fn run_index(
                             &state,
                             &storage_for_watch,
                             &t_index,
+                            &index_path_for_watch,
                             false,
                             semantic_enabled.then_some(&mut semantic_delta),
                         ),
@@ -10668,7 +10684,8 @@ pub fn run_index(
                     // optimizer. See issue #194.
                     if indexed > 0
                         && let Ok(mut guard) = t_index.lock()
-                        && let Err(e) = guard.optimize_if_idle()
+                        && let Some(t_index) = guard.as_mut()
+                        && let Err(e) = t_index.optimize_if_idle()
                     {
                         tracing::warn!(error = %e, "segment merge failed during watch");
                     }
@@ -10682,6 +10699,7 @@ pub fn run_index(
                             &state,
                             &storage_for_watch,
                             &t_index,
+                            &index_path_for_watch,
                             false,
                             semantic_enabled.then_some(&mut semantic_delta),
                         ),
@@ -10700,7 +10718,8 @@ pub fn run_index(
                     // wake the optimizer. See issue #194.
                     if indexed > 0
                         && let Ok(mut guard) = t_index.lock()
-                        && let Err(e) = guard.optimize_if_idle()
+                        && let Some(t_index) = guard.as_mut()
+                        && let Err(e) = t_index.optimize_if_idle()
                     {
                         tracing::warn!(error = %e, "segment merge failed during watch");
                     }
@@ -15341,11 +15360,12 @@ fn reindex_paths(
     roots: &[(ConnectorKind, ScanRoot)],
     state: &Mutex<HashMap<ConnectorKind, i64>>,
     storage: &Mutex<FrankenStorage>,
-    t_index: &Mutex<TantivyIndex>,
+    t_index: &Mutex<Option<TantivyIndex>>,
+    index_path: &Path,
     force_full: bool,
 ) -> Result<usize> {
     reindex_paths_with_semantic_delta(
-        opts, paths, roots, state, storage, t_index, force_full, None,
+        opts, paths, roots, state, storage, t_index, index_path, force_full, None,
     )
 }
 
@@ -15356,7 +15376,8 @@ fn reindex_paths_with_semantic_delta(
     roots: &[(ConnectorKind, ScanRoot)],
     state: &Mutex<HashMap<ConnectorKind, i64>>,
     storage: &Mutex<FrankenStorage>,
-    t_index: &Mutex<TantivyIndex>,
+    t_index: &Mutex<Option<TantivyIndex>>,
+    index_path: &Path,
     force_full: bool,
     semantic_delta: Option<&mut WatchSemanticDelta>,
 ) -> Result<usize> {
@@ -15500,13 +15521,23 @@ fn reindex_paths_with_semantic_delta(
             let storage = storage
                 .lock()
                 .map_err(|_| anyhow::anyhow!("storage lock poisoned"))?;
-            let mut t_index = t_index
+            let mut t_index_guard = t_index
                 .lock()
                 .map_err(|_| anyhow::anyhow!("index lock poisoned"))?;
+            if t_index_guard.is_none() {
+                tracing::info!(
+                    index_path = %index_path.display(),
+                    "opening Tantivy lazily for watch ingest"
+                );
+                *t_index_guard = Some(TantivyIndex::open_or_create(index_path)?);
+            }
+            let t_index = t_index_guard
+                .as_mut()
+                .expect("lazy watch index must be open before ingest");
 
             let batch_outcome = ingest_batch_with_semantic_delta(
                 &storage,
-                Some(&mut t_index),
+                Some(t_index),
                 &convs,
                 &opts.progress,
                 LexicalPopulationStrategy::IncrementalInline,
@@ -30746,11 +30777,12 @@ mod tests {
 
         // Manually set up dependencies for reindex_paths
         let storage = FrankenStorage::open(&opts.db_path).unwrap();
-        let t_index = TantivyIndex::open_or_create(&index_dir(&opts.data_dir).unwrap()).unwrap();
+        let index_path = index_dir(&opts.data_dir).unwrap();
+        let t_index = TantivyIndex::open_or_create(&index_path).unwrap();
 
         let state = std::sync::Mutex::new(std::collections::HashMap::new());
         let storage = std::sync::Mutex::new(storage);
-        let t_index = std::sync::Mutex::new(t_index);
+        let t_index = std::sync::Mutex::new(Some(t_index));
 
         // Need roots for reindex_paths
         let roots = vec![(ConnectorKind::Amp, ScanRoot::local(amp_dir))];
@@ -30762,6 +30794,7 @@ mod tests {
             &state,
             &storage,
             &t_index,
+            &index_path,
             false,
         )
         .unwrap();
@@ -30831,10 +30864,11 @@ mod tests {
         };
 
         let storage = FrankenStorage::open(&opts.db_path).unwrap();
-        let t_index = TantivyIndex::open_or_create(&index_dir(&opts.data_dir).unwrap()).unwrap();
+        let index_path = index_dir(&opts.data_dir).unwrap();
+        let t_index = TantivyIndex::open_or_create(&index_path).unwrap();
         let state = std::sync::Mutex::new(std::collections::HashMap::new());
         let storage = std::sync::Mutex::new(storage);
-        let t_index = std::sync::Mutex::new(t_index);
+        let t_index = std::sync::Mutex::new(Some(t_index));
         let roots = vec![(ConnectorKind::Amp, ScanRoot::local(amp_dir.clone()))];
 
         let mut first_delta = WatchSemanticDelta::default();
@@ -30845,6 +30879,7 @@ mod tests {
             &state,
             &storage,
             &t_index,
+            &index_path,
             false,
             Some(&mut first_delta),
         )
@@ -30885,6 +30920,7 @@ mod tests {
             &state,
             &storage,
             &t_index,
+            &index_path,
             false,
             Some(&mut second_delta),
         )
@@ -30948,12 +30984,13 @@ mod tests {
         };
 
         let storage = FrankenStorage::open(&opts.db_path).unwrap();
-        let t_index = TantivyIndex::open_or_create(&index_dir(&opts.data_dir).unwrap()).unwrap();
+        let index_path = index_dir(&opts.data_dir).unwrap();
+        let t_index = TantivyIndex::open_or_create(&index_path).unwrap();
         let mut initial = HashMap::new();
         initial.insert(ConnectorKind::Amp, i64::MAX / 4);
         let state = Mutex::new(initial);
         let storage = Mutex::new(storage);
-        let t_index = Mutex::new(t_index);
+        let t_index = Mutex::new(Some(t_index));
         let roots = vec![(ConnectorKind::Amp, ScanRoot::local(amp_dir))];
 
         let indexed = reindex_paths(
@@ -30963,6 +31000,7 @@ mod tests {
             &state,
             &storage,
             &t_index,
+            &index_path,
             false,
         )
         .unwrap();
@@ -31011,12 +31049,12 @@ mod tests {
         };
 
         let storage = FrankenStorage::open(&opts.db_path).unwrap();
-        let t_index = TantivyIndex::open_or_create(&index_dir(&opts.data_dir).unwrap()).unwrap();
+        let index_path = index_dir(&opts.data_dir).unwrap();
         let mut initial = HashMap::new();
         initial.insert(ConnectorKind::Amp, 10_000);
         let state = Mutex::new(initial);
         let storage = Mutex::new(storage);
-        let t_index = Mutex::new(t_index);
+        let t_index = Mutex::new(None);
         let roots = vec![(ConnectorKind::Amp, ScanRoot::local(amp_dir))];
 
         let indexed = reindex_paths(
@@ -31026,6 +31064,7 @@ mod tests {
             &state,
             &storage,
             &t_index,
+            &index_path,
             false,
         )
         .unwrap();
@@ -31037,14 +31076,12 @@ mod tests {
             state.lock().unwrap().get(&ConnectorKind::Amp),
             Some(&10_000)
         );
-        // Neither the Tantivy segment count nor the storage-side
-        // last_indexed_at should have been bumped: both live on the
-        // ingest path that conv_count == 0 now short-circuits around.
-        // See issue #194.
-        assert_eq!(
-            t_index.lock().unwrap().segment_count(),
-            0,
-            "empty watch scan must not commit an empty segment"
+        // The storage-side last_indexed_at and Tantivy writer should remain
+        // untouched: both live on the ingest path that conv_count == 0 now
+        // short-circuits around. See issue #194.
+        assert!(
+            t_index.lock().unwrap().is_none(),
+            "empty watch scan must not open Tantivy"
         );
         assert_eq!(
             storage.lock().unwrap().get_last_indexed_at().unwrap(),
@@ -31109,10 +31146,11 @@ mod tests {
         };
 
         let storage = FrankenStorage::open(&opts.db_path).unwrap();
-        let t_index = TantivyIndex::open_or_create(&index_dir(&opts.data_dir).unwrap()).unwrap();
+        let index_path = index_dir(&opts.data_dir).unwrap();
+        let t_index = TantivyIndex::open_or_create(&index_path).unwrap();
         let state = Mutex::new(HashMap::new());
         let storage = Mutex::new(storage);
-        let t_index = Mutex::new(t_index);
+        let t_index = Mutex::new(Some(t_index));
 
         reindex_paths(
             &opts,
@@ -31121,6 +31159,7 @@ mod tests {
             &state,
             &storage,
             &t_index,
+            &index_path,
             false,
         )
         .unwrap();
@@ -31180,12 +31219,13 @@ mod tests {
         };
 
         let storage = FrankenStorage::open(&opts.db_path).unwrap();
-        let t_index = TantivyIndex::open_or_create(&index_dir(&opts.data_dir).unwrap()).unwrap();
+        let index_path = index_dir(&opts.data_dir).unwrap();
+        let t_index = TantivyIndex::open_or_create(&index_path).unwrap();
         let mut initial = HashMap::new();
         initial.insert(ConnectorKind::Amp, i64::MAX / 4);
         let state = Mutex::new(initial);
         let storage = Mutex::new(storage);
-        let t_index = Mutex::new(t_index);
+        let t_index = Mutex::new(Some(t_index));
 
         let indexed = reindex_paths(
             &opts,
@@ -31194,6 +31234,7 @@ mod tests {
             &state,
             &storage,
             &t_index,
+            &index_path,
             false,
         )
         .unwrap();
@@ -31245,10 +31286,11 @@ mod tests {
         };
 
         let storage = FrankenStorage::open(&opts.db_path).unwrap();
-        let t_index = TantivyIndex::open_or_create(&index_dir(&opts.data_dir).unwrap()).unwrap();
+        let index_path = index_dir(&opts.data_dir).unwrap();
+        let t_index = TantivyIndex::open_or_create(&index_path).unwrap();
         let state = Mutex::new(HashMap::new());
         let storage = Mutex::new(storage);
-        let t_index = Mutex::new(t_index);
+        let t_index = Mutex::new(Some(t_index));
 
         let first = reindex_paths(
             &opts,
@@ -31257,6 +31299,7 @@ mod tests {
             &state,
             &storage,
             &t_index,
+            &index_path,
             false,
         )
         .unwrap();
@@ -31300,12 +31343,8 @@ mod tests {
 
         let startup_skip = {
             let guard = storage.lock().unwrap();
-            can_skip_unchanged_explicit_watch_once_index_run(
-                &opts,
-                &guard,
-                &index_dir(&opts.data_dir).unwrap(),
-            )
-            .unwrap()
+            can_skip_unchanged_explicit_watch_once_index_run(&opts, &guard, &index_path)
+                .unwrap()
         };
         assert!(
             startup_skip,
@@ -31319,6 +31358,7 @@ mod tests {
             &state,
             &storage,
             &t_index,
+            &index_path,
             false,
         )
         .unwrap();
@@ -31374,10 +31414,11 @@ mod tests {
         };
 
         let storage = FrankenStorage::open(&opts.db_path).unwrap();
-        let t_index = TantivyIndex::open_or_create(&index_dir(&opts.data_dir).unwrap()).unwrap();
+        let index_path = index_dir(&opts.data_dir).unwrap();
+        let t_index = TantivyIndex::open_or_create(&index_path).unwrap();
         let state = Mutex::new(persisted_state.clone());
         let storage = Mutex::new(storage);
-        let t_index = Mutex::new(t_index);
+        let t_index = Mutex::new(Some(t_index));
 
         let indexed = reindex_paths(
             &opts,
@@ -31386,6 +31427,7 @@ mod tests {
             &state,
             &storage,
             &t_index,
+            &index_path,
             false,
         )
         .unwrap();
