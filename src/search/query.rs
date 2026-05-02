@@ -3018,6 +3018,12 @@ fn snippet_from_preview_without_full_content(
     cached_prefix_snippet(stored_preview, query, 160)
 }
 
+fn stored_preview_is_complete_content(stored_preview: &str) -> bool {
+    // The preview builder appends U+2026 only when truncating. A real message
+    // ending with that character becomes a conservative false negative here.
+    !stored_preview.is_empty() && !stored_preview.ends_with('…')
+}
+
 impl SearchClient {
     pub fn open(index_path: &Path, db_path: Option<&Path>) -> Result<Option<Self>> {
         Self::open_with_options(index_path, db_path, SearchClientOptions::default())
@@ -5696,12 +5702,16 @@ impl SearchClient {
 
             let preview_satisfies_bounded_content =
                 field_mask.preview_content_limit().is_some() && !stored_preview.is_empty();
+            let preview_satisfies_full_content = field_mask.needs_content()
+                && field_mask.preview_content_limit().is_none()
+                && stored_preview_is_complete_content(&stored_preview);
             if needs_content
                 && let Some(line_idx) = line_number
                     .and_then(|line| line.checked_sub(1))
                     .and_then(|line| i64::try_from(line).ok())
                 && stored_content.is_empty()
                 && !preview_satisfies_bounded_content
+                && !preview_satisfies_full_content
                 && stored_preview_snippet.is_none()
             {
                 if let Some(conversation_id) = conversation_id {
@@ -5779,11 +5789,14 @@ impl SearchClient {
                             .cloned()
                     }
                 });
+            let preview_satisfies_effective_content = !pending.stored_preview.is_empty()
+                && (field_mask.preview_content_limit().is_some()
+                    || (field_mask.needs_content()
+                        && field_mask.preview_content_limit().is_none()
+                        && stored_preview_is_complete_content(&pending.stored_preview)));
             let effective_content = if !pending.stored_content.is_empty() {
                 pending.stored_content.clone()
-            } else if field_mask.preview_content_limit().is_some()
-                && !pending.stored_preview.is_empty()
-            {
+            } else if preview_satisfies_effective_content {
                 pending.stored_preview.clone()
             } else if let Some(content) = hydrated_content {
                 content
@@ -13946,6 +13959,7 @@ mod tests {
             "{}needle appears past the preview boundary for hydration proof",
             "padding ".repeat(70)
         );
+        let short_content = "shortneedle fits entirely inside the stored preview".to_string();
         let conversation = Conversation {
             id: None,
             agent_slug: "codex".into(),
@@ -13957,16 +13971,28 @@ mod tests {
             ended_at: Some(1_700_000_123_000),
             approx_tokens: Some(32),
             metadata_json: json!({}),
-            messages: vec![Message {
-                id: None,
-                idx: 0,
-                role: MessageRole::User,
-                author: Some("user".into()),
-                created_at: Some(1_700_000_123_000),
-                content: long_content.clone(),
-                extra_json: json!({}),
-                snippets: Vec::new(),
-            }],
+            messages: vec![
+                Message {
+                    id: None,
+                    idx: 0,
+                    role: MessageRole::User,
+                    author: Some("user".into()),
+                    created_at: Some(1_700_000_123_000),
+                    content: long_content.clone(),
+                    extra_json: json!({}),
+                    snippets: Vec::new(),
+                },
+                Message {
+                    id: None,
+                    idx: 1,
+                    role: MessageRole::Agent,
+                    author: Some("assistant".into()),
+                    created_at: Some(1_700_000_124_000),
+                    content: short_content.clone(),
+                    extra_json: json!({}),
+                    snippets: Vec::new(),
+                },
+            ],
             source_id: crate::sources::provenance::LOCAL_SOURCE_ID.to_string(),
             origin_host: None,
         };
@@ -13984,16 +14010,28 @@ mod tests {
             started_at: Some(1_700_000_123_000),
             ended_at: Some(1_700_000_123_000),
             metadata: json!({}),
-            messages: vec![NormalizedMessage {
-                idx: 0,
-                role: "user".into(),
-                author: Some("user".into()),
-                created_at: Some(1_700_000_123_000),
-                content: long_content.clone(),
-                extra: json!({}),
-                snippets: vec![],
-                invocations: Vec::new(),
-            }],
+            messages: vec![
+                NormalizedMessage {
+                    idx: 0,
+                    role: "user".into(),
+                    author: Some("user".into()),
+                    created_at: Some(1_700_000_123_000),
+                    content: long_content.clone(),
+                    extra: json!({}),
+                    snippets: vec![],
+                    invocations: Vec::new(),
+                },
+                NormalizedMessage {
+                    idx: 1,
+                    role: "assistant".into(),
+                    author: Some("assistant".into()),
+                    created_at: Some(1_700_000_124_000),
+                    content: short_content.clone(),
+                    extra: json!({}),
+                    snippets: vec![],
+                    invocations: Vec::new(),
+                },
+            ],
         };
         index.add_conversation(&normalized)?;
         index.commit()?;
@@ -14032,6 +14070,39 @@ mod tests {
                 .content
                 .contains("needle appears past the preview boundary"),
             "bounded preview content should not hydrate the full sqlite row"
+        );
+
+        let short_client =
+            SearchClient::open(&index_path, Some(&db_path))?.expect("db-backed client");
+        assert!(
+            short_client
+                .sqlite
+                .lock()
+                .map(|guard| guard.is_none())
+                .unwrap_or(false),
+            "sqlite should start closed for short preview hit"
+        );
+
+        let short_hits = short_client.search(
+            "shortneedle",
+            SearchFilters::default(),
+            5,
+            0,
+            FieldMask::FULL,
+        )?;
+
+        assert_eq!(short_hits.len(), 1, "expected one short lexical hit");
+        assert_eq!(
+            short_hits[0].content, short_content,
+            "untruncated stored preview is exact full content"
+        );
+        assert!(
+            short_client
+                .sqlite
+                .lock()
+                .map(|guard| guard.is_none())
+                .unwrap_or(false),
+            "short full-content hit should not lazy-open sqlite"
         );
 
         Ok(())
