@@ -32,7 +32,7 @@ use crate::search::model_manager::{
 use crate::search::policy::{CHUNKING_STRATEGY_VERSION, SEMANTIC_SCHEMA_VERSION};
 use crate::search::semantic_manifest::{
     ArtifactRecord, BuildCheckpoint, SemanticManifest, SemanticShardManifest, SemanticShardRecord,
-    TierKind,
+    TierKind, semantic_shard_artifact_path_is_safe,
 };
 use crate::search::tantivy::SCHEMA_HASH;
 use crate::search::vector_index::{VECTOR_INDEX_DIR, vector_index_path};
@@ -854,13 +854,8 @@ fn semantic_tier_asset_state(
     }
 }
 
-fn resolve_semantic_artifact_path(data_dir: &Path, recorded_path: &str) -> PathBuf {
-    let path = PathBuf::from(recorded_path);
-    if path.is_absolute() {
-        path
-    } else {
-        data_dir.join(path)
-    }
+fn resolve_semantic_artifact_path(data_dir: &Path, recorded_path: &str) -> Option<PathBuf> {
+    semantic_shard_artifact_path_is_safe(recorded_path).then(|| data_dir.join(recorded_path))
 }
 
 fn complete_shard_records_for_state(
@@ -894,8 +889,11 @@ fn complete_shard_records_for_state(
             || shard.dimension == 0
             || shard.dimension != first.dimension
             || shard.total_conversations != first.total_conversations
-            || !resolve_semantic_artifact_path(data_dir, &shard.index_path).is_file()
         {
+            return None;
+        }
+        let artifact_path = resolve_semantic_artifact_path(data_dir, &shard.index_path)?;
+        if !artifact_path.is_file() {
             return None;
         }
     }
@@ -931,6 +929,9 @@ fn promote_complete_shard_generation_state(
         .max()
         .unwrap_or(0);
     let first = &records[0];
+    let Some(first_index_path) = resolve_semantic_artifact_path(data_dir, &first.index_path) else {
+        return;
+    };
     *state = SemanticTierAssetState {
         present: true,
         ready: true,
@@ -941,7 +942,7 @@ fn promote_complete_shard_generation_state(
         model_revision: Some(first.model_revision.clone()),
         completed_at_ms: Some(completed_at_ms),
         size_bytes: Some(size_bytes),
-        index_path: Some(resolve_semantic_artifact_path(data_dir, &first.index_path)),
+        index_path: Some(first_index_path),
     };
 }
 
@@ -2563,6 +2564,63 @@ mod tests {
         assert_eq!(
             state.vector_index_path.as_deref(),
             Some(expected_path.as_path())
+        );
+    }
+
+    #[test]
+    fn semantic_state_rejects_complete_shard_generation_with_unsafe_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let outside_path = outside.path().join("outside.fsvi");
+        std::fs::write(&outside_path, b"fsvi").expect("write outside placeholder");
+        let embedder_id = HashEmbedder::default().id().to_string();
+        let mut shards = SemanticShardManifest {
+            shards: vec![SemanticShardRecord {
+                tier: TierKind::Fast,
+                embedder_id: embedder_id.clone(),
+                model_revision: "hash".to_string(),
+                schema_version: SEMANTIC_SCHEMA_VERSION,
+                chunking_version: CHUNKING_STRATEGY_VERSION,
+                dimension: HashEmbedder::default().dimension(),
+                shard_index: 0,
+                shard_count: 1,
+                doc_count: 10,
+                total_conversations: 7,
+                db_fingerprint: "current-db".to_string(),
+                index_path: outside_path.to_string_lossy().to_string(),
+                quantization: "f16".to_string(),
+                mmap_ready: true,
+                ann_index_path: None,
+                ann_size_bytes: 0,
+                ann_ready: false,
+                size_bytes: 100,
+                started_at_ms: 1_733_100_000_000,
+                completed_at_ms: 1_733_100_000_001,
+                ready: true,
+            }],
+            ..Default::default()
+        };
+        shards.save(temp.path()).expect("save shard manifest");
+
+        let base_vector_path = vector_index_path(temp.path(), &embedder_id);
+        let state = semantic_state_from_availability(
+            temp.path(),
+            &SemanticAvailability::IndexMissing {
+                index_path: base_vector_path.clone(),
+            },
+            SemanticPreference::HashFallback,
+            Some("current-db"),
+        );
+
+        assert_ne!(state.status, "ready");
+        assert!(!state.can_search);
+        assert_eq!(
+            state.vector_index_path.as_deref(),
+            Some(base_vector_path.as_path())
+        );
+        assert_ne!(
+            state.vector_index_path.as_deref(),
+            Some(outside_path.as_path())
         );
     }
 

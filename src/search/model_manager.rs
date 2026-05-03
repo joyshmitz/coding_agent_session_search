@@ -21,7 +21,9 @@ use crate::search::model_download::{
     classify_model_cache_metadata,
 };
 use crate::search::policy::{CliSemanticOverrides, SemanticPolicy};
-use crate::search::semantic_manifest::{SemanticShardManifest, SemanticShardRecord, TierKind};
+use crate::search::semantic_manifest::{
+    SemanticShardManifest, SemanticShardRecord, TierKind, semantic_shard_artifact_path_is_safe,
+};
 use crate::search::vector_index::{
     ROLE_ASSISTANT, ROLE_USER, SemanticFilterMaps, VectorIndex, vector_index_path,
 };
@@ -281,13 +283,8 @@ pub struct SemanticSetup {
     pub context: Option<SemanticContext>,
 }
 
-fn semantic_sidecar_path(data_dir: &Path, recorded_path: &str) -> PathBuf {
-    let path = PathBuf::from(recorded_path);
-    if path.is_absolute() {
-        path
-    } else {
-        data_dir.join(path)
-    }
+fn semantic_sidecar_path(data_dir: &Path, recorded_path: &str) -> Option<PathBuf> {
+    semantic_shard_artifact_path_is_safe(recorded_path).then(|| data_dir.join(recorded_path))
 }
 
 fn matching_complete_shard_records(
@@ -332,7 +329,9 @@ fn matching_complete_shard_records(
         {
             return Ok(None);
         }
-        let path = semantic_sidecar_path(data_dir, &shard.index_path);
+        let Some(path) = semantic_sidecar_path(data_dir, &shard.index_path) else {
+            return Ok(None);
+        };
         if !path.is_file() {
             return Ok(None);
         }
@@ -355,7 +354,9 @@ fn load_complete_shard_indexes(
 
         let mut indexes = Vec::with_capacity(records.len());
         for shard in records {
-            let path = semantic_sidecar_path(data_dir, &shard.index_path);
+            let Some(path) = semantic_sidecar_path(data_dir, &shard.index_path) else {
+                return Ok(None);
+            };
             let index = VectorIndex::open(&path)
                 .map_err(|err| format!("semantic shard vector index {}: {err}", path.display()))?;
             if index.embedder_id() != embedder_id || index.dimension() != shard.dimension {
@@ -813,6 +814,32 @@ mod tests {
         assert!(!ready.has_update());
         assert!(ready.can_search());
         assert_eq!(ready.status_label(), "SEM");
+    }
+
+    #[test]
+    fn semantic_sidecar_path_rejects_paths_outside_data_dir() {
+        let tmp = tempdir().unwrap();
+        let safe = semantic_sidecar_path(tmp.path(), "vector_index/shards/hash/shard-0.fsvi")
+            .expect("safe relative shard path");
+        assert_eq!(
+            safe,
+            tmp.path().join("vector_index/shards/hash/shard-0.fsvi")
+        );
+
+        for unsafe_path in [
+            tmp.path()
+                .join("outside.fsvi")
+                .to_string_lossy()
+                .to_string(),
+            "../outside.fsvi".to_string(),
+            "vector_index/../outside.fsvi".to_string(),
+            "./vector_index/shards/hash/shard-0.fsvi".to_string(),
+        ] {
+            assert!(
+                semantic_sidecar_path(tmp.path(), &unsafe_path).is_none(),
+                "unsafe semantic sidecar path should be rejected: {unsafe_path}"
+            );
+        }
     }
 
     #[test]

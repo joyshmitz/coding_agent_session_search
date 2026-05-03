@@ -26,7 +26,7 @@
 
 use std::fs;
 use std::io::Write as IoWrite;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -47,6 +47,18 @@ pub const MANIFEST_FILENAME: &str = "semantic_manifest.json";
 
 /// Filename for the prototype per-shard semantic artifact manifest.
 pub const SHARD_MANIFEST_FILENAME: &str = "semantic_shards.json";
+
+pub(crate) fn semantic_shard_artifact_path_is_safe(recorded_path: &str) -> bool {
+    let trimmed = recorded_path.trim();
+    if trimmed.is_empty() || trimmed != recorded_path {
+        return false;
+    }
+    let path = Path::new(recorded_path);
+    !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
 
 // ─── Tier kind ─────────────────────────────────────────────────────────────
 
@@ -458,7 +470,9 @@ impl SemanticShardManifest {
             if !seen_indices.insert(shard.shard_index) {
                 generation_consistent = false;
             }
-            if shard.index_path.trim().is_empty() || !seen_index_paths.insert(&shard.index_path) {
+            if !semantic_shard_artifact_path_is_safe(&shard.index_path)
+                || !seen_index_paths.insert(&shard.index_path)
+            {
                 generation_consistent = false;
             }
             match expected_shard_count {
@@ -1915,6 +1929,34 @@ mod tests {
             !blank_path_summary.complete,
             "blank shard index paths must not summarize as complete"
         );
+
+        for unsafe_path in [
+            tempfile::tempdir()
+                .unwrap()
+                .path()
+                .join("outside.fsvi")
+                .to_string_lossy()
+                .to_string(),
+            "vector_index/shards/../outside.fsvi".to_string(),
+            "./vector_index/shards/fast/hash.fsvi".to_string(),
+            " vector_index/shards/fast/hash.fsvi".to_string(),
+        ] {
+            let mut unsafe_shard = test_shard(0, 1, true);
+            unsafe_shard.index_path = unsafe_path;
+            shards.replace_shards_for_generation(
+                TierKind::Fast,
+                "fnv1a-384",
+                "fp-sharded",
+                vec![unsafe_shard],
+            );
+            let unsafe_path_summary = shards.summary(TierKind::Fast, "fnv1a-384", "fp-sharded");
+            assert_eq!(unsafe_path_summary.shard_count, 1);
+            assert_eq!(unsafe_path_summary.ready_shards, 1);
+            assert!(
+                !unsafe_path_summary.complete,
+                "unsafe shard index paths must not summarize as complete"
+            );
+        }
 
         shards.replace_shards_for_generation(
             TierKind::Fast,
