@@ -380,6 +380,39 @@ fn load_complete_shard_indexes(
     Ok(None)
 }
 
+fn load_complete_shard_indexes_for_current_db(
+    data_dir: &Path,
+    db_path: &Path,
+    embedder_id: &str,
+    context_label: &'static str,
+) -> Option<Vec<VectorIndex>> {
+    let db_fingerprint = match crate::indexer::lexical_storage_fingerprint_for_db(db_path) {
+        Ok(fingerprint) => fingerprint,
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                embedder = embedder_id,
+                context = context_label,
+                "semantic shard context unavailable: failed to fingerprint current DB"
+            );
+            return None;
+        }
+    };
+
+    match load_complete_shard_indexes(data_dir, embedder_id, &db_fingerprint) {
+        Ok(indexes) => indexes,
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                embedder = embedder_id,
+                context = context_label,
+                "semantic shard context unavailable"
+            );
+            None
+        }
+    }
+}
+
 /// Load semantic context with optional version mismatch checking.
 ///
 /// If `check_for_updates` is true, this function will check if the installed
@@ -430,21 +463,12 @@ pub fn load_hash_semantic_context(data_dir: &Path, db_path: &Path) -> SemanticSe
     let embedder = HashEmbedder::default();
     let index_path = vector_index_path(data_dir, embedder.id());
     let monolithic_present = index_path.is_file();
-    let shard_indexes = if monolithic_present {
-        None
-    } else {
-        crate::indexer::lexical_storage_fingerprint_for_db(db_path)
-            .ok()
-            .and_then(|db_fingerprint| {
-                load_complete_shard_indexes(data_dir, embedder.id(), &db_fingerprint)
-                    .map_err(|err| {
-                        tracing::debug!(error = %err, "hash semantic shard context unavailable");
-                        err
-                    })
-                    .ok()
-                    .flatten()
-            })
-    };
+    let shard_indexes = load_complete_shard_indexes_for_current_db(
+        data_dir,
+        db_path,
+        embedder.id(),
+        "hash semantic",
+    );
     if !monolithic_present && shard_indexes.is_none() {
         return SemanticSetup {
             availability: SemanticAvailability::IndexMissing { index_path },
@@ -539,25 +563,12 @@ fn load_semantic_context_inner(
 
     let index_path = vector_index_path(data_dir, FastEmbedder::embedder_id_static());
     let monolithic_present = index_path.is_file();
-    let shard_indexes = if monolithic_present {
-        None
-    } else {
-        crate::indexer::lexical_storage_fingerprint_for_db(db_path)
-            .ok()
-            .and_then(|db_fingerprint| {
-                load_complete_shard_indexes(
-                    data_dir,
-                    FastEmbedder::embedder_id_static(),
-                    &db_fingerprint,
-                )
-                .map_err(|err| {
-                    tracing::debug!(error = %err, "semantic shard context unavailable");
-                    err
-                })
-                .ok()
-                .flatten()
-            })
-    };
+    let shard_indexes = load_complete_shard_indexes_for_current_db(
+        data_dir,
+        db_path,
+        FastEmbedder::embedder_id_static(),
+        "semantic",
+    );
     if !monolithic_present && shard_indexes.is_none() {
         return SemanticSetup {
             availability: SemanticAvailability::IndexMissing { index_path },
@@ -916,5 +927,100 @@ mod tests {
         let result = delete_vector_index_for_rebuild(tmp.path());
         assert!(result.is_ok());
         assert!(!result.unwrap());
+    }
+
+    fn write_hash_vector_index(path: &Path, record_count: usize) {
+        let embedder = HashEmbedder::default();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create vector index parent");
+        }
+        let mut writer = VectorIndex::create_with_revision(
+            path,
+            embedder.id(),
+            "hash",
+            embedder.dimension(),
+            frankensearch::index::Quantization::F16,
+        )
+        .expect("create hash vector index");
+        let mut vector = vec![0.0_f32; embedder.dimension()];
+        vector[0] = 1.0;
+        for idx in 0..record_count {
+            writer
+                .write_record(&format!("doc-{idx}"), &vector)
+                .expect("write hash vector record");
+        }
+        writer.finish().expect("finish hash vector index");
+    }
+
+    #[test]
+    fn load_hash_context_prefers_current_complete_shards_over_monolithic_file() {
+        let tmp = tempdir().unwrap();
+        let db_path = tmp.path().join("cass.db");
+        let storage = FrankenStorage::open(&db_path).expect("create cass db");
+        drop(storage);
+        let db_fingerprint = crate::indexer::lexical_storage_fingerprint_for_db(&db_path)
+            .expect("fingerprint cass db");
+
+        let embedder = HashEmbedder::default();
+        write_hash_vector_index(&vector_index_path(tmp.path(), embedder.id()), 1);
+
+        let mut records = Vec::new();
+        for shard_index in 0..2_u32 {
+            let relative_path = format!("vector_index/shards/hash/shard-{shard_index}.fsvi");
+            let shard_path = tmp.path().join(&relative_path);
+            write_hash_vector_index(&shard_path, 1);
+            records.push(SemanticShardRecord {
+                tier: TierKind::Fast,
+                embedder_id: embedder.id().to_string(),
+                model_revision: "hash".to_string(),
+                schema_version: crate::search::policy::SEMANTIC_SCHEMA_VERSION,
+                chunking_version: crate::search::policy::CHUNKING_STRATEGY_VERSION,
+                dimension: embedder.dimension(),
+                shard_index,
+                shard_count: 2,
+                doc_count: 1,
+                total_conversations: 1,
+                db_fingerprint: db_fingerprint.clone(),
+                index_path: relative_path,
+                quantization: "f16".to_string(),
+                mmap_ready: true,
+                ann_index_path: None,
+                ann_size_bytes: 0,
+                ann_ready: false,
+                size_bytes: std::fs::metadata(&shard_path)
+                    .expect("stat hash shard")
+                    .len(),
+                started_at_ms: 1_733_100_000_000,
+                completed_at_ms: 1_733_100_000_000 + i64::from(shard_index),
+                ready: true,
+            });
+        }
+        let mut manifest = SemanticShardManifest {
+            shards: records,
+            ..Default::default()
+        };
+        manifest.save(tmp.path()).expect("save shard manifest");
+
+        let setup = load_hash_semantic_context(tmp.path(), &db_path);
+        assert!(
+            matches!(setup.availability, SemanticAvailability::HashFallback),
+            "hash semantic availability should remain ready: {:?}",
+            setup.availability
+        );
+        let context = setup
+            .context
+            .expect("complete current shards should load a semantic context");
+        assert_eq!(
+            context.additional_indexes.len(),
+            1,
+            "complete current shards must not be shadowed by an older monolithic vector file"
+        );
+        let loaded_records = context.index.record_count()
+            + context
+                .additional_indexes
+                .iter()
+                .map(VectorIndex::record_count)
+                .sum::<usize>();
+        assert_eq!(loaded_records, 2);
     }
 }
