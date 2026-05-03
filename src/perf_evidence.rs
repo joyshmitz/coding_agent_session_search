@@ -702,6 +702,7 @@ impl PerfReplayVerdict {
 #[serde(rename_all = "snake_case")]
 pub enum PerfReplayMetric {
     Validation,
+    MeasurementCoverage,
     ProofStatus,
     ProofP99Regression,
     ComposedP99,
@@ -913,6 +914,7 @@ impl PerfReplayGate {
             return report;
         }
 
+        self.evaluate_measurement_coverage(current, baseline, &mut report);
         self.evaluate_proof_status(current, &mut report);
         self.evaluate_proof_p99(current, &mut report);
         if let Some(baseline) = baseline {
@@ -978,6 +980,43 @@ impl PerfReplayGate {
             None => None,
         };
         Ok(self.replay_with_artifact(&current, baseline.as_ref(), Some(current_path)))
+    }
+
+    fn evaluate_measurement_coverage(
+        &self,
+        current: &PerfEvidenceLedger,
+        baseline: Option<&PerfEvidenceLedger>,
+        report: &mut PerfReplayReport,
+    ) {
+        let current_has_phase_timings = !current.phases.is_empty();
+        let current_has_proof = current.proof.status != PerfProofStatus::NotMeasured
+            || current.proof.p99_regression_basis_points.is_some();
+        if !current_has_phase_timings && !current_has_proof {
+            report.add_finding(PerfReplayFinding {
+                verdict: PerfReplayVerdict::Warning,
+                metric: PerfReplayMetric::MeasurementCoverage,
+                message: "current perf evidence ledger has no phase timings or proof summary"
+                    .to_string(),
+                baseline_value: None,
+                current_value: None,
+                delta_basis_points: None,
+                threshold_basis_points: None,
+            });
+        }
+
+        if baseline.is_some_and(|ledger| ledger.phases.is_empty()) {
+            report.add_finding(PerfReplayFinding {
+                verdict: PerfReplayVerdict::Warning,
+                metric: PerfReplayMetric::MeasurementCoverage,
+                message:
+                    "baseline perf evidence ledger has no phase timings; timing comparisons skipped"
+                        .to_string(),
+                baseline_value: None,
+                current_value: None,
+                delta_basis_points: None,
+                threshold_basis_points: None,
+            });
+        }
     }
 
     fn evaluate_proof_status(&self, current: &PerfEvidenceLedger, report: &mut PerfReplayReport) {
@@ -1468,6 +1507,27 @@ mod tests {
             report.findings.iter().any(|finding| finding.metric
                 == PerfReplayMetric::ProofP99Regression
                 && finding.delta_basis_points == Some(1_500)),
+            "{report:#?}"
+        );
+    }
+
+    #[test]
+    fn replay_gate_warns_when_current_ledger_has_no_measurements() {
+        let current = PerfEvidenceLedger::new(
+            "empty-measurement-run",
+            PerfWorkload::new(PerfWorkloadKind::Search, "empty-measurement"),
+            1,
+        );
+
+        let gate = PerfReplayGate::new(PerfReplayThresholds::defaults());
+        let report = gate.replay(&current, None);
+
+        assert_eq!(report.verdict, PerfReplayVerdict::Warning);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.metric == PerfReplayMetric::MeasurementCoverage),
             "{report:#?}"
         );
     }

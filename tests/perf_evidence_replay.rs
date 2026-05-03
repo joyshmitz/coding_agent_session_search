@@ -59,20 +59,10 @@ fn workload_ledger<const N: usize>(
         timed_out: false,
     });
     ledger.phases = vec![
-        phase("queue", PerfPhaseKind::Queueing, elapsed_ms / 4, p99_ms / 4),
-        phase(
-            "service",
-            PerfPhaseKind::Service,
-            elapsed_ms / 4,
-            p99_ms / 4,
-        ),
-        phase(
-            "hydrate",
-            PerfPhaseKind::Hydration,
-            elapsed_ms / 4,
-            p99_ms / 4,
-        ),
-        phase("output", PerfPhaseKind::Output, elapsed_ms / 4, p99_ms / 4),
+        phase("queue", PerfPhaseKind::Queueing, elapsed_ms, p99_ms, 0),
+        phase("service", PerfPhaseKind::Service, elapsed_ms, p99_ms, 1),
+        phase("hydrate", PerfPhaseKind::Hydration, elapsed_ms, p99_ms, 2),
+        phase("output", PerfPhaseKind::Output, elapsed_ms, p99_ms, 3),
     ];
     ledger.proof = PerfProofSummary {
         status: PerfProofStatus::Passed,
@@ -90,7 +80,15 @@ fn workload_ledger<const N: usize>(
     ledger
 }
 
-fn phase(name: &str, kind: PerfPhaseKind, elapsed_ms: u64, p99_ms: u64) -> PerfPhaseTiming {
+fn phase(
+    name: &str,
+    kind: PerfPhaseKind,
+    total_elapsed_ms: u64,
+    total_p99_ms: u64,
+    phase_index: usize,
+) -> PerfPhaseTiming {
+    let elapsed_ms = split_four_ways(total_elapsed_ms)[phase_index];
+    let p99_ms = split_four_ways(total_p99_ms)[phase_index];
     PerfPhaseTiming {
         name: name.to_string(),
         kind,
@@ -105,13 +103,23 @@ fn phase(name: &str, kind: PerfPhaseKind, elapsed_ms: u64, p99_ms: u64) -> PerfP
     }
 }
 
+fn split_four_ways(total: u64) -> [u64; 4] {
+    let base = total / 4;
+    let remainder = total % 4;
+    let mut parts = [base; 4];
+    for part in parts.iter_mut().take(remainder as usize) {
+        *part += 1;
+    }
+    parts
+}
+
 #[test]
 fn replay_harness_writes_reads_and_gates_saved_ledger_artifacts() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let baseline_path = tmp.path().join("baseline.json");
     let current_path = tmp.path().join("current.json");
-    let baseline = ledger("baseline-run", 40, 80);
-    let current = ledger("current-run", 64, 128);
+    let baseline = ledger("baseline-run", 41, 83);
+    let current = ledger("current-run", 67, 133);
 
     let baseline_artifact =
         write_perf_evidence_ledger(&baseline, &baseline_path).expect("write baseline");
