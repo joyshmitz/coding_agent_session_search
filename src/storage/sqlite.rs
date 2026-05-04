@@ -6211,9 +6211,9 @@ impl FrankenStorage {
     ///
     /// The planner only needs a sizing heuristic; exact message and byte
     /// accounting is performed later by the rebuild packet pipeline as it reads
-    /// message content for indexing. Avoiding a full `messages` scan here keeps
-    /// authoritative lexical repair startup proportional to conversations, not
-    /// retained message history.
+    /// message content for indexing. Rows missing both tail-cache sources fall
+    /// back to `MAX(messages.idx) + 1`, which preserves legacy upgraded
+    /// databases without treating populated conversations as empty.
     pub fn list_conversation_footprints_for_lexical_rebuild(
         &self,
     ) -> Result<Vec<LexicalRebuildConversationFootprintRow>> {
