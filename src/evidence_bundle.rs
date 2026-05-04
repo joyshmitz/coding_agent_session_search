@@ -79,7 +79,7 @@ impl EvidenceBundleChunk {
         parity_group: Option<String>,
     ) -> Result<Self> {
         let path = relative_path.into();
-        let resolved = resolve_bundle_path(bundle_root, &path)?;
+        let resolved = resolve_existing_bundle_path(bundle_root, &path)?;
         let (size_bytes, blake3) = digest_file(&resolved)
             .with_context(|| format!("digesting bundle chunk {}", resolved.display()))?;
         Ok(Self {
@@ -309,6 +309,17 @@ fn verify_manifest(
             ));
             continue;
         }
+        let resolved = match resolve_existing_bundle_path(bundle_root, &chunk.path) {
+            Ok(path) => path,
+            Err(err) => {
+                chunk_failures.push(raw_chunk_failure(
+                    EvidenceBundleIssueKind::UnsafeChunkPath,
+                    chunk.path.clone(),
+                    err.to_string(),
+                ));
+                continue;
+            }
+        };
 
         match digest_file(&resolved) {
             Ok((actual_size, actual_digest)) => {
@@ -564,6 +575,18 @@ fn resolve_bundle_path(bundle_root: &Path, relative_path: &str) -> Result<PathBu
         return Err(anyhow!("bundle chunk path must not be empty"));
     }
     Ok(bundle_root.join(path))
+}
+
+fn resolve_existing_bundle_path(bundle_root: &Path, relative_path: &str) -> Result<PathBuf> {
+    let resolved = resolve_bundle_path(bundle_root, relative_path)?;
+    let canonical_root = fs::canonicalize(bundle_root)
+        .with_context(|| format!("canonicalizing bundle root {}", bundle_root.display()))?;
+    let canonical_resolved = fs::canonicalize(&resolved)
+        .with_context(|| format!("canonicalizing bundle chunk {}", resolved.display()))?;
+    if !canonical_resolved.starts_with(&canonical_root) {
+        bail!("bundle chunk path resolves outside bundle root: {relative_path}");
+    }
+    Ok(canonical_resolved)
 }
 
 fn default_required_chunk() -> bool {
@@ -881,6 +904,40 @@ mod tests {
 
         let report = manifest.verify(tmp.path());
         assert!(report.is_unsafe(), "{report:?}");
+        assert_eq!(
+            report.issues[0].kind,
+            EvidenceBundleIssueKind::UnsafeChunkPath
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_chunk_that_escapes_bundle_root_is_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let outside_chunk = outside.path().join("segment-a");
+        fs::write(&outside_chunk, b"outside shard bytes").unwrap();
+        fs::create_dir_all(tmp.path().join("shards")).unwrap();
+        std::os::unix::fs::symlink(&outside_chunk, tmp.path().join("shards/segment-a")).unwrap();
+
+        let mut manifest = EvidenceBundleManifest::new(
+            "symlink-escape",
+            EvidenceBundleKind::LexicalGeneration,
+            1_700_000_000_007,
+        );
+        manifest.chunks = vec![EvidenceBundleChunk {
+            path: "shards/segment-a".to_string(),
+            role: EvidenceBundleChunkRole::LexicalShard,
+            size_bytes: b"outside shard bytes".len() as u64,
+            blake3: blake3::hash(b"outside shard bytes").to_hex().to_string(),
+            required: true,
+            parity_group: None,
+        }];
+
+        let report = manifest.verify(tmp.path());
+
+        assert!(report.is_unsafe(), "{report:?}");
+        assert_eq!(report.verified_chunk_count, 0);
         assert_eq!(
             report.issues[0].kind,
             EvidenceBundleIssueKind::UnsafeChunkPath
