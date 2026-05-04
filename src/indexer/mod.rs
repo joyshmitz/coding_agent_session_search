@@ -6534,8 +6534,7 @@ fn can_skip_unchanged_explicit_watch_once_index_run(
         return Ok(false);
     }
 
-    let additional_scan_roots = additional_scan_roots_for_scan_or_watch(storage, &opts.data_dir);
-    let watch_roots = build_watch_roots(additional_scan_roots);
+    let watch_roots = watch_roots_for_scan_or_watch(storage, opts);
     if !should_skip_unchanged_explicit_watch_once_paths(opts, storage, &watch_roots)? {
         return Ok(false);
     }
@@ -10546,9 +10545,7 @@ pub fn run_index(
     reset_progress_to_idle(opts.progress.as_ref());
 
     if opts.watch || opts.watch_once_paths.is_some() {
-        let additional_scan_roots =
-            additional_scan_roots_for_scan_or_watch(&storage, &opts.data_dir);
-        let watch_roots = build_watch_roots(additional_scan_roots.clone());
+        let watch_roots = watch_roots_for_scan_or_watch(&storage, &opts);
         let watch_once_mode = opts
             .watch_once_paths
             .as_ref()
@@ -10576,6 +10573,12 @@ pub fn run_index(
             );
             return close_storage_after_index(storage, &opts.db_path, "watch-once no-op index run");
         }
+
+        let additional_scan_roots = if opts.watch {
+            additional_scan_roots_for_scan_or_watch(&storage, &opts.data_dir)
+        } else {
+            Vec::new()
+        };
 
         // Startup watch ingest defers WAL auto-checkpoints for bulk import.
         // Before entering the long-lived watch loop, restore the steady-state
@@ -15217,6 +15220,55 @@ fn build_watch_roots(additional_scan_roots: Vec<ScanRoot>) -> Vec<(ConnectorKind
     }
 
     roots
+}
+
+fn configured_connector_kinds() -> Vec<ConnectorKind> {
+    configured_connector_factories()
+        .into_iter()
+        .filter_map(|(name, _)| ConnectorKind::from_slug(name))
+        .collect()
+}
+
+fn explicit_watch_once_direct_roots_from_enabled_paths(
+    paths: &[PathBuf],
+    enabled_kinds: &[ConnectorKind],
+) -> Option<Vec<(ConnectorKind, ScanRoot)>> {
+    if paths.is_empty() {
+        return None;
+    }
+
+    let mut roots = Vec::with_capacity(paths.len());
+    for path in paths {
+        let kind = explicit_watch_once_connector_hint(path)?;
+        if enabled_kinds.contains(&kind) {
+            roots.push((kind, ScanRoot::local(path.clone())));
+        }
+    }
+
+    Some(roots)
+}
+
+fn explicit_watch_once_direct_roots(paths: &[PathBuf]) -> Option<Vec<(ConnectorKind, ScanRoot)>> {
+    let enabled_kinds = configured_connector_kinds();
+    explicit_watch_once_direct_roots_from_enabled_paths(paths, &enabled_kinds)
+}
+
+fn watch_roots_for_scan_or_watch(
+    storage: &FrankenStorage,
+    opts: &IndexOptions,
+) -> Vec<(ConnectorKind, ScanRoot)> {
+    if !opts.watch
+        && let Some(paths) = opts
+            .watch_once_paths
+            .as_ref()
+            .filter(|paths| !paths.is_empty())
+        && let Some(roots) = explicit_watch_once_direct_roots(paths)
+    {
+        return roots;
+    }
+
+    let additional_scan_roots = additional_scan_roots_for_scan_or_watch(storage, &opts.data_dir);
+    build_watch_roots(additional_scan_roots)
 }
 
 impl ConnectorKind {
@@ -31100,6 +31152,50 @@ mod tests {
         assert_eq!(classified.len(), 1);
         assert_eq!(classified[0].0, ConnectorKind::Codex);
         assert_eq!(classified[0].1.path, session);
+    }
+
+    #[test]
+    fn explicit_watch_once_direct_roots_use_hinted_file_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let codex_session = tmp
+            .path()
+            .join(".codex/sessions/2026/05/02/rollout-1.jsonl");
+        let claude_session = tmp
+            .path()
+            .join(".claude/projects/-tmp-proj/session-1.jsonl");
+        std::fs::create_dir_all(codex_session.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(claude_session.parent().unwrap()).unwrap();
+        std::fs::write(&codex_session, b"{}").unwrap();
+        std::fs::write(&claude_session, b"{}").unwrap();
+
+        let roots = explicit_watch_once_direct_roots_from_enabled_paths(
+            &[codex_session.clone(), claude_session.clone()],
+            &[ConnectorKind::Codex, ConnectorKind::Claude],
+        )
+        .expect("known explicit provider paths should use direct watch-once roots");
+
+        assert_eq!(roots.len(), 2);
+        assert_eq!(roots[0].0, ConnectorKind::Codex);
+        assert_eq!(roots[0].1.path, codex_session);
+        assert_eq!(roots[1].0, ConnectorKind::Claude);
+        assert_eq!(roots[1].1.path, claude_session);
+    }
+
+    #[test]
+    fn explicit_watch_once_direct_roots_fall_back_for_unhinted_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = tmp.path().join("custom-agent/session.jsonl");
+        std::fs::create_dir_all(session.parent().unwrap()).unwrap();
+        std::fs::write(&session, b"{}").unwrap();
+
+        assert!(
+            explicit_watch_once_direct_roots_from_enabled_paths(
+                &[session],
+                &[ConnectorKind::Codex],
+            )
+            .is_none(),
+            "unhinted explicit paths need the existing detected-root fallback"
+        );
     }
 
     #[test]
