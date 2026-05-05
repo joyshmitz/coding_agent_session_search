@@ -13080,13 +13080,15 @@ fn doctor_repair_contract_report() -> DoctorRepairContractReport {
 fn cleanup_apply_outcome_kind(result: &DiagCleanupApplyResult) -> DoctorRepairOutcomeKind {
     if !result.blocked_reasons.is_empty() && result.pruned_asset_count == 0 {
         DoctorRepairOutcomeKind::Blocked
-    } else if !result.blocked_reasons.is_empty() {
-        DoctorRepairOutcomeKind::Partial
-    } else if result.pruned_asset_count > 0 && result.skipped_asset_count > 0 {
-        DoctorRepairOutcomeKind::Partial
-    } else if result.pruned_asset_count > 0 {
+    } else if result.pruned_asset_count > 0
+        && result.skipped_asset_count == 0
+        && result.blocked_reasons.is_empty()
+    {
         DoctorRepairOutcomeKind::Applied
-    } else if result.skipped_asset_count > 0 {
+    } else if result.pruned_asset_count > 0
+        || result.skipped_asset_count > 0
+        || !result.blocked_reasons.is_empty()
+    {
         DoctorRepairOutcomeKind::Partial
     } else {
         DoctorRepairOutcomeKind::NoOp

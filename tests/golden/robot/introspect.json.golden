@@ -2391,6 +2391,10 @@
             "additionalProperties": true
           }
         },
+        "repair_contract": {
+          "type": "object",
+          "additionalProperties": true
+        },
         "quarantine": {
           "type": "object",
           "additionalProperties": true

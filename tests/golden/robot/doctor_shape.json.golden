@@ -75,6 +75,102 @@
         }
       }
     },
+    "repair_contract": {
+      "type": "object",
+      "properties": {
+        "default_mode": {
+          "type": "string"
+        },
+        "default_non_destructive": {
+          "type": "boolean"
+        },
+        "fail_closed": {
+          "type": "boolean"
+        },
+        "approval_requirements": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "outcome_kinds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "retry_safety_kinds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mode_policies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "mode": {
+                "type": "string"
+              },
+              "mutates": {
+                "type": "boolean"
+              },
+              "robot_allowed": {
+                "type": "boolean"
+              },
+              "approval_requirement": {
+                "type": "string"
+              },
+              "allowed_mutation_asset_classes": {
+                "type": "array",
+                "items": {
+                  "type": "unknown"
+                }
+              },
+              "required_fields": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "stdout_contract": {
+                "type": "string"
+              },
+              "stderr_contract": {
+                "type": "string"
+              },
+              "aborts_on": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "notes": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "legacy_aliases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "invocation": {
+                "type": "string"
+              },
+              "mode": {
+                "type": "string"
+              },
+              "notes": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
     "checks": {
       "type": "array",
       "items": {

@@ -406,6 +406,363 @@
       "notes": "Unknown assets fail closed until a specific class is added to the taxonomy."
     }
   ],
+  "repair_contract": {
+    "default_mode": "check",
+    "default_non_destructive": true,
+    "fail_closed": true,
+    "approval_requirements": [
+      "none",
+      "approval_fingerprint",
+      "explicit_operator_confirmation",
+      "rehearsal_receipt",
+      "refused"
+    ],
+    "outcome_kinds": [
+      "no_op",
+      "planned",
+      "applied",
+      "partial",
+      "blocked",
+      "failed"
+    ],
+    "retry_safety_kinds": [
+      "safe_to_retry",
+      "retry_after_same_dry_run",
+      "retry_after_inspection",
+      "do_not_retry_without_review"
+    ],
+    "mode_policies": [
+      {
+        "mode": "check",
+        "mutates": false,
+        "robot_allowed": true,
+        "approval_requirement": "none",
+        "allowed_mutation_asset_classes": [],
+        "required_fields": [
+          "mode",
+          "outcome_kind"
+        ],
+        "stdout_contract": "stdout contains data only in robot mode",
+        "stderr_contract": "stderr contains diagnostics only",
+        "aborts_on": [
+          "schema_error",
+          "io_error"
+        ],
+        "notes": "Default cass doctor mode; never mutates user or derived assets."
+      },
+      {
+        "mode": "repair_dry_run",
+        "mutates": false,
+        "robot_allowed": true,
+        "approval_requirement": "none",
+        "allowed_mutation_asset_classes": [],
+        "required_fields": [
+          "mode",
+          "planned_actions",
+          "blocked_reasons",
+          "outcome_kind"
+        ],
+        "stdout_contract": "stdout describes the plan and fingerprint only",
+        "stderr_contract": "stderr contains diagnostics only",
+        "aborts_on": [
+          "schema_error",
+          "io_error"
+        ],
+        "notes": "Plans repair work without changing filesystem or archive state."
+      },
+      {
+        "mode": "repair_apply",
+        "mutates": true,
+        "robot_allowed": true,
+        "approval_requirement": "approval_fingerprint",
+        "allowed_mutation_asset_classes": [
+          "derived_lexical_index",
+          "derived_semantic_index",
+          "reclaimable_derived_cache"
+        ],
+        "required_fields": [
+          "mode",
+          "approval_fingerprint",
+          "planned_actions",
+          "blocked_reasons",
+          "outcome_kind",
+          "retry_safety",
+          "receipt"
+        ],
+        "stdout_contract": "stdout emits an apply receipt in robot mode",
+        "stderr_contract": "stderr contains progress and diagnostics only",
+        "aborts_on": [
+          "active_rebuild_lock",
+          "approval_fingerprint_missing",
+          "approval_fingerprint_mismatched",
+          "unsafe_asset_class",
+          "unsafe_path",
+          "verification_failed"
+        ],
+        "notes": "Applies verified derived-index repairs after matching the dry-run fingerprint."
+      },
+      {
+        "mode": "cleanup_dry_run",
+        "mutates": false,
+        "robot_allowed": true,
+        "approval_requirement": "none",
+        "allowed_mutation_asset_classes": [],
+        "required_fields": [
+          "mode",
+          "planned_actions",
+          "blocked_reasons",
+          "outcome_kind"
+        ],
+        "stdout_contract": "stdout emits cleanup inventory and approval fingerprint",
+        "stderr_contract": "stderr contains diagnostics only",
+        "aborts_on": [
+          "schema_error",
+          "io_error"
+        ],
+        "notes": "Inventories reclaimable derived assets without pruning anything."
+      },
+      {
+        "mode": "cleanup_apply",
+        "mutates": true,
+        "robot_allowed": true,
+        "approval_requirement": "approval_fingerprint",
+        "allowed_mutation_asset_classes": [
+          "retained_publish_backup",
+          "reclaimable_derived_cache",
+          "memo_cache"
+        ],
+        "required_fields": [
+          "mode",
+          "approval_fingerprint",
+          "planned_actions",
+          "blocked_reasons",
+          "outcome_kind",
+          "retry_safety",
+          "receipt"
+        ],
+        "stdout_contract": "stdout emits cleanup apply actions and receipt in robot mode",
+        "stderr_contract": "stderr contains progress and diagnostics only",
+        "aborts_on": [
+          "active_rebuild_lock",
+          "approval_fingerprint_missing",
+          "approval_fingerprint_mismatched",
+          "unsafe_asset_class",
+          "unsafe_path",
+          "verification_failed"
+        ],
+        "notes": "Prunes only derived reclaimable assets after path and taxonomy gates pass."
+      },
+      {
+        "mode": "reconstruct_dry_run",
+        "mutates": false,
+        "robot_allowed": true,
+        "approval_requirement": "none",
+        "allowed_mutation_asset_classes": [],
+        "required_fields": [
+          "mode",
+          "planned_actions",
+          "blocked_reasons",
+          "outcome_kind"
+        ],
+        "stdout_contract": "stdout emits reconstruct candidates and promotion fingerprint",
+        "stderr_contract": "stderr contains diagnostics only",
+        "aborts_on": [
+          "schema_error",
+          "io_error"
+        ],
+        "notes": "Previews archive reconstruction from preserved raw mirrors."
+      },
+      {
+        "mode": "reconstruct_promote",
+        "mutates": true,
+        "robot_allowed": false,
+        "approval_requirement": "approval_fingerprint",
+        "allowed_mutation_asset_classes": [
+          "raw_mirror_blob",
+          "canonical_archive_db",
+          "archive_db_sidecar",
+          "operation_receipt"
+        ],
+        "required_fields": [
+          "mode",
+          "approval_fingerprint",
+          "planned_actions",
+          "blocked_reasons",
+          "outcome_kind",
+          "retry_safety",
+          "receipt"
+        ],
+        "stdout_contract": "stdout emits promotion receipt after verification",
+        "stderr_contract": "stderr contains progress and diagnostics only",
+        "aborts_on": [
+          "active_rebuild_lock",
+          "approval_fingerprint_missing",
+          "approval_fingerprint_mismatched",
+          "unsafe_asset_class",
+          "unsafe_path",
+          "verification_failed"
+        ],
+        "notes": "Promotes reconstructed archive state only after preserving evidence and matching a plan."
+      },
+      {
+        "mode": "restore_rehearsal",
+        "mutates": false,
+        "robot_allowed": true,
+        "approval_requirement": "none",
+        "allowed_mutation_asset_classes": [],
+        "required_fields": [
+          "mode",
+          "planned_actions",
+          "blocked_reasons",
+          "outcome_kind"
+        ],
+        "stdout_contract": "stdout emits restore preflight and rehearsal receipt",
+        "stderr_contract": "stderr contains diagnostics only",
+        "aborts_on": [
+          "schema_error",
+          "io_error"
+        ],
+        "notes": "Validates restore inputs without replacing archive state."
+      },
+      {
+        "mode": "restore_apply",
+        "mutates": true,
+        "robot_allowed": false,
+        "approval_requirement": "rehearsal_receipt",
+        "allowed_mutation_asset_classes": [
+          "canonical_archive_db",
+          "archive_db_sidecar",
+          "backup_bundle"
+        ],
+        "required_fields": [
+          "mode",
+          "approval_fingerprint",
+          "planned_actions",
+          "blocked_reasons",
+          "outcome_kind",
+          "retry_safety",
+          "receipt"
+        ],
+        "stdout_contract": "stdout emits restore receipt after verification",
+        "stderr_contract": "stderr contains progress and diagnostics only",
+        "aborts_on": [
+          "active_rebuild_lock",
+          "approval_fingerprint_missing",
+          "approval_fingerprint_mismatched",
+          "unsafe_asset_class",
+          "unsafe_path",
+          "verification_failed"
+        ],
+        "notes": "Requires a rehearsal receipt before touching canonical archive state."
+      },
+      {
+        "mode": "support_bundle",
+        "mutates": false,
+        "robot_allowed": true,
+        "approval_requirement": "none",
+        "allowed_mutation_asset_classes": [],
+        "required_fields": [
+          "mode",
+          "outcome_kind"
+        ],
+        "stdout_contract": "stdout emits bundle metadata in robot mode",
+        "stderr_contract": "stderr contains diagnostics only",
+        "aborts_on": [
+          "schema_error",
+          "io_error"
+        ],
+        "notes": "May redact/export evidence but does not prune or rewrite archives."
+      },
+      {
+        "mode": "baseline_diff",
+        "mutates": false,
+        "robot_allowed": true,
+        "approval_requirement": "none",
+        "allowed_mutation_asset_classes": [],
+        "required_fields": [
+          "mode",
+          "outcome_kind"
+        ],
+        "stdout_contract": "stdout emits baseline comparison data in robot mode",
+        "stderr_contract": "stderr contains diagnostics only",
+        "aborts_on": [
+          "schema_error",
+          "io_error"
+        ],
+        "notes": "Compares current state against baselines without mutation."
+      },
+      {
+        "mode": "safe_auto_run",
+        "mutates": true,
+        "robot_allowed": true,
+        "approval_requirement": "approval_fingerprint",
+        "allowed_mutation_asset_classes": [
+          "retained_publish_backup",
+          "reclaimable_derived_cache",
+          "memo_cache"
+        ],
+        "required_fields": [
+          "mode",
+          "approval_fingerprint",
+          "planned_actions",
+          "blocked_reasons",
+          "outcome_kind",
+          "retry_safety",
+          "receipt"
+        ],
+        "stdout_contract": "stdout emits every sub-action receipt in robot mode",
+        "stderr_contract": "stderr contains progress and diagnostics only",
+        "aborts_on": [
+          "active_rebuild_lock",
+          "approval_fingerprint_missing",
+          "approval_fingerprint_mismatched",
+          "unsafe_asset_class",
+          "unsafe_path",
+          "verification_failed"
+        ],
+        "notes": "Legacy --fix maps here and may only apply individually safe, fingerprinted repairs."
+      },
+      {
+        "mode": "emergency_force",
+        "mutates": false,
+        "robot_allowed": false,
+        "approval_requirement": "refused",
+        "allowed_mutation_asset_classes": [],
+        "required_fields": [
+          "mode",
+          "outcome_kind"
+        ],
+        "stdout_contract": "stdout emits a refusal envelope",
+        "stderr_contract": "stderr explains the unsupported override request",
+        "aborts_on": [
+          "always_refused_until_explicitly_implemented"
+        ],
+        "notes": "Declared explicitly so override-shaped requests fail closed instead of improvising."
+      }
+    ],
+    "legacy_aliases": [
+      {
+        "invocation": "cass doctor",
+        "mode": "check",
+        "notes": "default inspection path; no mutation"
+      },
+      {
+        "invocation": "cass doctor --json",
+        "mode": "check",
+        "notes": "robot inspection path; stdout is JSON data only"
+      },
+      {
+        "invocation": "cass doctor --fix",
+        "mode": "safe_auto_run",
+        "notes": "legacy repair entrypoint; each mutating sub-action must still carry its own mode and fingerprint"
+      },
+      {
+        "invocation": "cass doctor --fix --force-rebuild",
+        "mode": "repair_apply",
+        "notes": "legacy forced derived-index rebuild request; canonical archives remain protected"
+      }
+    ]
+  },
   "checks": [
     {
       "name": "data_directory",
