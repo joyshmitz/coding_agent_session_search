@@ -132,6 +132,22 @@ schemas: (auto-generated from contract)
       - reason: string
       - requires_override: boolean
       - safe_to_retry: boolean
+    - operation_state: object
+      - active_doctor_repair: boolean
+      - active_index_maintenance: boolean
+      - active_rebuild: boolean
+      - active_watch: boolean
+      - interrupted_state_count: integer
+      - interrupted_states: array
+      - mutating_doctor_allowed: boolean
+      - mutation_blocked_reason: ?
+      - next_action: string
+      - notes: array
+      - owner_count: integer
+      - owners: array
+      - read_only_check_allowed: boolean
+      - schema_version: integer
+      - stale_owner_count: integer
     - quarantine: object
     - raw_mirror: object
       - exists: boolean

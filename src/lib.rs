@@ -12627,6 +12627,13 @@ fn doctor_anomaly_for_check(name: &str, status: &str, message: &str) -> DoctorAn
     match name {
         "data_directory" => DoctorAnomaly::StoragePressure,
         "lock_file" => DoctorAnomaly::LockContention,
+        "operation_state" => {
+            if message.contains("interrupted") {
+                DoctorAnomaly::InterruptedRepair
+            } else {
+                DoctorAnomaly::LockContention
+            }
+        }
         "database" => {
             if message.contains("quick_check") {
                 DoctorAnomaly::ArchiveDbCorrupt
@@ -12753,6 +12760,39 @@ fn doctor_top_level_operation_outcome(
     }
 
     let data_loss_risk = doctor_highest_data_loss_risk(checks);
+    if fix_requested
+        && checks
+            .iter()
+            .any(|check| check.anomaly_class == DoctorAnomaly::LockContention)
+    {
+        return doctor_operation_outcome_with_details(
+            DoctorOperationOutcomeKind::RepairBlocked,
+            "doctor repair was blocked by an active or unverifiable operation lock".to_string(),
+            "recorded lock contention without attempting mutation".to_string(),
+            "no repair, rebuild, promotion, restore, or cleanup action was attempted".to_string(),
+            data_loss_risk,
+            Some("cass doctor --json".to_string()),
+            None,
+        );
+    }
+
+    if fix_requested
+        && checks
+            .iter()
+            .any(|check| check.anomaly_class == DoctorAnomaly::InterruptedRepair)
+    {
+        return doctor_operation_outcome_with_details(
+            DoctorOperationOutcomeKind::RepairBlocked,
+            "doctor repair was blocked by interrupted operation artifacts that require inspection"
+                .to_string(),
+            "reported interrupted operation state without attempting mutation".to_string(),
+            "no repair, rebuild, promotion, restore, or cleanup action was attempted".to_string(),
+            data_loss_risk,
+            Some("cass doctor --json".to_string()),
+            None,
+        );
+    }
+
     if fix_requested && issues_fixed > 0 {
         let (kind, reason, action_taken, action_not_taken) = if issues_found == 0 {
             (
@@ -14805,6 +14845,151 @@ struct DoctorSourceAuthorityReport {
     notes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorOperationLockKind {
+    IndexRun,
+    WatchIngestion,
+    DoctorRepair,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorOperationOwnerConfidence {
+    ActiveAdvisoryLock,
+    ActiveMissingMetadata,
+    CurrentProcess,
+    StaleMetadataOnly,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorInterruptedOperationKind {
+    CandidateBuild,
+    Promotion,
+    Restore,
+    Cleanup,
+    BackupVerification,
+    ReceiptIncomplete,
+    EventLogIncomplete,
+    ParkedPublishBackup,
+    RawMirrorCapture,
+    StaleLock,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorInterruptedOperationDisposition {
+    NeedsInspection,
+    RecoverOnNextIndexRun,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorOperationOwnerReport {
+    lock_kind: DoctorOperationLockKind,
+    lock_path: String,
+    redacted_lock_path: String,
+    active: bool,
+    owned_by_current_process: bool,
+    owner_confidence: DoctorOperationOwnerConfidence,
+    pid: Option<u32>,
+    started_at_ms: Option<i64>,
+    started_at: Option<String>,
+    updated_at_ms: Option<i64>,
+    updated_at: Option<String>,
+    mode: Option<String>,
+    job_id: Option<String>,
+    job_kind: Option<String>,
+    phase: Option<String>,
+    db_path: Option<String>,
+    db_path_matches_requested: Option<bool>,
+    evidence: Vec<String>,
+    next_action: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorInterruptedOperationReport {
+    kind: DoctorInterruptedOperationKind,
+    path: String,
+    redacted_path: String,
+    disposition: DoctorInterruptedOperationDisposition,
+    blocks_mutation: bool,
+    safe_to_delete_automatically: bool,
+    evidence: Vec<String>,
+    next_action: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorOperationStateReport {
+    schema_version: u32,
+    read_only_check_allowed: bool,
+    mutating_doctor_allowed: bool,
+    active_index_maintenance: bool,
+    active_rebuild: bool,
+    active_watch: bool,
+    active_doctor_repair: bool,
+    owner_count: usize,
+    stale_owner_count: usize,
+    interrupted_state_count: usize,
+    mutation_blocked_reason: Option<String>,
+    owners: Vec<DoctorOperationOwnerReport>,
+    interrupted_states: Vec<DoctorInterruptedOperationReport>,
+    next_action: String,
+    notes: Vec<String>,
+}
+
+#[derive(Debug)]
+struct DoctorMutationLockGuard {
+    file: std::fs::File,
+}
+
+impl Drop for DoctorMutationLockGuard {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.file);
+    }
+}
+
+#[derive(Debug, Clone)]
+enum DoctorMutationLockObservation {
+    Absent {
+        path: PathBuf,
+    },
+    Available {
+        path: PathBuf,
+        metadata: BTreeMap<String, String>,
+    },
+    Active {
+        path: PathBuf,
+        metadata: BTreeMap<String, String>,
+    },
+    Acquired {
+        path: PathBuf,
+        metadata: BTreeMap<String, String>,
+    },
+    Unavailable {
+        path: PathBuf,
+        reason: String,
+    },
+}
+
+impl DoctorMutationLockObservation {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Absent { path }
+            | Self::Available { path, .. }
+            | Self::Active { path, .. }
+            | Self::Acquired { path, .. }
+            | Self::Unavailable { path, .. } => path,
+        }
+    }
+
+    fn blocks_mutation(&self) -> bool {
+        matches!(self, Self::Active { .. } | Self::Unavailable { .. })
+    }
+}
+
 fn doctor_normalized_provider_slug(provider: &str) -> String {
     let normalized = provider.trim().to_ascii_lowercase().replace('-', "_");
     if normalized.is_empty() {
@@ -16475,6 +16660,582 @@ fn build_doctor_source_authority_report(
             "Doctor chooses the most conservative authority first; live sources never outrank an existing archive when coverage shrinks.".to_string(),
             "Candidate-only means evidence may seed an isolated rebuild candidate, not direct promotion.".to_string(),
             "Promotion requires a later non-decreasing coverage check plus checksum-verified receipt.".to_string(),
+        ],
+    }
+}
+
+fn doctor_mutation_lock_path(data_dir: &Path) -> PathBuf {
+    data_dir
+        .join("doctor")
+        .join("locks")
+        .join("doctor-repair.lock")
+}
+
+fn doctor_parse_lock_metadata(raw: &str) -> BTreeMap<String, String> {
+    raw.lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            let key = key.trim();
+            if key.is_empty() {
+                return None;
+            }
+            Some((key.to_string(), value.trim().to_string()))
+        })
+        .collect()
+}
+
+fn doctor_read_lock_metadata(file: &std::fs::File) -> BTreeMap<String, String> {
+    use std::io::Read as _;
+
+    const MAX_LOCK_FILE_READ: u64 = 64 * 1024;
+    let mut raw = String::new();
+    let _ = file.take(MAX_LOCK_FILE_READ).read_to_string(&mut raw);
+    doctor_parse_lock_metadata(&raw)
+}
+
+fn doctor_lock_metadata_u32(metadata: &BTreeMap<String, String>, key: &str) -> Option<u32> {
+    metadata.get(key).and_then(|value| value.parse().ok())
+}
+
+fn doctor_lock_metadata_i64(metadata: &BTreeMap<String, String>, key: &str) -> Option<i64> {
+    metadata.get(key).and_then(|value| value.parse().ok())
+}
+
+fn doctor_probe_mutation_lock(data_dir: &Path) -> DoctorMutationLockObservation {
+    let path = doctor_mutation_lock_path(data_dir);
+    if !path.exists() {
+        return DoctorMutationLockObservation::Absent { path };
+    }
+
+    let file = match OpenOptions::new().read(true).write(true).open(&path) {
+        Ok(file) => file,
+        Err(err) => {
+            return DoctorMutationLockObservation::Unavailable {
+                path,
+                reason: format!("failed to open doctor mutation lock for inspection: {err}"),
+            };
+        }
+    };
+    let metadata = doctor_read_lock_metadata(&file);
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => {
+            let _ = fs2::FileExt::unlock(&file);
+            DoctorMutationLockObservation::Available { path, metadata }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+            DoctorMutationLockObservation::Active { path, metadata }
+        }
+        Err(err) => DoctorMutationLockObservation::Unavailable {
+            path,
+            reason: format!("failed to probe doctor mutation lock ownership: {err}"),
+        },
+    }
+}
+
+fn doctor_acquire_mutation_lock(
+    data_dir: &Path,
+    db_path: &Path,
+) -> Result<(DoctorMutationLockGuard, DoctorMutationLockObservation), DoctorMutationLockObservation>
+{
+    let path = doctor_mutation_lock_path(data_dir);
+    if let Some(parent) = path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        return Err(DoctorMutationLockObservation::Unavailable {
+            path,
+            reason: format!("failed to create doctor lock directory: {err}"),
+        });
+    }
+
+    let mut file = match OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(err) => {
+            return Err(DoctorMutationLockObservation::Unavailable {
+                path,
+                reason: format!("failed to open doctor mutation lock: {err}"),
+            });
+        }
+    };
+
+    if let Err(err) = fs2::FileExt::try_lock_exclusive(&file) {
+        let metadata = doctor_read_lock_metadata(&file);
+        if err.kind() == std::io::ErrorKind::WouldBlock {
+            return Err(DoctorMutationLockObservation::Active { path, metadata });
+        }
+        return Err(DoctorMutationLockObservation::Unavailable {
+            path,
+            reason: format!("failed to acquire doctor mutation lock: {err}"),
+        });
+    }
+
+    let started_at_ms = doctor_now_ms();
+    let mut metadata = BTreeMap::new();
+    metadata.insert("schema_version".to_string(), "1".to_string());
+    metadata.insert("pid".to_string(), std::process::id().to_string());
+    metadata.insert("started_at_ms".to_string(), started_at_ms.to_string());
+    metadata.insert("updated_at_ms".to_string(), started_at_ms.to_string());
+    metadata.insert("db_path".to_string(), db_path.display().to_string());
+    metadata.insert("mode".to_string(), "safe_auto_run".to_string());
+    metadata.insert("command".to_string(), "cass doctor --fix".to_string());
+
+    let encoded = metadata
+        .iter()
+        .map(|(key, value)| format!("{key}={value}\n"))
+        .collect::<String>();
+    if let Err(err) = file.set_len(0) {
+        let _ = fs2::FileExt::unlock(&file);
+        return Err(DoctorMutationLockObservation::Unavailable {
+            path,
+            reason: format!("failed to clear doctor mutation lock metadata: {err}"),
+        });
+    }
+    if let Err(err) = file
+        .write_all(encoded.as_bytes())
+        .and_then(|_| file.sync_all())
+    {
+        let _ = fs2::FileExt::unlock(&file);
+        return Err(DoctorMutationLockObservation::Unavailable {
+            path,
+            reason: format!("failed to write doctor mutation lock metadata: {err}"),
+        });
+    }
+
+    Ok((
+        DoctorMutationLockGuard { file },
+        DoctorMutationLockObservation::Acquired { path, metadata },
+    ))
+}
+
+fn doctor_operation_owner_from_maintenance(
+    data_dir: &Path,
+    db_path: &Path,
+    snapshot: &crate::search::asset_state::SearchMaintenanceSnapshot,
+) -> Option<DoctorOperationOwnerReport> {
+    if !snapshot.active && !snapshot.orphaned {
+        return None;
+    }
+
+    let lock_path = data_dir.join("index-run.lock");
+    let pid = snapshot.pid;
+    let started_at_ms = snapshot.started_at_ms;
+    let updated_at_ms = snapshot.updated_at_ms;
+    let mode = snapshot.mode.map(|mode| mode.as_lock_value().to_string());
+    let job_kind = snapshot
+        .job_kind
+        .map(|kind| kind.as_lock_value().to_string());
+    let db_path_text = snapshot
+        .db_path
+        .as_ref()
+        .map(|path| path.display().to_string());
+    let db_path_matches_requested = snapshot
+        .db_path
+        .as_deref()
+        .map(|lock_db_path| path_identities_match(lock_db_path, db_path));
+    let owned_by_current_process = pid == Some(std::process::id());
+    let owner_confidence = if snapshot.active && owned_by_current_process {
+        DoctorOperationOwnerConfidence::CurrentProcess
+    } else if snapshot.active
+        && (pid.is_some() || started_at_ms.is_some() || snapshot.db_path.is_some())
+    {
+        DoctorOperationOwnerConfidence::ActiveAdvisoryLock
+    } else if snapshot.active {
+        DoctorOperationOwnerConfidence::ActiveMissingMetadata
+    } else {
+        DoctorOperationOwnerConfidence::StaleMetadataOnly
+    };
+    let lock_kind = if snapshot
+        .mode
+        .is_some_and(crate::search::asset_state::SearchMaintenanceMode::watch_active)
+    {
+        DoctorOperationLockKind::WatchIngestion
+    } else {
+        DoctorOperationLockKind::IndexRun
+    };
+    let mut evidence = Vec::new();
+    evidence.push("advisory-flock-state-from-index-run-lock".to_string());
+    if snapshot.orphaned {
+        evidence.push("metadata-without-active-owner".to_string());
+    }
+    if db_path_matches_requested == Some(false) {
+        evidence.push("lock-db-path-differs-from-requested-db".to_string());
+    }
+
+    Some(DoctorOperationOwnerReport {
+        lock_kind,
+        lock_path: lock_path.display().to_string(),
+        redacted_lock_path: doctor_redacted_path(&lock_path.display().to_string(), data_dir),
+        active: snapshot.active,
+        owned_by_current_process,
+        owner_confidence,
+        pid,
+        started_at_ms,
+        started_at: started_at_ms.and_then(format_timestamp_millis_rfc3339),
+        updated_at_ms,
+        updated_at: updated_at_ms.and_then(format_timestamp_millis_rfc3339),
+        mode,
+        job_id: snapshot.job_id.clone(),
+        job_kind,
+        phase: snapshot.phase.clone(),
+        db_path: db_path_text,
+        db_path_matches_requested,
+        evidence,
+        next_action: if snapshot.active {
+            "wait for the active index/watch owner to finish, then rerun cass doctor --json"
+                .to_string()
+        } else {
+            "stale metadata is advisory only; do not delete evidence manually".to_string()
+        },
+    })
+}
+
+fn doctor_operation_owner_from_doctor_lock(
+    data_dir: &Path,
+    db_path: &Path,
+    observation: &DoctorMutationLockObservation,
+) -> Option<DoctorOperationOwnerReport> {
+    let empty_metadata = BTreeMap::new();
+    let (active, owned_by_current_process, owner_confidence, metadata, unavailable_reason) =
+        match observation {
+            DoctorMutationLockObservation::Absent { .. } => return None,
+            DoctorMutationLockObservation::Available { metadata, .. } if metadata.is_empty() => {
+                return None;
+            }
+            DoctorMutationLockObservation::Available { metadata, .. } => (
+                false,
+                false,
+                DoctorOperationOwnerConfidence::StaleMetadataOnly,
+                metadata,
+                None,
+            ),
+            DoctorMutationLockObservation::Active { metadata, .. } => {
+                let pid = doctor_lock_metadata_u32(metadata, "pid");
+                let owned_by_current_process = pid == Some(std::process::id());
+                let confidence = if metadata.is_empty() {
+                    DoctorOperationOwnerConfidence::ActiveMissingMetadata
+                } else {
+                    DoctorOperationOwnerConfidence::ActiveAdvisoryLock
+                };
+                (true, owned_by_current_process, confidence, metadata, None)
+            }
+            DoctorMutationLockObservation::Acquired { metadata, .. } => (
+                true,
+                true,
+                DoctorOperationOwnerConfidence::CurrentProcess,
+                metadata,
+                None,
+            ),
+            DoctorMutationLockObservation::Unavailable { reason, .. } => (
+                false,
+                false,
+                DoctorOperationOwnerConfidence::Unavailable,
+                &empty_metadata,
+                Some(reason.as_str()),
+            ),
+        };
+
+    let lock_path = observation.path();
+    let pid = doctor_lock_metadata_u32(metadata, "pid");
+    let started_at_ms = doctor_lock_metadata_i64(metadata, "started_at_ms");
+    let updated_at_ms = doctor_lock_metadata_i64(metadata, "updated_at_ms");
+    let lock_db_path = metadata.get("db_path").cloned();
+    let db_path_matches_requested = lock_db_path
+        .as_deref()
+        .map(|lock_db_path| path_identities_match(Path::new(lock_db_path), db_path));
+    let mut evidence = Vec::new();
+    if let Some(reason) = unavailable_reason {
+        evidence.push(format!("lock-unavailable={reason}"));
+    } else if active {
+        evidence.push("doctor-mutation-lock-held".to_string());
+    } else {
+        evidence.push("doctor-mutation-lock-metadata-without-owner".to_string());
+    }
+    if metadata.get("schema_version").is_none() && unavailable_reason.is_none() {
+        evidence.push("missing-schema-version".to_string());
+    }
+
+    Some(DoctorOperationOwnerReport {
+        lock_kind: DoctorOperationLockKind::DoctorRepair,
+        lock_path: lock_path.display().to_string(),
+        redacted_lock_path: doctor_redacted_path(&lock_path.display().to_string(), data_dir),
+        active,
+        owned_by_current_process,
+        owner_confidence,
+        pid,
+        started_at_ms,
+        started_at: started_at_ms.and_then(format_timestamp_millis_rfc3339),
+        updated_at_ms,
+        updated_at: updated_at_ms.and_then(format_timestamp_millis_rfc3339),
+        mode: metadata.get("mode").cloned(),
+        job_id: metadata.get("job_id").cloned(),
+        job_kind: metadata.get("job_kind").cloned(),
+        phase: metadata.get("phase").cloned(),
+        db_path: lock_db_path,
+        db_path_matches_requested,
+        evidence,
+        next_action: if active && !owned_by_current_process {
+            "wait for the active cass doctor --fix owner to finish, then rerun cass doctor --json"
+                .to_string()
+        } else if unavailable_reason.is_some() {
+            "inspect lock path permissions before attempting a mutating doctor repair".to_string()
+        } else if active {
+            "current doctor process owns the mutation lock".to_string()
+        } else {
+            "stale doctor lock metadata is advisory; do not delete it without inspecting receipts"
+                .to_string()
+        },
+    })
+}
+
+fn doctor_interrupted_kind_for_path(path: &Path) -> DoctorInterruptedOperationKind {
+    let text = path.to_string_lossy().to_ascii_lowercase();
+    if text.contains("promot") {
+        DoctorInterruptedOperationKind::Promotion
+    } else if text.contains("restore") {
+        DoctorInterruptedOperationKind::Restore
+    } else if text.contains("cleanup") {
+        DoctorInterruptedOperationKind::Cleanup
+    } else if text.contains("backup") || text.contains("verify") {
+        DoctorInterruptedOperationKind::BackupVerification
+    } else if text.contains("receipt") {
+        DoctorInterruptedOperationKind::ReceiptIncomplete
+    } else if text.contains("event") {
+        DoctorInterruptedOperationKind::EventLogIncomplete
+    } else if text.contains("raw-mirror") || text.contains("raw_mirror") {
+        DoctorInterruptedOperationKind::RawMirrorCapture
+    } else if text.ends_with(".lock") {
+        DoctorInterruptedOperationKind::StaleLock
+    } else if text.contains("candidate") || text.contains("interrupted-repair") {
+        DoctorInterruptedOperationKind::CandidateBuild
+    } else {
+        DoctorInterruptedOperationKind::Unknown
+    }
+}
+
+fn doctor_interrupted_report_for_path(
+    data_dir: &Path,
+    path: &Path,
+    kind: DoctorInterruptedOperationKind,
+    disposition: DoctorInterruptedOperationDisposition,
+    evidence: Vec<String>,
+) -> DoctorInterruptedOperationReport {
+    let blocks_mutation = true;
+    let next_action = match disposition {
+        DoctorInterruptedOperationDisposition::NeedsInspection => {
+            "inspect interrupted doctor artifacts and receipts before running cass doctor --fix"
+        }
+        DoctorInterruptedOperationDisposition::RecoverOnNextIndexRun => {
+            "run cass status --json or cass index --full to let lexical publish recovery finalize"
+        }
+    };
+    DoctorInterruptedOperationReport {
+        kind,
+        path: path.display().to_string(),
+        redacted_path: doctor_redacted_path(&path.display().to_string(), data_dir),
+        disposition,
+        blocks_mutation,
+        safe_to_delete_automatically: false,
+        evidence,
+        next_action: next_action.to_string(),
+    }
+}
+
+fn doctor_push_interrupted_scan_entries(
+    reports: &mut Vec<DoctorInterruptedOperationReport>,
+    data_dir: &Path,
+    root: &Path,
+    evidence_label: &str,
+) {
+    const MAX_INTERRUPTED_OPERATION_REPORTS: usize = 64;
+    if reports.len() >= MAX_INTERRUPTED_OPERATION_REPORTS || !root.exists() {
+        return;
+    }
+
+    for entry in walkdir::WalkDir::new(root).max_depth(4).follow_links(false) {
+        if reports.len() >= MAX_INTERRUPTED_OPERATION_REPORTS {
+            break;
+        }
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        if entry.path() == root {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        let suspicious = entry.file_type().is_dir()
+            || name.contains("interrupted")
+            || name.contains("incomplete")
+            || name.contains("partial")
+            || name.contains("pending")
+            || name.ends_with(".tmp")
+            || name.ends_with(".lock");
+        if !suspicious {
+            continue;
+        }
+        let kind = doctor_interrupted_kind_for_path(entry.path());
+        reports.push(doctor_interrupted_report_for_path(
+            data_dir,
+            entry.path(),
+            kind,
+            DoctorInterruptedOperationDisposition::NeedsInspection,
+            vec![evidence_label.to_string()],
+        ));
+    }
+}
+
+fn doctor_lexical_publish_in_progress_backup_path(index_path: &Path) -> Option<PathBuf> {
+    let file_name = index_path.file_name()?.to_string_lossy();
+    Some(index_path.with_file_name(format!(".{file_name}.publish-in-progress.bak")))
+}
+
+fn collect_doctor_interrupted_operation_states(
+    data_dir: &Path,
+    index_path: &Path,
+) -> Vec<DoctorInterruptedOperationReport> {
+    let mut reports = Vec::new();
+    doctor_push_interrupted_scan_entries(
+        &mut reports,
+        data_dir,
+        &data_dir.join("doctor").join("tmp"),
+        "doctor-tmp-artifact",
+    );
+    doctor_push_interrupted_scan_entries(
+        &mut reports,
+        data_dir,
+        &data_dir.join("doctor").join("receipts"),
+        "doctor-receipt-artifact",
+    );
+    doctor_push_interrupted_scan_entries(
+        &mut reports,
+        data_dir,
+        &data_dir.join("doctor").join("events"),
+        "doctor-event-artifact",
+    );
+    doctor_push_interrupted_scan_entries(
+        &mut reports,
+        data_dir,
+        &data_dir.join("raw-mirror").join("v1").join("tmp"),
+        "raw-mirror-interrupted-capture",
+    );
+    doctor_push_interrupted_scan_entries(
+        &mut reports,
+        data_dir,
+        &data_dir.join("locks"),
+        "legacy-doctor-lock-artifact",
+    );
+
+    if let Some(sidecar) = doctor_lexical_publish_in_progress_backup_path(index_path)
+        && sidecar.exists()
+    {
+        reports.push(doctor_interrupted_report_for_path(
+            data_dir,
+            &sidecar,
+            DoctorInterruptedOperationKind::ParkedPublishBackup,
+            DoctorInterruptedOperationDisposition::RecoverOnNextIndexRun,
+            vec!["lexical-publish-in-progress-backup".to_string()],
+        ));
+    }
+
+    reports.sort_by(|left, right| left.path.cmp(&right.path));
+    reports
+}
+
+fn build_doctor_operation_state_report(
+    data_dir: &Path,
+    db_path: &Path,
+    index_path: &Path,
+    maintenance_snapshot: &crate::search::asset_state::SearchMaintenanceSnapshot,
+    doctor_lock: &DoctorMutationLockObservation,
+) -> DoctorOperationStateReport {
+    let mut owners = Vec::new();
+    if let Some(owner) =
+        doctor_operation_owner_from_maintenance(data_dir, db_path, maintenance_snapshot)
+    {
+        owners.push(owner);
+    }
+    if let Some(owner) = doctor_operation_owner_from_doctor_lock(data_dir, db_path, doctor_lock) {
+        owners.push(owner);
+    }
+
+    let interrupted_states = collect_doctor_interrupted_operation_states(data_dir, index_path);
+    let active_index_maintenance = maintenance_snapshot.active;
+    let active_rebuild = maintenance_snapshot.active
+        && maintenance_snapshot
+            .mode
+            .map(crate::search::asset_state::SearchMaintenanceMode::rebuild_active)
+            .unwrap_or(true);
+    let active_watch = maintenance_snapshot.active
+        && maintenance_snapshot
+            .mode
+            .is_some_and(crate::search::asset_state::SearchMaintenanceMode::watch_active);
+    let active_doctor_repair = matches!(
+        doctor_lock,
+        DoctorMutationLockObservation::Active { .. }
+            | DoctorMutationLockObservation::Acquired { .. }
+    );
+    let external_doctor_repair_active =
+        matches!(doctor_lock, DoctorMutationLockObservation::Active { .. });
+    let stale_owner_count = owners
+        .iter()
+        .filter(|owner| owner.owner_confidence == DoctorOperationOwnerConfidence::StaleMetadataOnly)
+        .count();
+    let interrupted_blocker_count = interrupted_states
+        .iter()
+        .filter(|state| state.blocks_mutation)
+        .count();
+    let mutation_blocked_reason = if active_index_maintenance {
+        Some("active index/watch maintenance lock blocks mutating doctor repair".to_string())
+    } else if external_doctor_repair_active {
+        Some("another cass doctor --fix owner holds the mutation lock".to_string())
+    } else if doctor_lock.blocks_mutation() {
+        Some("doctor mutation lock could not be inspected or acquired safely".to_string())
+    } else if interrupted_blocker_count > 0 {
+        Some(format!(
+            "{interrupted_blocker_count} interrupted doctor artifact(s) require inspection before mutation"
+        ))
+    } else {
+        None
+    };
+    let mutating_doctor_allowed = mutation_blocked_reason.is_none();
+    let next_action = match mutation_blocked_reason.as_deref() {
+        Some(reason) if reason.contains("index/watch") => {
+            "wait for cass status --json to report rebuild.active=false, then rerun cass doctor --json"
+        }
+        Some(reason) if reason.contains("another cass doctor") => {
+            "wait for the active cass doctor --fix process to finish, then rerun cass doctor --json"
+        }
+        Some(reason) if reason.contains("interrupted") => {
+            "inspect operation_state.interrupted_states before running cass doctor --fix"
+        }
+        Some(_) => "inspect operation_state.owners before running cass doctor --fix",
+        None => "mutating doctor repair is allowed by the current lock and interrupted-state model",
+    };
+
+    DoctorOperationStateReport {
+        schema_version: 1,
+        read_only_check_allowed: true,
+        mutating_doctor_allowed,
+        active_index_maintenance,
+        active_rebuild,
+        active_watch,
+        active_doctor_repair,
+        owner_count: owners.len(),
+        stale_owner_count,
+        interrupted_state_count: interrupted_states.len(),
+        mutation_blocked_reason,
+        owners,
+        interrupted_states,
+        next_action: next_action.to_string(),
+        notes: vec![
+            "Read-only doctor inspection remains allowed while repair/index owners are active.".to_string(),
+            "PID and timestamp metadata are advisory; advisory lock ownership and receipts are the authority.".to_string(),
+            "Interrupted artifacts are never deleted by this state model; they block mutation until inspected.".to_string(),
         ],
     }
 }
@@ -18740,6 +19501,130 @@ mod doctor_asset_taxonomy_tests {
         assert_eq!(
             verification_failed.exit_code_kind,
             DoctorExitCodeKind::RepairFailure
+        );
+    }
+
+    #[test]
+    fn doctor_operation_state_blocks_mutation_for_active_index_lock() {
+        use std::io::Write as _;
+
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = temp.path();
+        let db_path = data_dir.join("agent_search.db");
+        let index_path = data_dir.join("index");
+        let lock_path = data_dir.join("index-run.lock");
+        let mut lock_file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .expect("open lock file");
+        fs2::FileExt::try_lock_exclusive(&lock_file).expect("hold index lock");
+        writeln!(
+            lock_file,
+            "pid={}\nstarted_at_ms={}\nupdated_at_ms={}\ndb_path={}\nmode=index\njob_id=lexical-refresh-test\njob_kind=lexical_refresh\nphase=rebuilding",
+            std::process::id(),
+            1_733_001_111_000_i64,
+            1_733_001_112_000_i64,
+            db_path.display()
+        )
+        .expect("write lock metadata");
+        lock_file.flush().expect("flush lock metadata");
+
+        let snapshot = probe_index_run_lock(data_dir, &db_path);
+        let doctor_lock = DoctorMutationLockObservation::Absent {
+            path: doctor_mutation_lock_path(data_dir),
+        };
+        let report = build_doctor_operation_state_report(
+            data_dir,
+            &db_path,
+            &index_path,
+            &snapshot,
+            &doctor_lock,
+        );
+
+        assert!(report.read_only_check_allowed);
+        assert!(!report.mutating_doctor_allowed);
+        assert!(report.active_index_maintenance);
+        assert!(report.active_rebuild);
+        assert_eq!(report.owner_count, 1);
+        let owner = report.owners.first().expect("index owner");
+        assert_eq!(owner.lock_kind, DoctorOperationLockKind::IndexRun);
+        assert_eq!(owner.mode.as_deref(), Some("index"));
+        assert_eq!(
+            owner.owner_confidence,
+            DoctorOperationOwnerConfidence::CurrentProcess
+        );
+        assert_eq!(owner.db_path_matches_requested, Some(true));
+        assert!(
+            report
+                .mutation_blocked_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("index/watch")),
+            "operation state should explain the lock blocker: {report:#?}"
+        );
+    }
+
+    #[test]
+    fn doctor_operation_state_classifies_interrupted_artifacts_without_gc() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = temp.path();
+        let db_path = data_dir.join("agent_search.db");
+        let index_path = data_dir.join("index");
+        let interrupted_plan = data_dir
+            .join("doctor")
+            .join("tmp")
+            .join("interrupted-repair")
+            .join("plan.json");
+        std::fs::create_dir_all(interrupted_plan.parent().expect("parent"))
+            .expect("create interrupted dir");
+        std::fs::write(&interrupted_plan, br#"{"state":"interrupted"}"#)
+            .expect("write interrupted plan");
+        let sidecar = doctor_lexical_publish_in_progress_backup_path(&index_path)
+            .expect("publish sidecar path");
+        std::fs::create_dir_all(sidecar.parent().expect("sidecar parent"))
+            .expect("create sidecar parent");
+        std::fs::write(&sidecar, b"parked prior live index").expect("write parked sidecar");
+
+        let snapshot = crate::search::asset_state::SearchMaintenanceSnapshot::default();
+        let doctor_lock = DoctorMutationLockObservation::Absent {
+            path: doctor_mutation_lock_path(data_dir),
+        };
+        let report = build_doctor_operation_state_report(
+            data_dir,
+            &db_path,
+            &index_path,
+            &snapshot,
+            &doctor_lock,
+        );
+
+        assert!(!report.mutating_doctor_allowed);
+        assert!(report.interrupted_state_count >= 2);
+        assert!(
+            interrupted_plan.exists(),
+            "inspection must not delete plans"
+        );
+        assert!(
+            sidecar.exists(),
+            "inspection must not delete parked backups"
+        );
+        assert!(
+            report.interrupted_states.iter().any(|state| {
+                state.kind == DoctorInterruptedOperationKind::CandidateBuild
+                    && !state.safe_to_delete_automatically
+                    && state.blocks_mutation
+            }),
+            "candidate interrupted repair should block mutation: {report:#?}"
+        );
+        assert!(
+            report.interrupted_states.iter().any(|state| {
+                state.kind == DoctorInterruptedOperationKind::ParkedPublishBackup
+                    && state.disposition
+                        == DoctorInterruptedOperationDisposition::RecoverOnNextIndexRun
+                    && !state.safe_to_delete_automatically
+            }),
+            "publish sidecar should be classified as recoverable, not deleted: {report:#?}"
         );
     }
 
@@ -22991,7 +23876,32 @@ fn run_doctor(
     let db_path = db_override.unwrap_or_else(|| data_dir.join("agent_search.db"));
     let index_path = crate::search::tantivy::expected_index_dir(&data_dir);
     let lock_path = data_dir.join(".index.lock");
-    let rebuild_active = probe_index_run_lock(&data_dir, &db_path).active;
+    let maintenance_snapshot = probe_index_run_lock(&data_dir, &db_path);
+    let rebuild_active = maintenance_snapshot.active;
+    let mut _doctor_lock_guard: Option<DoctorMutationLockGuard> = None;
+    let doctor_lock_observation = if fix {
+        match doctor_acquire_mutation_lock(&data_dir, &db_path) {
+            Ok((guard, observation)) => {
+                _doctor_lock_guard = Some(guard);
+                observation
+            }
+            Err(observation) => observation,
+        }
+    } else {
+        doctor_probe_mutation_lock(&data_dir)
+    };
+    let operation_state = build_doctor_operation_state_report(
+        &data_dir,
+        &db_path,
+        &index_path,
+        &maintenance_snapshot,
+        &doctor_lock_observation,
+    );
+    let mutating_lock_acquired = matches!(
+        doctor_lock_observation,
+        DoctorMutationLockObservation::Acquired { .. }
+    );
+    let fix_can_mutate = fix && operation_state.mutating_doctor_allowed && mutating_lock_acquired;
     let not_initialized = !fix
         && cass_not_initialized(
             db_path.exists(),
@@ -23030,6 +23940,23 @@ fn run_doctor(
                 fix_applied: false,
             });
         };
+    }
+
+    if let Some(reason) = operation_state.mutation_blocked_reason.as_deref() {
+        let status = if fix { "fail" } else { "warn" };
+        add_check!(
+            "operation_state",
+            status,
+            format!("Doctor mutation blocked: {reason}"),
+            false
+        );
+    } else {
+        add_check!(
+            "operation_state",
+            "pass",
+            "Doctor operation state permits read-only inspection and mutating repair",
+            false
+        );
     }
 
     // 1. Check data directory exists and is writable
@@ -23525,7 +24452,7 @@ fn run_doctor(
         build_doctor_source_authority_report(&db_path, &source_inventory, &raw_mirror);
 
     // Apply fix: rebuild index if needed (only when --fix is passed)
-    if needs_rebuild && fix {
+    if needs_rebuild && fix_can_mutate {
         let stderr_is_tty = std::io::stderr().is_terminal();
         let is_robot = output_format.is_some();
         let show_progress = !is_robot && stderr_is_tty;
@@ -23735,7 +24662,7 @@ fn run_doctor(
         }
     }
 
-    let cleanup_apply_result = if fix {
+    let cleanup_apply_result = if fix_can_mutate {
         let result =
             apply_diag_quarantine_cleanup(&data_dir, &db_path, &index_path, rebuild_active);
         let cleanup_status = if result.applied {
@@ -23809,6 +24736,7 @@ fn run_doctor(
         not_initialized,
         cleanup_apply_result.as_ref(),
     );
+    let operation_exit_code_kind = operation_outcome.exit_code_kind;
 
     let elapsed_ms = start.elapsed().as_millis() as u64;
     let all_pass = checks.iter().all(|c| c.status == "pass");
@@ -23847,6 +24775,7 @@ fn run_doctor(
             "auto_fix_applied": auto_fix_applied,
             "auto_fix_actions": auto_fix_actions,
             "operation_outcome": operation_outcome,
+            "operation_state": operation_state,
             "asset_taxonomy": doctor_asset_taxonomy_report(),
             "anomaly_taxonomy": doctor_anomaly_taxonomy_report(),
             "repair_contract": doctor_repair_contract_report(),
@@ -23945,20 +24874,42 @@ fn run_doctor(
     if fail_count == 0 {
         Ok(())
     } else {
-        let err = CliError {
-            code: 5, // Data corruption code
-            kind: CliErrorKind::Doctor.kind_str(),
-            message: format!("{} failure(s) remain", fail_count),
-            hint: Some(
-                "Automatic safe repairs were attempted. Run 'cass index --full' \
+        let (code, kind, message, hint, retryable) = if operation_exit_code_kind
+            == DoctorExitCodeKind::LockBusy
+        {
+            (
+                    7,
+                    CliErrorKind::IndexBusy.kind_str(),
+                    "doctor repair blocked by an active operation lock".to_string(),
+                    Some(
+                        "Wait for the active owner to finish, then rerun 'cass doctor --json'; read operation_state.owners for the lock owner evidence."
+                            .to_string(),
+                    ),
+                    true,
+                )
+        } else {
+            (
+                5,
+                CliErrorKind::Doctor.kind_str(),
+                format!("{} failure(s) remain", fail_count),
+                Some(
+                    "Automatic safe repairs were attempted. Run 'cass index --full' \
                  to rebuild from source sessions. Re-run `cass doctor -v` or \
                  with CASS_TRACE_FILE=<path> for detailed logs — cass doctor \
                  does not produce a cass.log file itself (the rolling \
                  cass.log.YYYY-MM-DD appender is installed only for `cass \
                  tui`)."
-                    .to_string(),
-            ),
-            retryable: true,
+                        .to_string(),
+                ),
+                true,
+            )
+        };
+        let err = CliError {
+            code,
+            kind,
+            message,
+            hint,
+            retryable,
         };
         if structured_format.is_some() {
             Err(CliError::already_reported_from(&err))
@@ -26066,6 +27017,88 @@ fn response_schema_doctor_operation_outcome() -> serde_json::Value {
     })
 }
 
+fn response_schema_doctor_operation_state() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "Read-only doctor concurrency and interrupted-operation state. Mutating doctor modes must require mutating_doctor_allowed=true before attempting rebuild, cleanup, restore, or promotion.",
+        "properties": {
+            "schema_version": { "type": "integer" },
+            "read_only_check_allowed": { "type": "boolean" },
+            "mutating_doctor_allowed": { "type": "boolean" },
+            "active_index_maintenance": { "type": "boolean" },
+            "active_rebuild": { "type": "boolean" },
+            "active_watch": { "type": "boolean" },
+            "active_doctor_repair": { "type": "boolean" },
+            "owner_count": { "type": "integer" },
+            "stale_owner_count": { "type": "integer" },
+            "interrupted_state_count": { "type": "integer" },
+            "mutation_blocked_reason": { "type": ["string", "null"] },
+            "owners": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "lock_kind": { "type": "string", "description": "index_run | watch_ingestion | doctor_repair" },
+                        "lock_path": { "type": "string" },
+                        "redacted_lock_path": { "type": "string" },
+                        "active": { "type": "boolean" },
+                        "owned_by_current_process": { "type": "boolean" },
+                        "owner_confidence": { "type": "string", "description": "current_process | active_advisory_lock | active_missing_metadata | stale_metadata_only | unavailable" },
+                        "pid": { "type": ["integer", "null"] },
+                        "started_at_ms": { "type": ["integer", "null"] },
+                        "started_at": { "type": ["string", "null"] },
+                        "updated_at_ms": { "type": ["integer", "null"] },
+                        "updated_at": { "type": ["string", "null"] },
+                        "mode": { "type": ["string", "null"] },
+                        "job_id": { "type": ["string", "null"] },
+                        "job_kind": { "type": ["string", "null"] },
+                        "phase": { "type": ["string", "null"] },
+                        "db_path": { "type": ["string", "null"] },
+                        "db_path_matches_requested": { "type": ["boolean", "null"] },
+                        "evidence": { "type": "array", "items": { "type": "string" } },
+                        "next_action": { "type": "string" }
+                    }
+                }
+            },
+            "interrupted_states": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": { "type": "string" },
+                        "path": { "type": "string" },
+                        "redacted_path": { "type": "string" },
+                        "disposition": { "type": "string" },
+                        "blocks_mutation": { "type": "boolean" },
+                        "safe_to_delete_automatically": { "type": "boolean" },
+                        "evidence": { "type": "array", "items": { "type": "string" } },
+                        "next_action": { "type": "string" }
+                    }
+                }
+            },
+            "next_action": { "type": "string" },
+            "notes": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": [
+            "schema_version",
+            "read_only_check_allowed",
+            "mutating_doctor_allowed",
+            "active_index_maintenance",
+            "active_rebuild",
+            "active_watch",
+            "active_doctor_repair",
+            "owner_count",
+            "stale_owner_count",
+            "interrupted_state_count",
+            "mutation_blocked_reason",
+            "owners",
+            "interrupted_states",
+            "next_action",
+            "notes"
+        ]
+    })
+}
+
 fn response_schema_doctor_cleanup_apply() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -27270,6 +28303,7 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
                 "auto_fix_applied": { "type": "boolean" },
                 "auto_fix_actions": { "type": "array", "items": { "type": "string" } },
                 "operation_outcome": response_schema_doctor_operation_outcome(),
+                "operation_state": response_schema_doctor_operation_state(),
                 "asset_taxonomy": response_schema_opaque_object_array(),
                 "anomaly_taxonomy": response_schema_opaque_object_array(),
                 "repair_contract": response_schema_opaque_object(),
@@ -27302,7 +28336,7 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
                     }
                 }
             },
-            "required": ["status", "health_class", "healthy", "initialized", "operation_outcome", "source_authority", "checks"]
+            "required": ["status", "health_class", "healthy", "initialized", "operation_outcome", "operation_state", "source_authority", "checks"]
         }),
     );
 

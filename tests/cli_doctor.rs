@@ -2,8 +2,10 @@ use assert_cmd::Command;
 use coding_agent_search::search::tantivy::expected_index_dir;
 use frankensqlite::Connection as FrankenConnection;
 use frankensqlite::compat::{ConnectionExt, RowExt};
+use fs2::FileExt;
 use serde_json::{Value, json};
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
@@ -800,6 +802,162 @@ fn doctor_human_output_surfaces_operation_outcome() {
     assert!(
         stdout.contains("next_command: cass index --full"),
         "human doctor output should expose the next branch command:\n{stdout}"
+    );
+}
+
+#[test]
+fn doctor_fix_reports_repair_blocked_when_doctor_lock_is_active() {
+    let test_home = tempfile::tempdir().expect("tempdir");
+    let data_dir = test_home.path().join("cass-data");
+    let lock_dir = data_dir.join("doctor").join("locks");
+    fs::create_dir_all(&lock_dir).expect("create doctor lock dir");
+    let lock_path = lock_dir.join("doctor-repair.lock");
+    let mut lock_file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .expect("open doctor lock");
+    lock_file
+        .try_lock_exclusive()
+        .expect("hold doctor mutation lock");
+    writeln!(
+        lock_file,
+        "schema_version=1\npid={}\nstarted_at_ms=1733001111000\nupdated_at_ms=1733001112000\ndb_path={}\nmode=safe_auto_run\ncommand=cass doctor --fix",
+        std::process::id(),
+        data_dir.join("agent_search.db").display()
+    )
+    .expect("write lock metadata");
+    lock_file.flush().expect("flush lock");
+
+    let out = cass_cmd(test_home.path())
+        .args([
+            "doctor",
+            "--json",
+            "--fix",
+            "--data-dir",
+            data_dir.to_str().expect("utf8"),
+        ])
+        .output()
+        .expect("run blocked cass doctor --json --fix");
+    assert!(
+        !out.status.success(),
+        "mutating doctor should return a lock/busy failure when another doctor owns the lock"
+    );
+
+    let payload: Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    assert_eq!(
+        payload["operation_outcome"]["kind"].as_str(),
+        Some("repair-blocked")
+    );
+    assert_eq!(
+        payload["operation_outcome"]["exit_code_kind"].as_str(),
+        Some("lock-busy")
+    );
+    let operation_state = &payload["operation_state"];
+    assert_eq!(
+        operation_state["active_doctor_repair"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        operation_state["mutating_doctor_allowed"].as_bool(),
+        Some(false)
+    );
+    assert!(
+        operation_state["mutation_blocked_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("another cass doctor")),
+        "operation_state should explain the active doctor lock: {operation_state:#}"
+    );
+    assert!(
+        payload.get("cleanup_apply").is_none(),
+        "doctor must not enter cleanup_apply while the mutation lock is blocked: {payload:#}"
+    );
+    let operation_check = payload["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .find(|check| check["name"].as_str() == Some("operation_state"))
+        .expect("operation_state check");
+    assert_eq!(operation_check["status"].as_str(), Some("fail"));
+    assert_eq!(
+        operation_check["anomaly_class"].as_str(),
+        Some("lock-contention")
+    );
+}
+
+#[test]
+fn doctor_json_reports_interrupted_operation_state_without_deleting_artifacts() {
+    let test_home = tempfile::tempdir().expect("tempdir");
+    let data_dir = test_home.path().join("cass-data");
+    let interrupted_plan = data_dir
+        .join("doctor")
+        .join("tmp")
+        .join("interrupted-repair")
+        .join("plan.json");
+    fs::create_dir_all(interrupted_plan.parent().expect("parent")).expect("create interrupted dir");
+    fs::write(&interrupted_plan, br#"{"state":"interrupted"}"#).expect("write interrupted plan");
+
+    let out = cass_cmd(test_home.path())
+        .args([
+            "doctor",
+            "--json",
+            "--data-dir",
+            data_dir.to_str().expect("utf8"),
+        ])
+        .output()
+        .expect("run cass doctor --json");
+    assert!(
+        out.status.success(),
+        "read-only doctor should report interrupted state without failing: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        interrupted_plan.exists(),
+        "read-only doctor must not delete interrupted repair evidence"
+    );
+
+    let payload: Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    let operation_state = &payload["operation_state"];
+    assert_eq!(
+        operation_state["read_only_check_allowed"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(
+        operation_state["mutating_doctor_allowed"].as_bool(),
+        Some(false)
+    );
+    assert!(
+        operation_state["interrupted_state_count"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1,
+        "operation_state should count interrupted artifacts: {operation_state:#}"
+    );
+    assert!(
+        operation_state["interrupted_states"]
+            .as_array()
+            .expect("interrupted states")
+            .iter()
+            .any(|state| {
+                state["kind"].as_str() == Some("candidate_build")
+                    && state["blocks_mutation"].as_bool() == Some(true)
+                    && state["safe_to_delete_automatically"].as_bool() == Some(false)
+            }),
+        "interrupted plan should be classified as non-deletable candidate evidence: {operation_state:#}"
+    );
+    let operation_check = payload["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .find(|check| check["name"].as_str() == Some("operation_state"))
+        .expect("operation_state check");
+    assert_eq!(operation_check["status"].as_str(), Some("warn"));
+    assert_eq!(
+        operation_check["anomaly_class"].as_str(),
+        Some("interrupted-repair")
     );
 }
 

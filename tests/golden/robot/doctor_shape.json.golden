@@ -78,6 +78,65 @@
         }
       }
     },
+    "operation_state": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "integer"
+        },
+        "read_only_check_allowed": {
+          "type": "boolean"
+        },
+        "mutating_doctor_allowed": {
+          "type": "boolean"
+        },
+        "active_index_maintenance": {
+          "type": "boolean"
+        },
+        "active_rebuild": {
+          "type": "boolean"
+        },
+        "active_watch": {
+          "type": "boolean"
+        },
+        "active_doctor_repair": {
+          "type": "boolean"
+        },
+        "owner_count": {
+          "type": "integer"
+        },
+        "stale_owner_count": {
+          "type": "integer"
+        },
+        "interrupted_state_count": {
+          "type": "integer"
+        },
+        "mutation_blocked_reason": {
+          "type": "null"
+        },
+        "owners": {
+          "type": "array",
+          "items": {
+            "type": "unknown"
+          }
+        },
+        "interrupted_states": {
+          "type": "array",
+          "items": {
+            "type": "unknown"
+          }
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "asset_taxonomy": {
       "type": "array",
       "items": {

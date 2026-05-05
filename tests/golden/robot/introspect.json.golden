@@ -2445,6 +2445,212 @@
             "exit_code_kind"
           ]
         },
+        "operation_state": {
+          "type": "object",
+          "description": "Read-only doctor concurrency and interrupted-operation state. Mutating doctor modes must require mutating_doctor_allowed=true before attempting rebuild, cleanup, restore, or promotion.",
+          "properties": {
+            "schema_version": {
+              "type": "integer"
+            },
+            "read_only_check_allowed": {
+              "type": "boolean"
+            },
+            "mutating_doctor_allowed": {
+              "type": "boolean"
+            },
+            "active_index_maintenance": {
+              "type": "boolean"
+            },
+            "active_rebuild": {
+              "type": "boolean"
+            },
+            "active_watch": {
+              "type": "boolean"
+            },
+            "active_doctor_repair": {
+              "type": "boolean"
+            },
+            "owner_count": {
+              "type": "integer"
+            },
+            "stale_owner_count": {
+              "type": "integer"
+            },
+            "interrupted_state_count": {
+              "type": "integer"
+            },
+            "mutation_blocked_reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "owners": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "lock_kind": {
+                    "type": "string",
+                    "description": "index_run | watch_ingestion | doctor_repair"
+                  },
+                  "lock_path": {
+                    "type": "string"
+                  },
+                  "redacted_lock_path": {
+                    "type": "string"
+                  },
+                  "active": {
+                    "type": "boolean"
+                  },
+                  "owned_by_current_process": {
+                    "type": "boolean"
+                  },
+                  "owner_confidence": {
+                    "type": "string",
+                    "description": "current_process | active_advisory_lock | active_missing_metadata | stale_metadata_only | unavailable"
+                  },
+                  "pid": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "started_at_ms": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "started_at": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "updated_at_ms": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "updated_at": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "mode": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "job_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "job_kind": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "phase": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "db_path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "db_path_matches_requested": {
+                    "type": [
+                      "boolean",
+                      "null"
+                    ]
+                  },
+                  "evidence": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "next_action": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "interrupted_states": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string"
+                  },
+                  "path": {
+                    "type": "string"
+                  },
+                  "redacted_path": {
+                    "type": "string"
+                  },
+                  "disposition": {
+                    "type": "string"
+                  },
+                  "blocks_mutation": {
+                    "type": "boolean"
+                  },
+                  "safe_to_delete_automatically": {
+                    "type": "boolean"
+                  },
+                  "evidence": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "next_action": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "next_action": {
+              "type": "string"
+            },
+            "notes": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "schema_version",
+            "read_only_check_allowed",
+            "mutating_doctor_allowed",
+            "active_index_maintenance",
+            "active_rebuild",
+            "active_watch",
+            "active_doctor_repair",
+            "owner_count",
+            "stale_owner_count",
+            "interrupted_state_count",
+            "mutation_blocked_reason",
+            "owners",
+            "interrupted_states",
+            "next_action",
+            "notes"
+          ]
+        },
         "asset_taxonomy": {
           "type": "array",
           "items": {
@@ -4225,6 +4431,7 @@
         "healthy",
         "initialized",
         "operation_outcome",
+        "operation_state",
         "source_authority",
         "checks"
       ]

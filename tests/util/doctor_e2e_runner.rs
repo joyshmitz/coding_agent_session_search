@@ -644,6 +644,7 @@ pub fn default_doctor_e2e_scenarios() -> Vec<DoctorE2eScenarioSpec> {
         .require_json_pointer("/source_inventory")
         .require_json_pointer("/raw_mirror")
         .require_json_pointer("/operation_outcome/kind")
+        .require_json_pointer("/operation_state/mutating_doctor_allowed")
         .require_json_pointer("/source_authority/selected_authority"),
         DoctorE2eScenarioSpec::new(
             "quick-mirror-missing",
@@ -652,6 +653,7 @@ pub fn default_doctor_e2e_scenarios() -> Vec<DoctorE2eScenarioSpec> {
         )
         .require_json_pointer("/source_inventory")
         .require_json_pointer("/operation_outcome/kind")
+        .require_json_pointer("/operation_state/mutating_doctor_allowed")
         .require_json_pointer("/source_authority/selected_authority"),
     ]
 }

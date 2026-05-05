@@ -24,6 +24,27 @@
     "artifact_manifest_path": null,
     "exit_code_kind": "health-failure"
   },
+  "operation_state": {
+    "schema_version": 1,
+    "read_only_check_allowed": true,
+    "mutating_doctor_allowed": true,
+    "active_index_maintenance": false,
+    "active_rebuild": false,
+    "active_watch": false,
+    "active_doctor_repair": false,
+    "owner_count": 0,
+    "stale_owner_count": 0,
+    "interrupted_state_count": 0,
+    "mutation_blocked_reason": null,
+    "owners": [],
+    "interrupted_states": [],
+    "next_action": "mutating doctor repair is allowed by the current lock and interrupted-state model",
+    "notes": [
+      "Read-only doctor inspection remains allowed while repair/index owners are active.",
+      "PID and timestamp metadata are advisory; advisory lock ownership and receipts are the authority.",
+      "Interrupted artifacts are never deleted by this state model; they block mutation until inspected."
+    ]
+  },
   "asset_taxonomy": [
     {
       "asset_class": "source_session_log",
@@ -1857,6 +1878,21 @@
     ]
   },
   "checks": [
+    {
+      "name": "operation_state",
+      "status": "pass",
+      "message": "Doctor operation state permits read-only inspection and mutating repair",
+      "anomaly_class": "healthy",
+      "health_class": "healthy",
+      "severity": "info",
+      "affected_asset_class": "unknown",
+      "data_loss_risk": "none",
+      "recommended_action": "none",
+      "safe_for_auto_repair": false,
+      "default_outcome_kind": "no_op",
+      "fix_available": false,
+      "fix_applied": false
+    },
     {
       "name": "data_directory",
       "status": "pass",
