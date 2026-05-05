@@ -12652,6 +12652,458 @@ fn doctor_asset_class_for_cleanup_disposition(
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorRepairMode {
+    #[default]
+    Check,
+    RepairDryRun,
+    RepairApply,
+    CleanupDryRun,
+    CleanupApply,
+    ReconstructDryRun,
+    ReconstructPromote,
+    RestoreRehearsal,
+    RestoreApply,
+    SupportBundle,
+    BaselineDiff,
+    SafeAutoRun,
+    EmergencyForce,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorApprovalRequirement {
+    #[default]
+    None,
+    ApprovalFingerprint,
+    ExplicitOperatorConfirmation,
+    RehearsalReceipt,
+    Refused,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorRepairOutcomeKind {
+    #[default]
+    NoOp,
+    Planned,
+    Applied,
+    Partial,
+    Blocked,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum DoctorRepairRetrySafety {
+    #[default]
+    SafeToRetry,
+    RetryAfterSameDryRun,
+    RetryAfterInspection,
+    DoNotRetryWithoutReview,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DoctorRepairModePolicy {
+    mode: DoctorRepairMode,
+    mutates: bool,
+    robot_allowed: bool,
+    approval_requirement: DoctorApprovalRequirement,
+    allowed_mutation_asset_classes: &'static [DoctorAssetClass],
+    required_fields: &'static [&'static str],
+    stdout_contract: &'static str,
+    stderr_contract: &'static str,
+    aborts_on: &'static [&'static str],
+    notes: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorRepairModePolicyReport {
+    mode: DoctorRepairMode,
+    mutates: bool,
+    robot_allowed: bool,
+    approval_requirement: DoctorApprovalRequirement,
+    allowed_mutation_asset_classes: Vec<DoctorAssetClass>,
+    required_fields: Vec<&'static str>,
+    stdout_contract: &'static str,
+    stderr_contract: &'static str,
+    aborts_on: Vec<&'static str>,
+    notes: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorRepairLegacyAliasReport {
+    invocation: &'static str,
+    mode: DoctorRepairMode,
+    notes: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DoctorRepairContractReport {
+    default_mode: DoctorRepairMode,
+    default_non_destructive: bool,
+    fail_closed: bool,
+    mode_policies: Vec<DoctorRepairModePolicyReport>,
+    legacy_aliases: Vec<DoctorRepairLegacyAliasReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+struct DoctorRepairReceipt {
+    receipt_kind: &'static str,
+    mode: DoctorRepairMode,
+    outcome_kind: DoctorRepairOutcomeKind,
+    approval_fingerprint: String,
+    planned_action_count: usize,
+    applied_action_count: usize,
+    skipped_action_count: usize,
+    reclaimed_bytes: u64,
+    blocked_reasons: Vec<String>,
+}
+
+#[cfg(test)]
+const DOCTOR_REPAIR_ALL_MODES: &[DoctorRepairMode] = &[
+    DoctorRepairMode::Check,
+    DoctorRepairMode::RepairDryRun,
+    DoctorRepairMode::RepairApply,
+    DoctorRepairMode::CleanupDryRun,
+    DoctorRepairMode::CleanupApply,
+    DoctorRepairMode::ReconstructDryRun,
+    DoctorRepairMode::ReconstructPromote,
+    DoctorRepairMode::RestoreRehearsal,
+    DoctorRepairMode::RestoreApply,
+    DoctorRepairMode::SupportBundle,
+    DoctorRepairMode::BaselineDiff,
+    DoctorRepairMode::SafeAutoRun,
+    DoctorRepairMode::EmergencyForce,
+];
+
+const DOCTOR_REPAIR_NO_MUTATION_ASSETS: &[DoctorAssetClass] = &[];
+const DOCTOR_REPAIR_DERIVED_CLEANUP_ASSETS: &[DoctorAssetClass] = &[
+    DoctorAssetClass::RetainedPublishBackup,
+    DoctorAssetClass::ReclaimableDerivedCache,
+    DoctorAssetClass::MemoCache,
+];
+const DOCTOR_REPAIR_REBUILD_ASSETS: &[DoctorAssetClass] = &[
+    DoctorAssetClass::DerivedLexicalIndex,
+    DoctorAssetClass::DerivedSemanticIndex,
+    DoctorAssetClass::ReclaimableDerivedCache,
+];
+const DOCTOR_REPAIR_RESTORE_ASSETS: &[DoctorAssetClass] = &[
+    DoctorAssetClass::CanonicalArchiveDb,
+    DoctorAssetClass::ArchiveDbSidecar,
+    DoctorAssetClass::BackupBundle,
+];
+const DOCTOR_REPAIR_RECONSTRUCT_ASSETS: &[DoctorAssetClass] = &[
+    DoctorAssetClass::RawMirrorBlob,
+    DoctorAssetClass::CanonicalArchiveDb,
+    DoctorAssetClass::ArchiveDbSidecar,
+    DoctorAssetClass::OperationReceipt,
+];
+
+const DOCTOR_REPAIR_READ_ONLY_FIELDS: &[&str] = &["mode", "outcome_kind"];
+const DOCTOR_REPAIR_MUTATION_FIELDS: &[&str] = &[
+    "mode",
+    "approval_fingerprint",
+    "planned_actions",
+    "blocked_reasons",
+    "outcome_kind",
+    "retry_safety",
+    "receipt",
+];
+const DOCTOR_REPAIR_REHEARSAL_FIELDS: &[&str] =
+    &["mode", "planned_actions", "blocked_reasons", "outcome_kind"];
+const DOCTOR_REPAIR_READ_ONLY_ABORTS: &[&str] = &["schema_error", "io_error"];
+const DOCTOR_REPAIR_MUTATION_ABORTS: &[&str] = &[
+    "active_rebuild_lock",
+    "approval_fingerprint_missing",
+    "approval_fingerprint_mismatched",
+    "unsafe_asset_class",
+    "unsafe_path",
+    "verification_failed",
+];
+const DOCTOR_REPAIR_EMERGENCY_ABORTS: &[&str] = &["always_refused_until_explicitly_implemented"];
+
+const DOCTOR_REPAIR_MODE_POLICY_TABLE: &[DoctorRepairModePolicy] = &[
+    DoctorRepairModePolicy {
+        mode: DoctorRepairMode::Check,
+        mutates: false,
+        robot_allowed: true,
+        approval_requirement: DoctorApprovalRequirement::None,
+        allowed_mutation_asset_classes: DOCTOR_REPAIR_NO_MUTATION_ASSETS,
+        required_fields: DOCTOR_REPAIR_READ_ONLY_FIELDS,
+        stdout_contract: "stdout contains data only in robot mode",
+        stderr_contract: "stderr contains diagnostics only",
+        aborts_on: DOCTOR_REPAIR_READ_ONLY_ABORTS,
+        notes: "Default cass doctor mode; never mutates user or derived assets.",
+    },
+    DoctorRepairModePolicy {
+        mode: DoctorRepairMode::RepairDryRun,
+        mutates: false,
+        robot_allowed: true,
+        approval_requirement: DoctorApprovalRequirement::None,
+        allowed_mutation_asset_classes: DOCTOR_REPAIR_NO_MUTATION_ASSETS,
+        required_fields: DOCTOR_REPAIR_REHEARSAL_FIELDS,
+        stdout_contract: "stdout describes the plan and fingerprint only",
+        stderr_contract: "stderr contains diagnostics only",
+        aborts_on: DOCTOR_REPAIR_READ_ONLY_ABORTS,
+        notes: "Plans repair work without changing filesystem or archive state.",
+    },
+    DoctorRepairModePolicy {
+        mode: DoctorRepairMode::RepairApply,
+        mutates: true,
+        robot_allowed: true,
+        approval_requirement: DoctorApprovalRequirement::ApprovalFingerprint,
+        allowed_mutation_asset_classes: DOCTOR_REPAIR_REBUILD_ASSETS,
+        required_fields: DOCTOR_REPAIR_MUTATION_FIELDS,
+        stdout_contract: "stdout emits an apply receipt in robot mode",
+        stderr_contract: "stderr contains progress and diagnostics only",
+        aborts_on: DOCTOR_REPAIR_MUTATION_ABORTS,
+        notes: "Applies verified derived-index repairs after matching the dry-run fingerprint.",
+    },
+    DoctorRepairModePolicy {
+        mode: DoctorRepairMode::CleanupDryRun,
+        mutates: false,
+        robot_allowed: true,
+        approval_requirement: DoctorApprovalRequirement::None,
+        allowed_mutation_asset_classes: DOCTOR_REPAIR_NO_MUTATION_ASSETS,
+        required_fields: DOCTOR_REPAIR_REHEARSAL_FIELDS,
+        stdout_contract: "stdout emits cleanup inventory and approval fingerprint",
+        stderr_contract: "stderr contains diagnostics only",
+        aborts_on: DOCTOR_REPAIR_READ_ONLY_ABORTS,
+        notes: "Inventories reclaimable derived assets without pruning anything.",
+    },
+    DoctorRepairModePolicy {
+        mode: DoctorRepairMode::CleanupApply,
+        mutates: true,
+        robot_allowed: true,
+        approval_requirement: DoctorApprovalRequirement::ApprovalFingerprint,
+        allowed_mutation_asset_classes: DOCTOR_REPAIR_DERIVED_CLEANUP_ASSETS,
+        required_fields: DOCTOR_REPAIR_MUTATION_FIELDS,
+        stdout_contract: "stdout emits cleanup apply actions and receipt in robot mode",
+        stderr_contract: "stderr contains progress and diagnostics only",
+        aborts_on: DOCTOR_REPAIR_MUTATION_ABORTS,
+        notes: "Prunes only derived reclaimable assets after path and taxonomy gates pass.",
+    },
+    DoctorRepairModePolicy {
+        mode: DoctorRepairMode::ReconstructDryRun,
+        mutates: false,
+        robot_allowed: true,
+        approval_requirement: DoctorApprovalRequirement::None,
+        allowed_mutation_asset_classes: DOCTOR_REPAIR_NO_MUTATION_ASSETS,
+        required_fields: DOCTOR_REPAIR_REHEARSAL_FIELDS,
+        stdout_contract: "stdout emits reconstruct candidates and promotion fingerprint",
+        stderr_contract: "stderr contains diagnostics only",
+        aborts_on: DOCTOR_REPAIR_READ_ONLY_ABORTS,
+        notes: "Previews archive reconstruction from preserved raw mirrors.",
+    },
+    DoctorRepairModePolicy {
+        mode: DoctorRepairMode::ReconstructPromote,
+        mutates: true,
+        robot_allowed: false,
+        approval_requirement: DoctorApprovalRequirement::ApprovalFingerprint,
+        allowed_mutation_asset_classes: DOCTOR_REPAIR_RECONSTRUCT_ASSETS,
+        required_fields: DOCTOR_REPAIR_MUTATION_FIELDS,
+        stdout_contract: "stdout emits promotion receipt after verification",
+        stderr_contract: "stderr contains progress and diagnostics only",
+        aborts_on: DOCTOR_REPAIR_MUTATION_ABORTS,
+        notes: "Promotes reconstructed archive state only after preserving evidence and matching a plan.",
+    },
+    DoctorRepairModePolicy {
+        mode: DoctorRepairMode::RestoreRehearsal,
+        mutates: false,
+        robot_allowed: true,
+        approval_requirement: DoctorApprovalRequirement::None,
+        allowed_mutation_asset_classes: DOCTOR_REPAIR_NO_MUTATION_ASSETS,
+        required_fields: DOCTOR_REPAIR_REHEARSAL_FIELDS,
+        stdout_contract: "stdout emits restore preflight and rehearsal receipt",
+        stderr_contract: "stderr contains diagnostics only",
+        aborts_on: DOCTOR_REPAIR_READ_ONLY_ABORTS,
+        notes: "Validates restore inputs without replacing archive state.",
+    },
+    DoctorRepairModePolicy {
+        mode: DoctorRepairMode::RestoreApply,
+        mutates: true,
+        robot_allowed: false,
+        approval_requirement: DoctorApprovalRequirement::RehearsalReceipt,
+        allowed_mutation_asset_classes: DOCTOR_REPAIR_RESTORE_ASSETS,
+        required_fields: DOCTOR_REPAIR_MUTATION_FIELDS,
+        stdout_contract: "stdout emits restore receipt after verification",
+        stderr_contract: "stderr contains progress and diagnostics only",
+        aborts_on: DOCTOR_REPAIR_MUTATION_ABORTS,
+        notes: "Requires a rehearsal receipt before touching canonical archive state.",
+    },
+    DoctorRepairModePolicy {
+        mode: DoctorRepairMode::SupportBundle,
+        mutates: false,
+        robot_allowed: true,
+        approval_requirement: DoctorApprovalRequirement::None,
+        allowed_mutation_asset_classes: DOCTOR_REPAIR_NO_MUTATION_ASSETS,
+        required_fields: DOCTOR_REPAIR_READ_ONLY_FIELDS,
+        stdout_contract: "stdout emits bundle metadata in robot mode",
+        stderr_contract: "stderr contains diagnostics only",
+        aborts_on: DOCTOR_REPAIR_READ_ONLY_ABORTS,
+        notes: "May redact/export evidence but does not prune or rewrite archives.",
+    },
+    DoctorRepairModePolicy {
+        mode: DoctorRepairMode::BaselineDiff,
+        mutates: false,
+        robot_allowed: true,
+        approval_requirement: DoctorApprovalRequirement::None,
+        allowed_mutation_asset_classes: DOCTOR_REPAIR_NO_MUTATION_ASSETS,
+        required_fields: DOCTOR_REPAIR_READ_ONLY_FIELDS,
+        stdout_contract: "stdout emits baseline comparison data in robot mode",
+        stderr_contract: "stderr contains diagnostics only",
+        aborts_on: DOCTOR_REPAIR_READ_ONLY_ABORTS,
+        notes: "Compares current state against baselines without mutation.",
+    },
+    DoctorRepairModePolicy {
+        mode: DoctorRepairMode::SafeAutoRun,
+        mutates: true,
+        robot_allowed: true,
+        approval_requirement: DoctorApprovalRequirement::ApprovalFingerprint,
+        allowed_mutation_asset_classes: DOCTOR_REPAIR_DERIVED_CLEANUP_ASSETS,
+        required_fields: DOCTOR_REPAIR_MUTATION_FIELDS,
+        stdout_contract: "stdout emits every sub-action receipt in robot mode",
+        stderr_contract: "stderr contains progress and diagnostics only",
+        aborts_on: DOCTOR_REPAIR_MUTATION_ABORTS,
+        notes: "Legacy --fix maps here and may only apply individually safe, fingerprinted repairs.",
+    },
+    DoctorRepairModePolicy {
+        mode: DoctorRepairMode::EmergencyForce,
+        mutates: false,
+        robot_allowed: false,
+        approval_requirement: DoctorApprovalRequirement::Refused,
+        allowed_mutation_asset_classes: DOCTOR_REPAIR_NO_MUTATION_ASSETS,
+        required_fields: DOCTOR_REPAIR_READ_ONLY_FIELDS,
+        stdout_contract: "stdout emits a refusal envelope",
+        stderr_contract: "stderr explains the unsupported override request",
+        aborts_on: DOCTOR_REPAIR_EMERGENCY_ABORTS,
+        notes: "Declared explicitly so override-shaped requests fail closed instead of improvising.",
+    },
+];
+
+fn doctor_repair_mode_policy(mode: DoctorRepairMode) -> &'static DoctorRepairModePolicy {
+    DOCTOR_REPAIR_MODE_POLICY_TABLE
+        .iter()
+        .find(|policy| policy.mode == mode)
+        .expect("doctor repair mode policy table must cover every mode")
+}
+
+fn doctor_repair_mode_allows_asset_mutation(
+    mode: DoctorRepairMode,
+    asset_class: DoctorAssetClass,
+) -> bool {
+    let policy = doctor_repair_mode_policy(mode);
+    policy.mutates
+        && policy.allowed_mutation_asset_classes.contains(&asset_class)
+        && doctor_asset_allows_operation(asset_class, DoctorAssetOperation::PruneReclaim)
+        && doctor_asset_safe_to_gc(asset_class, true)
+}
+
+fn doctor_repair_mode_policy_report() -> Vec<DoctorRepairModePolicyReport> {
+    DOCTOR_REPAIR_MODE_POLICY_TABLE
+        .iter()
+        .map(|policy| DoctorRepairModePolicyReport {
+            mode: policy.mode,
+            mutates: policy.mutates,
+            robot_allowed: policy.robot_allowed,
+            approval_requirement: policy.approval_requirement,
+            allowed_mutation_asset_classes: policy.allowed_mutation_asset_classes.to_vec(),
+            required_fields: policy.required_fields.to_vec(),
+            stdout_contract: policy.stdout_contract,
+            stderr_contract: policy.stderr_contract,
+            aborts_on: policy.aborts_on.to_vec(),
+            notes: policy.notes,
+        })
+        .collect()
+}
+
+fn doctor_repair_contract_report() -> DoctorRepairContractReport {
+    DoctorRepairContractReport {
+        default_mode: DoctorRepairMode::Check,
+        default_non_destructive: true,
+        fail_closed: true,
+        mode_policies: doctor_repair_mode_policy_report(),
+        legacy_aliases: vec![
+            DoctorRepairLegacyAliasReport {
+                invocation: "cass doctor",
+                mode: DoctorRepairMode::Check,
+                notes: "default inspection path; no mutation",
+            },
+            DoctorRepairLegacyAliasReport {
+                invocation: "cass doctor --json",
+                mode: DoctorRepairMode::Check,
+                notes: "robot inspection path; stdout is JSON data only",
+            },
+            DoctorRepairLegacyAliasReport {
+                invocation: "cass doctor --fix",
+                mode: DoctorRepairMode::SafeAutoRun,
+                notes: "legacy repair entrypoint; each mutating sub-action must still carry its own mode and fingerprint",
+            },
+            DoctorRepairLegacyAliasReport {
+                invocation: "cass doctor --fix --force-rebuild",
+                mode: DoctorRepairMode::RepairApply,
+                notes: "legacy forced derived-index rebuild request; canonical archives remain protected",
+            },
+        ],
+    }
+}
+
+fn cleanup_apply_outcome_kind(result: &DiagCleanupApplyResult) -> DoctorRepairOutcomeKind {
+    if !result.blocked_reasons.is_empty() && result.pruned_asset_count == 0 {
+        DoctorRepairOutcomeKind::Blocked
+    } else if result.pruned_asset_count > 0 && result.skipped_asset_count > 0 {
+        DoctorRepairOutcomeKind::Partial
+    } else if result.pruned_asset_count > 0 {
+        DoctorRepairOutcomeKind::Applied
+    } else if result.skipped_asset_count > 0 {
+        DoctorRepairOutcomeKind::Partial
+    } else {
+        DoctorRepairOutcomeKind::NoOp
+    }
+}
+
+fn cleanup_apply_retry_safety(result: &DiagCleanupApplyResult) -> DoctorRepairRetrySafety {
+    match result.outcome_kind {
+        DoctorRepairOutcomeKind::Applied | DoctorRepairOutcomeKind::NoOp => {
+            DoctorRepairRetrySafety::SafeToRetry
+        }
+        DoctorRepairOutcomeKind::Partial => DoctorRepairRetrySafety::RetryAfterSameDryRun,
+        DoctorRepairOutcomeKind::Blocked => DoctorRepairRetrySafety::RetryAfterInspection,
+        DoctorRepairOutcomeKind::Failed | DoctorRepairOutcomeKind::Planned => {
+            DoctorRepairRetrySafety::DoNotRetryWithoutReview
+        }
+    }
+}
+
+fn finalize_cleanup_apply_contract(result: &mut DiagCleanupApplyResult) {
+    result.mode = DoctorRepairMode::CleanupApply;
+    result.approval_requirement = DoctorApprovalRequirement::ApprovalFingerprint;
+    result.outcome_kind = cleanup_apply_outcome_kind(result);
+    result.retry_safety = cleanup_apply_retry_safety(result);
+    result.planned_actions = result.actions.clone();
+    result.receipt = DoctorRepairReceipt {
+        receipt_kind: "doctor_cleanup_apply_v1",
+        mode: result.mode,
+        outcome_kind: result.outcome_kind,
+        approval_fingerprint: result.approval_fingerprint.clone(),
+        planned_action_count: result.planned_actions.len(),
+        applied_action_count: result
+            .planned_actions
+            .iter()
+            .filter(|action| action.applied)
+            .count(),
+        skipped_action_count: result
+            .planned_actions
+            .iter()
+            .filter(|action| action.skipped)
+            .count(),
+        reclaimed_bytes: result.reclaimed_bytes,
+        blocked_reasons: result.blocked_reasons.clone(),
+    };
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct DiagQuarantineArtifact {
     #[serde(flatten)]
@@ -12742,6 +13194,10 @@ struct DiagQuarantineReport {
 
 #[derive(Debug, Clone, Serialize, Default)]
 struct DiagCleanupApplyResult {
+    mode: DoctorRepairMode,
+    approval_requirement: DoctorApprovalRequirement,
+    outcome_kind: DoctorRepairOutcomeKind,
+    retry_safety: DoctorRepairRetrySafety,
     requested: bool,
     applied: bool,
     approval_fingerprint: String,
@@ -12761,7 +13217,9 @@ struct DiagCleanupApplyResult {
     reclaimed_bytes: u64,
     before_inventory: DiagCleanupApplyInventory,
     after_inventory: DiagCleanupApplyInventory,
+    planned_actions: Vec<DiagCleanupApplyAction>,
     actions: Vec<DiagCleanupApplyAction>,
+    receipt: DoctorRepairReceipt,
     warnings: Vec<String>,
 }
 
@@ -13297,6 +13755,8 @@ fn apply_diag_quarantine_cleanup(
     };
 
     let mut result = DiagCleanupApplyResult {
+        mode: DoctorRepairMode::CleanupApply,
+        approval_requirement: DoctorApprovalRequirement::ApprovalFingerprint,
         requested: true,
         approval_fingerprint: plan.approval_fingerprint.clone(),
         apply_allowed: !rebuild_active
@@ -13323,6 +13783,7 @@ fn apply_diag_quarantine_cleanup(
     if rebuild_active {
         let after = collect_diag_quarantine_report(data_dir, index_path);
         fill_cleanup_after_summary(&mut result, &after);
+        finalize_cleanup_apply_contract(&mut result);
         return result;
     }
 
@@ -13479,6 +13940,7 @@ fn apply_diag_quarantine_cleanup(
     let after = collect_diag_quarantine_report(data_dir, index_path);
     fill_cleanup_after_summary(&mut result, &after);
     result.applied = result.pruned_asset_count > 0;
+    finalize_cleanup_apply_contract(&mut result);
     result
 }
 
@@ -13516,6 +13978,12 @@ fn prune_cleanup_target(
     index_path: &Path,
     asset_class: DoctorAssetClass,
 ) -> Result<u64, String> {
+    if !doctor_repair_mode_allows_asset_mutation(DoctorRepairMode::CleanupApply, asset_class) {
+        return Err(format!(
+            "refusing to prune asset class {:?}: cleanup_apply mode does not allow this mutation",
+            asset_class
+        ));
+    }
     if !doctor_asset_safe_to_gc(asset_class, true) {
         return Err(format!(
             "refusing to prune asset class {:?}: taxonomy does not allow automatic reclaim",
@@ -13818,6 +14286,165 @@ mod doctor_asset_taxonomy_tests {
                 operation
             ));
         }
+    }
+
+    #[test]
+    fn doctor_repair_mode_policy_covers_every_mode_and_asset_class() {
+        let policy_modes: HashSet<_> = DOCTOR_REPAIR_MODE_POLICY_TABLE
+            .iter()
+            .map(|policy| policy.mode)
+            .collect();
+        let expected_modes: HashSet<_> = DOCTOR_REPAIR_ALL_MODES.iter().copied().collect();
+        assert_eq!(
+            policy_modes, expected_modes,
+            "every advertised doctor repair mode needs a fail-closed policy row"
+        );
+
+        for &mode in DOCTOR_REPAIR_ALL_MODES {
+            let policy = doctor_repair_mode_policy(mode);
+            for &asset_class in ALL_DOCTOR_ASSET_CLASSES {
+                let allowed = doctor_repair_mode_allows_asset_mutation(mode, asset_class);
+                if allowed {
+                    assert!(
+                        policy.mutates,
+                        "{mode:?} cannot allow {asset_class:?} unless the mode is mutating"
+                    );
+                    assert!(
+                        doctor_asset_safe_to_gc(asset_class, true),
+                        "{mode:?} cannot mutate {asset_class:?} unless the asset taxonomy allows safe reclaim"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn default_and_dry_run_modes_are_read_only() {
+        for mode in [
+            DoctorRepairMode::Check,
+            DoctorRepairMode::RepairDryRun,
+            DoctorRepairMode::CleanupDryRun,
+            DoctorRepairMode::ReconstructDryRun,
+            DoctorRepairMode::RestoreRehearsal,
+            DoctorRepairMode::SupportBundle,
+            DoctorRepairMode::BaselineDiff,
+        ] {
+            let policy = doctor_repair_mode_policy(mode);
+            assert!(!policy.mutates, "{mode:?} must be read-only");
+            assert_eq!(policy.approval_requirement, DoctorApprovalRequirement::None);
+            for &asset_class in ALL_DOCTOR_ASSET_CLASSES {
+                assert!(
+                    !doctor_repair_mode_allows_asset_mutation(mode, asset_class),
+                    "{mode:?} unexpectedly allows mutation of {asset_class:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mutating_modes_require_approval_or_fail_closed_refusal() {
+        for mode in [
+            DoctorRepairMode::RepairApply,
+            DoctorRepairMode::CleanupApply,
+            DoctorRepairMode::ReconstructPromote,
+            DoctorRepairMode::RestoreApply,
+            DoctorRepairMode::SafeAutoRun,
+            DoctorRepairMode::EmergencyForce,
+        ] {
+            let policy = doctor_repair_mode_policy(mode);
+            assert_ne!(
+                policy.approval_requirement,
+                DoctorApprovalRequirement::None,
+                "{mode:?} must not mutate or override without an explicit gate"
+            );
+        }
+
+        let emergency = doctor_repair_mode_policy(DoctorRepairMode::EmergencyForce);
+        assert!(!emergency.mutates);
+        assert!(!emergency.robot_allowed);
+        assert_eq!(
+            emergency.approval_requirement,
+            DoctorApprovalRequirement::Refused
+        );
+        assert!(emergency.allowed_mutation_asset_classes.is_empty());
+    }
+
+    #[test]
+    fn cleanup_apply_mode_only_mutates_derived_reclaimable_assets() {
+        assert!(doctor_repair_mode_allows_asset_mutation(
+            DoctorRepairMode::CleanupApply,
+            DoctorAssetClass::RetainedPublishBackup
+        ));
+        assert!(doctor_repair_mode_allows_asset_mutation(
+            DoctorRepairMode::CleanupApply,
+            DoctorAssetClass::ReclaimableDerivedCache
+        ));
+
+        for asset_class in [
+            DoctorAssetClass::SourceSessionLog,
+            DoctorAssetClass::RawMirrorBlob,
+            DoctorAssetClass::CanonicalArchiveDb,
+            DoctorAssetClass::ArchiveDbSidecar,
+            DoctorAssetClass::BookmarkStore,
+            DoctorAssetClass::UserConfig,
+            DoctorAssetClass::OperationReceipt,
+            DoctorAssetClass::ForensicBundle,
+            DoctorAssetClass::SupportBundle,
+            DoctorAssetClass::FailedSeedBundle,
+            DoctorAssetClass::QuarantinedLexicalGeneration,
+            DoctorAssetClass::QuarantinedLexicalShard,
+        ] {
+            assert!(
+                !doctor_repair_mode_allows_asset_mutation(
+                    DoctorRepairMode::CleanupApply,
+                    asset_class
+                ),
+                "cleanup_apply must not mutate precious or quarantined {asset_class:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cleanup_apply_outcome_and_receipt_are_structured() {
+        let mut result = DiagCleanupApplyResult {
+            mode: DoctorRepairMode::CleanupApply,
+            approval_requirement: DoctorApprovalRequirement::ApprovalFingerprint,
+            requested: true,
+            approval_fingerprint: "cleanup-v1-test".to_string(),
+            pruned_asset_count: 1,
+            reclaimed_bytes: 42,
+            actions: vec![DiagCleanupApplyAction {
+                asset_safety: doctor_asset_safety(DoctorAssetClass::RetainedPublishBackup),
+                artifact_kind: "retained_publish_backup".to_string(),
+                path: "/tmp/cass/index/.lexical-publish-backups/old".to_string(),
+                generation_id: None,
+                shard_id: None,
+                disposition: None,
+                reason: "outside retention cap".to_string(),
+                planned_reclaimable_bytes: 42,
+                reclaimed_bytes: 42,
+                applied: true,
+                skipped: false,
+                skip_reason: None,
+            }],
+            ..DiagCleanupApplyResult::default()
+        };
+
+        finalize_cleanup_apply_contract(&mut result);
+
+        assert_eq!(result.outcome_kind, DoctorRepairOutcomeKind::Applied);
+        assert_eq!(result.retry_safety, DoctorRepairRetrySafety::SafeToRetry);
+        assert_eq!(result.planned_actions.len(), 1);
+        assert_eq!(result.receipt.receipt_kind, "doctor_cleanup_apply_v1");
+        assert_eq!(result.receipt.mode, DoctorRepairMode::CleanupApply);
+        assert_eq!(
+            result.receipt.outcome_kind,
+            DoctorRepairOutcomeKind::Applied
+        );
+        assert_eq!(result.receipt.approval_fingerprint, "cleanup-v1-test");
+        assert_eq!(result.receipt.planned_action_count, 1);
+        assert_eq!(result.receipt.applied_action_count, 1);
+        assert_eq!(result.receipt.reclaimed_bytes, 42);
     }
 }
 
@@ -17697,6 +18324,7 @@ fn run_doctor(
             "auto_fix_applied": auto_fix_applied,
             "auto_fix_actions": auto_fix_actions,
             "asset_taxonomy": doctor_asset_taxonomy_report(),
+            "repair_contract": doctor_repair_contract_report(),
             "checks": checks,
             "quarantine": quarantine_report,
             "_meta": {
@@ -20597,6 +21225,7 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
                 "auto_fix_applied": { "type": "boolean" },
                 "auto_fix_actions": { "type": "array", "items": { "type": "string" } },
                 "asset_taxonomy": response_schema_opaque_object_array(),
+                "repair_contract": response_schema_opaque_object(),
                 "quarantine": response_schema_opaque_object(),
                 "_meta": response_schema_opaque_object(),
                 "checks": {

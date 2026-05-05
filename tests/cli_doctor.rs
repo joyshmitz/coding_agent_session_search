@@ -393,6 +393,37 @@ fn doctor_json_surfaces_quarantine_gc_eligibility() {
         }),
         "doctor should expose the explicit derived-only reclaimable class"
     );
+    let repair_contract = &payload["repair_contract"];
+    assert_eq!(repair_contract["default_mode"].as_str(), Some("check"));
+    assert_eq!(
+        repair_contract["default_non_destructive"].as_bool(),
+        Some(true)
+    );
+    assert_eq!(repair_contract["fail_closed"].as_bool(), Some(true));
+    let mode_policies = repair_contract["mode_policies"]
+        .as_array()
+        .expect("doctor repair mode policy table");
+    assert!(
+        mode_policies.iter().any(|policy| {
+            policy["mode"].as_str() == Some("cleanup_apply")
+                && policy["mutates"].as_bool() == Some(true)
+                && policy["approval_requirement"].as_str() == Some("approval_fingerprint")
+                && policy["allowed_mutation_asset_classes"]
+                    .as_array()
+                    .expect("cleanup_apply allowed classes")
+                    .iter()
+                    .any(|class| class.as_str() == Some("reclaimable_derived_cache"))
+        }),
+        "cleanup_apply mode must be fingerprint-gated and derived-only"
+    );
+    assert!(
+        mode_policies.iter().any(|policy| {
+            policy["mode"].as_str() == Some("emergency_force")
+                && policy["mutates"].as_bool() == Some(false)
+                && policy["approval_requirement"].as_str() == Some("refused")
+        }),
+        "emergency_force mode must be an explicit fail-closed refusal"
+    );
     let quarantine = &payload["quarantine"];
 
     assert_eq!(
@@ -820,6 +851,13 @@ fn doctor_fix_prunes_safe_derivative_cleanup_candidates() {
     assert_eq!(derivative_cleanup["fix_available"].as_bool(), Some(true));
     assert_eq!(derivative_cleanup["fix_applied"].as_bool(), Some(true));
     let cleanup = &payload["cleanup_apply"];
+    assert_eq!(cleanup["mode"].as_str(), Some("cleanup_apply"));
+    assert_eq!(
+        cleanup["approval_requirement"].as_str(),
+        Some("approval_fingerprint")
+    );
+    assert_eq!(cleanup["outcome_kind"].as_str(), Some("applied"));
+    assert_eq!(cleanup["retry_safety"].as_str(), Some("safe_to_retry"));
     assert_eq!(cleanup["requested"].as_bool(), Some(true));
     assert_eq!(cleanup["applied"].as_bool(), Some(true));
     assert_eq!(cleanup["before_reclaim_candidate_count"].as_u64(), Some(1));
@@ -895,6 +933,27 @@ fn doctor_fix_prunes_safe_derivative_cleanup_candidates() {
         "after inventory should show no remaining reclaim candidates"
     );
     let actions = cleanup["actions"].as_array().expect("cleanup actions");
+    let planned_actions = cleanup["planned_actions"]
+        .as_array()
+        .expect("planned cleanup actions");
+    assert_eq!(
+        planned_actions.len(),
+        actions.len(),
+        "cleanup_apply should carry planned_actions alongside applied/skipped action results"
+    );
+    let receipt = &cleanup["receipt"];
+    assert_eq!(
+        receipt["receipt_kind"].as_str(),
+        Some("doctor_cleanup_apply_v1")
+    );
+    assert_eq!(receipt["mode"].as_str(), Some("cleanup_apply"));
+    assert_eq!(receipt["outcome_kind"].as_str(), Some("applied"));
+    assert_eq!(
+        receipt["approval_fingerprint"].as_str(),
+        cleanup["approval_fingerprint"].as_str()
+    );
+    assert_eq!(receipt["planned_action_count"].as_u64(), Some(2));
+    assert_eq!(receipt["applied_action_count"].as_u64(), Some(2));
     assert!(
         actions.iter().any(|action| {
             action["artifact_kind"].as_str() == Some("retained_publish_backup")
