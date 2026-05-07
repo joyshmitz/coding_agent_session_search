@@ -2335,4 +2335,52 @@ mod tests {
             "crypto worker payload metadata validation should match Rust and allow zero chunks with an empty file list"
         );
     }
+
+    #[test]
+    fn test_crypto_worker_rejects_oversized_chunk_size_like_rust_validator() -> Result<()> {
+        run_node_module_assertions(
+            r#"
+                import fs from 'node:fs';
+                import vm from 'node:vm';
+
+                const code = fs.readFileSync('./src/pages_assets/crypto_worker.js', 'utf8');
+                const context = {
+                    console,
+                    self: {
+                        location: { href: 'https://example.test/archive/' },
+                        postMessage() {},
+                    },
+                };
+                vm.createContext(context);
+                vm.runInContext(code, context);
+
+                const config = {
+                    version: 2,
+                    compression: 'deflate',
+                    payload: {
+                        chunk_size: 32 * 1024 * 1024,
+                        chunk_count: 0,
+                        files: [],
+                    },
+                };
+
+                context.validateSupportedPayloadFormat(config);
+
+                config.payload.chunk_size += 1;
+                let rejected = false;
+                try {
+                    context.validateSupportedPayloadFormat(config);
+                } catch (error) {
+                    if (!String(error.message).includes('exceeds maximum')) {
+                        throw new Error(`unexpected oversized chunk_size error: ${error.message}`);
+                    }
+                    rejected = true;
+                }
+
+                if (!rejected) {
+                    throw new Error('oversized encrypted archive chunk_size should be rejected');
+                }
+            "#,
+        )
+    }
 }

@@ -9,6 +9,9 @@
 let dek = null;
 let config = null;
 
+const MAX_ARCHIVE_CHUNK_SIZE = 32 * 1024 * 1024;
+const MAX_ARCHIVE_CHUNKS = 0xFFFFFFFF;
+
 function hashScopeId(input) {
     let hash = 0x811c9dc5;
     for (let i = 0; i < input.length; i++) {
@@ -400,11 +403,15 @@ function validateSupportedPayloadFormat(cfg) {
         throw new Error(`Invalid archive chunk_size: ${payload.chunk_size ?? 'missing'}`);
     }
 
+    if (payload.chunk_size > MAX_ARCHIVE_CHUNK_SIZE) {
+        throw new Error(`Invalid archive chunk_size: ${payload.chunk_size} exceeds maximum ${MAX_ARCHIVE_CHUNK_SIZE}`);
+    }
+
     if (!Number.isSafeInteger(payload.chunk_count) || payload.chunk_count < 0) {
         throw new Error(`Invalid archive chunk_count: ${payload.chunk_count ?? 'missing'}`);
     }
 
-    if (payload.chunk_count > 0xFFFFFFFF) {
+    if (payload.chunk_count > MAX_ARCHIVE_CHUNKS) {
         throw new Error(`Invalid archive chunk_count: ${payload.chunk_count} exceeds maximum`);
     }
 
