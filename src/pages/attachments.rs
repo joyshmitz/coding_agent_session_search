@@ -23,9 +23,9 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 /// Default maximum size per attachment (10 MB)
@@ -106,10 +106,22 @@ impl AttachmentConfig {
 
     /// Check if a MIME type is allowed
     pub fn is_mime_allowed(&self, mime_type: &str) -> bool {
+        let Some(mime_type) = mime_type_essence(mime_type) else {
+            return false;
+        };
         self.allowed_mime_types
             .iter()
-            .any(|allowed| mime_type.starts_with(allowed.as_str()))
+            .filter_map(|allowed| mime_type_essence(allowed))
+            .any(|allowed| mime_type == allowed)
     }
+}
+
+fn mime_type_essence(mime_type: &str) -> Option<String> {
+    let essence = mime_type.split(';').next()?.trim();
+    if essence.is_empty() {
+        return None;
+    }
+    Some(essence.to_ascii_lowercase())
 }
 
 /// Raw attachment data from a connector
@@ -320,7 +332,8 @@ impl AttachmentProcessor {
         }
 
         let blobs_dir = output_dir.join("blobs");
-        fs::create_dir_all(&blobs_dir).context("Failed to create blobs directory")?;
+        ensure_real_output_directory(output_dir, "Attachment output directory")?;
+        ensure_real_output_directory(&blobs_dir, "Attachment blobs directory")?;
 
         let cipher = Aes256Gcm::new_from_slice(dek).expect("Invalid DEK length");
 
@@ -347,11 +360,7 @@ impl AttachmentProcessor {
                 )
                 .map_err(|e| anyhow::anyhow!("Blob encryption failed: {}", e))?;
 
-            // Write to file
-            let mut file =
-                BufWriter::new(File::create(&blob_path).context("Failed to create blob file")?);
-            file.write_all(&ciphertext)?;
-            file.flush()?;
+            write_ciphertext_file(&blob_path, &ciphertext, "attachment blob")?;
 
             debug!(hash = %hash, path = %blob_path.display(), "Wrote encrypted blob");
         }
@@ -381,8 +390,7 @@ impl AttachmentProcessor {
             .map_err(|e| anyhow::anyhow!("Manifest encryption failed: {}", e))?;
 
         let manifest_path = blobs_dir.join("manifest.enc");
-        fs::write(&manifest_path, manifest_ciphertext)
-            .context("Failed to write encrypted manifest")?;
+        write_ciphertext_file(&manifest_path, &manifest_ciphertext, "attachment manifest")?;
 
         info!(
             count = self.entries.len(),
@@ -481,6 +489,10 @@ pub(crate) fn reencrypt_blobs_into_dir(
     new_export_id: &[u8; 16],
 ) -> Result<()> {
     let source_blobs_dir = source_archive_dir.join("blobs");
+    ensure_existing_ancestors_have_no_symlinks(
+        &source_blobs_dir,
+        "Source attachment blobs directory",
+    )?;
     match fs::symlink_metadata(&source_blobs_dir) {
         Ok(meta) => {
             let file_type = meta.file_type();
@@ -509,35 +521,7 @@ pub(crate) fn reencrypt_blobs_into_dir(
     }
 
     let output_blobs_dir = output_archive_dir.join("blobs");
-    match fs::symlink_metadata(&output_blobs_dir) {
-        Ok(meta) => {
-            let file_type = meta.file_type();
-            if file_type.is_symlink() {
-                bail!(
-                    "Refusing to write re-encrypted attachments into symlinked blobs directory: {}",
-                    output_blobs_dir.display()
-                );
-            }
-            if !file_type.is_dir() {
-                bail!(
-                    "Refusing to write re-encrypted attachments into non-directory blobs path: {}",
-                    output_blobs_dir.display()
-                );
-            }
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir_all(&output_blobs_dir)
-                .context("Failed to create destination blobs directory during key rotation")?;
-        }
-        Err(err) => {
-            return Err(err).with_context(|| {
-                format!(
-                    "Failed to inspect destination blobs directory {}",
-                    output_blobs_dir.display()
-                )
-            });
-        }
-    }
+    ensure_real_output_directory(&output_blobs_dir, "Destination attachment blobs directory")?;
 
     let manifest_path = source_blobs_dir.join("manifest.enc");
     ensure_regular_ciphertext_file(&manifest_path, "attachment manifest")?;
@@ -580,8 +564,12 @@ pub(crate) fn reencrypt_blobs_into_dir(
             )
             .map_err(|e| anyhow::anyhow!("Blob encryption failed during key rotation: {}", e))?;
 
-        fs::write(output_blobs_dir.join(format!("{}.bin", hash)), ciphertext)
-            .with_context(|| format!("Failed to rewrite attachment blob {}", hash))?;
+        write_ciphertext_file(
+            &output_blobs_dir.join(format!("{}.bin", hash)),
+            &ciphertext,
+            "attachment blob",
+        )
+        .with_context(|| format!("Failed to rewrite attachment blob {}", hash))?;
     }
 
     let manifest_json =
@@ -597,9 +585,260 @@ pub(crate) fn reencrypt_blobs_into_dir(
         )
         .map_err(|e| anyhow::anyhow!("Manifest encryption failed during key rotation: {}", e))?;
 
-    fs::write(output_blobs_dir.join("manifest.enc"), reencrypted_manifest)
-        .context("Failed to rewrite attachment manifest during key rotation")?;
+    write_ciphertext_file(
+        &output_blobs_dir.join("manifest.enc"),
+        &reencrypted_manifest,
+        "attachment manifest",
+    )
+    .context("Failed to rewrite attachment manifest during key rotation")?;
 
+    Ok(())
+}
+
+fn ensure_real_output_directory(path: &Path, label: &str) -> Result<()> {
+    ensure_existing_ancestors_have_no_symlinks(path, label)?;
+    fs::create_dir_all(path).with_context(|| format!("Failed to create {label}"))?;
+    ensure_existing_ancestors_have_no_symlinks(path, label)?;
+
+    let metadata =
+        fs::symlink_metadata(path).with_context(|| format!("Failed to inspect {label}"))?;
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        bail!("{label} must not be a symlink: {}", path.display());
+    }
+    if !file_type.is_dir() {
+        bail!("{label} must be a directory: {}", path.display());
+    }
+    Ok(())
+}
+
+fn ensure_existing_ancestors_have_no_symlinks(path: &Path, label: &str) -> Result<()> {
+    let mut ancestors: Vec<PathBuf> = path
+        .ancestors()
+        .filter(|ancestor| !ancestor.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .collect();
+    ancestors.reverse();
+
+    for ancestor in ancestors {
+        match fs::symlink_metadata(&ancestor) {
+            Ok(metadata) => {
+                let file_type = metadata.file_type();
+                if file_type.is_symlink() {
+                    bail!("{label} must not contain symlinks: {}", ancestor.display());
+                }
+                if !file_type.is_dir() {
+                    bail!(
+                        "{label} parent path must be a directory: {}",
+                        ancestor.display()
+                    );
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("Failed to inspect {label} {}", ancestor.display()));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn write_ciphertext_file(path: &Path, bytes: &[u8], label: &str) -> Result<()> {
+    ensure_replaceable_regular_file(path, label)?;
+    let (mut pending, file) = PendingCiphertextFile::create(path, label)?;
+    let mut writer = BufWriter::new(file);
+    writer
+        .write_all(bytes)
+        .with_context(|| format!("Failed to write {label} {}", pending.path().display()))?;
+    writer
+        .flush()
+        .with_context(|| format!("Failed to flush {label} {}", pending.path().display()))?;
+    writer
+        .get_ref()
+        .sync_all()
+        .with_context(|| format!("Failed to sync {label} {}", pending.path().display()))?;
+    drop(writer);
+    pending.persist(path, label)
+}
+
+fn ensure_replaceable_regular_file(path: &Path, label: &str) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                bail!(
+                    "Refusing to write {label} through symlink: {}",
+                    path.display()
+                );
+            }
+            if !file_type.is_file() {
+                bail!(
+                    "Refusing to replace {label} at non-file path: {}",
+                    path.display()
+                );
+            }
+            Ok(())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => {
+            Err(err).with_context(|| format!("Failed to inspect {label} {}", path.display()))
+        }
+    }
+}
+
+struct PendingCiphertextFile {
+    path: PathBuf,
+    keep: bool,
+}
+
+impl PendingCiphertextFile {
+    fn create(final_path: &Path, label: &str) -> Result<(Self, File)> {
+        let parent = output_parent(final_path);
+        let file_name = final_path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("{label} path must name a file"))?
+            .to_string_lossy();
+
+        for attempt in 0..100u32 {
+            let random: u64 = rand::random();
+            let temp_path = parent.join(format!(
+                ".{file_name}.cass-attachment-tmp.{}.{}.{:016x}",
+                std::process::id(),
+                attempt,
+                random
+            ));
+
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp_path)
+            {
+                Ok(file) => {
+                    return Ok((
+                        Self {
+                            path: temp_path,
+                            keep: false,
+                        },
+                        file,
+                    ));
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => {
+                    return Err(err).with_context(|| {
+                        format!("Failed to create temporary {label} {}", temp_path.display())
+                    });
+                }
+            }
+        }
+
+        bail!(
+            "Failed to create a unique temporary {label} next to {} after 100 attempts",
+            final_path.display()
+        );
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn persist(&mut self, final_path: &Path, label: &str) -> Result<()> {
+        replace_ciphertext_file_from_temp(&self.path, final_path, label)?;
+        self.keep = true;
+        Ok(())
+    }
+}
+
+impl Drop for PendingCiphertextFile {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn output_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn replace_ciphertext_file_from_temp(
+    temp_path: &Path,
+    final_path: &Path,
+    label: &str,
+) -> Result<()> {
+    replace_ciphertext_file_from_temp_impl(temp_path, final_path, label)?;
+    sync_parent_directory(final_path)
+}
+
+#[cfg(not(windows))]
+fn replace_ciphertext_file_from_temp_impl(
+    temp_path: &Path,
+    final_path: &Path,
+    label: &str,
+) -> Result<()> {
+    fs::rename(temp_path, final_path).with_context(|| {
+        format!(
+            "Failed to install {label} {} from {}",
+            final_path.display(),
+            temp_path.display()
+        )
+    })
+}
+
+#[cfg(windows)]
+fn replace_ciphertext_file_from_temp_impl(
+    temp_path: &Path,
+    final_path: &Path,
+    label: &str,
+) -> Result<()> {
+    ensure_replaceable_regular_file(final_path, label)?;
+    match fs::rename(temp_path, final_path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            fs::copy(temp_path, final_path).with_context(|| {
+                format!(
+                    "Failed to install {label} {} from {}",
+                    final_path.display(),
+                    temp_path.display()
+                )
+            })?;
+            fs::remove_file(temp_path).with_context(|| {
+                format!(
+                    "Failed to remove temporary {label} {} after install",
+                    temp_path.display()
+                )
+            })?;
+            Ok(())
+        }
+        Err(err) => Err(err).with_context(|| {
+            format!(
+                "Failed to install {label} {} from {}",
+                final_path.display(),
+                temp_path.display()
+            )
+        }),
+    }
+}
+
+#[cfg(not(windows))]
+fn sync_parent_directory(path: &Path) -> Result<()> {
+    let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return Ok(());
+    };
+    File::open(parent)
+        .with_context(|| format!("Failed to open parent directory {}", parent.display()))?
+        .sync_all()
+        .with_context(|| format!("Failed to sync parent directory {}", parent.display()))
+}
+
+#[cfg(windows)]
+fn sync_parent_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -641,11 +880,16 @@ mod tests {
     fn test_mime_type_check() {
         let config = AttachmentConfig::enabled();
         assert!(config.is_mime_allowed("image/png"));
+        assert!(config.is_mime_allowed("IMAGE/PNG"));
+        assert!(config.is_mime_allowed("text/plain; charset=utf-8"));
         assert!(config.is_mime_allowed("image/jpeg"));
         assert!(config.is_mime_allowed("application/pdf"));
         assert!(config.is_mime_allowed("text/plain"));
         assert!(!config.is_mime_allowed("application/octet-stream"));
         assert!(!config.is_mime_allowed("video/mp4"));
+        assert!(!config.is_mime_allowed("image/png-malicious"));
+        assert!(!config.is_mime_allowed("text/html+xml"));
+        assert!(!config.is_mime_allowed(""));
     }
 
     #[test]
@@ -814,6 +1058,83 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn test_write_encrypted_blobs_rejects_symlinked_blobs_directory() {
+        use std::os::unix::fs::symlink;
+        use tempfile::TempDir;
+
+        let config = AttachmentConfig::enabled();
+        let mut processor = AttachmentProcessor::new(config);
+        let attachment = AttachmentData {
+            filename: "test.txt".to_string(),
+            mime_type: "text/plain".to_string(),
+            data: b"test content".to_vec(),
+        };
+        processor.process_attachments(1, &[attachment]).unwrap();
+
+        let output_dir = TempDir::new().unwrap();
+        let outside_dir = TempDir::new().unwrap();
+        symlink(outside_dir.path(), output_dir.path().join("blobs")).unwrap();
+
+        let dek = [0x42u8; 32];
+        let export_id = [0x01u8; 16];
+        let err = processor
+            .write_encrypted_blobs(output_dir.path(), &dek, &export_id)
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("must not contain symlinks")
+                || err.to_string().contains("must not be a symlink"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            !outside_dir.path().join("manifest.enc").exists(),
+            "attachment writer must not write through a symlinked blobs directory"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_write_encrypted_blobs_rejects_symlinked_blob_file() {
+        use std::os::unix::fs::symlink;
+        use tempfile::TempDir;
+
+        let config = AttachmentConfig::enabled();
+        let mut processor = AttachmentProcessor::new(config);
+        let data = b"test content".to_vec();
+        let hash = compute_sha256_hex(&data);
+        let attachment = AttachmentData {
+            filename: "test.txt".to_string(),
+            mime_type: "text/plain".to_string(),
+            data,
+        };
+        processor.process_attachments(1, &[attachment]).unwrap();
+
+        let output_dir = TempDir::new().unwrap();
+        let blobs_dir = output_dir.path().join("blobs");
+        fs::create_dir_all(&blobs_dir).unwrap();
+        let protected_target = output_dir.path().join("protected.bin");
+        fs::write(&protected_target, b"do not overwrite").unwrap();
+        symlink(&protected_target, blobs_dir.join(format!("{hash}.bin"))).unwrap();
+
+        let dek = [0x42u8; 32];
+        let export_id = [0x01u8; 16];
+        let err = processor
+            .write_encrypted_blobs(output_dir.path(), &dek, &export_id)
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("through symlink"),
+            "unexpected error: {err:#}"
+        );
+        assert_eq!(
+            fs::read(&protected_target).unwrap(),
+            b"do not overwrite",
+            "attachment writer must not clobber a symlink target"
+        );
+    }
+
+    #[test]
     fn test_manifest_encryption_roundtrip() {
         let manifest = AttachmentManifest {
             version: 1,
@@ -948,7 +1269,7 @@ mod tests {
         .unwrap_err();
 
         assert!(
-            err.to_string().contains("symlinked blobs directory"),
+            err.to_string().contains("symlink"),
             "unexpected error: {err:#}"
         );
     }
@@ -997,8 +1318,57 @@ mod tests {
         .unwrap_err();
 
         assert!(
-            err.to_string().contains("symlinked blobs directory"),
+            err.to_string().contains("symlink"),
             "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_reencrypt_existing_blobs_rejects_symlinked_destination_archive_dir() {
+        use std::os::unix::fs::symlink;
+        use tempfile::TempDir;
+
+        let config = AttachmentConfig::enabled();
+        let mut processor = AttachmentProcessor::new(config);
+        let attachment = AttachmentData {
+            filename: "test.txt".to_string(),
+            mime_type: "text/plain".to_string(),
+            data: b"test content".to_vec(),
+        };
+        processor.process_attachments(1, &[attachment]).unwrap();
+
+        let source_archive_dir = TempDir::new().unwrap();
+        let link_parent = TempDir::new().unwrap();
+        let outside_dir = TempDir::new().unwrap();
+        let output_archive_link = link_parent.path().join("archive-link");
+        let old_dek = [0x42u8; 32];
+        let old_export_id = [0x01u8; 16];
+        let new_dek = [0x24u8; 32];
+        let new_export_id = [0x02u8; 16];
+
+        processor
+            .write_encrypted_blobs(source_archive_dir.path(), &old_dek, &old_export_id)
+            .unwrap();
+        symlink(outside_dir.path(), &output_archive_link).unwrap();
+
+        let err = reencrypt_blobs_into_dir(
+            source_archive_dir.path(),
+            &output_archive_link,
+            &old_dek,
+            &old_export_id,
+            &new_dek,
+            &new_export_id,
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("symlink"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            !outside_dir.path().join("blobs/manifest.enc").exists(),
+            "key rotation must not write attachments through a symlinked archive directory"
         );
     }
 }
