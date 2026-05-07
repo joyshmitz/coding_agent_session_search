@@ -254,7 +254,25 @@ fn handle_request_with_site_root(site_root_canonical: &std::path::Path, request:
     let mut metadata_length_hint = None;
     if let Ok(meta) = std::fs::metadata(&canonical) {
         if meta.is_dir() {
-            file_to_read = canonical.join("index.html");
+            let index_path = canonical.join("index.html");
+            let index_canonical = match index_path.canonicalize() {
+                Ok(path) => path,
+                Err(_) => {
+                    return build_response(404, MIME_TEXT_PLAIN, b"Not Found".to_vec());
+                }
+            };
+            if !index_canonical.starts_with(site_root_canonical) {
+                return build_response(400, MIME_TEXT_PLAIN, b"Invalid Path".to_vec());
+            }
+            match std::fs::metadata(&index_canonical) {
+                Ok(index_meta) if index_meta.is_file() => {
+                    metadata_length_hint = Some(index_meta.len());
+                    file_to_read = index_canonical;
+                }
+                _ => {
+                    return build_response(404, MIME_TEXT_PLAIN, b"Not Found".to_vec());
+                }
+            }
         } else {
             metadata_length_hint = Some(meta.len());
         }
@@ -631,6 +649,29 @@ mod tests {
         let response = handle_request(site_dir, "GET /../etc/passwd HTTP/1.1\r\n");
         let response_str = String::from_utf8_lossy(&response);
         assert!(response_str.contains("400") || response_str.contains("Invalid"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_handle_request_rejects_directory_index_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = temp_site_with_index("<html>root</html>");
+        let outside = TempDir::new().expect("outside dir");
+        let outside_file = outside.path().join("secret.html");
+        std::fs::write(&outside_file, "<html>outside secret</html>").expect("write outside file");
+        let nested = temp_dir.path().join("nested");
+        std::fs::create_dir(&nested).expect("create nested dir");
+        symlink(&outside_file, nested.join("index.html")).expect("symlink nested index");
+
+        let get_response = handle_request(temp_dir.path(), "GET /nested/ HTTP/1.1\r\n");
+        let get_str = String::from_utf8_lossy(&get_response);
+        assert!(get_str.contains("HTTP/1.1 400"));
+        assert!(!get_str.contains("outside secret"));
+
+        let head_response = handle_request(temp_dir.path(), "HEAD /nested/ HTTP/1.1\r\n");
+        let head_str = String::from_utf8_lossy(&head_response);
+        assert!(head_str.contains("HTTP/1.1 400"));
     }
 
     #[test]
