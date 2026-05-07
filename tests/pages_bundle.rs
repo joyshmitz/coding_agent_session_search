@@ -1034,6 +1034,127 @@ mod tests {
     }
 
     #[test]
+    fn test_storage_clear_all_removes_session_manager_key_family() -> Result<()> {
+        run_node_module_assertions(
+            r#"
+                class StorageMock {
+                    constructor() {
+                        this.data = new Map();
+                    }
+
+                    get length() {
+                        return this.data.size;
+                    }
+
+                    key(index) {
+                        return Array.from(this.data.keys())[index] ?? null;
+                    }
+
+                    getItem(key) {
+                        return this.data.has(key) ? this.data.get(key) : null;
+                    }
+
+                    setItem(key, value) {
+                        this.data.set(key, String(value));
+                    }
+
+                    removeItem(key) {
+                        this.data.delete(key);
+                    }
+                }
+
+                const originalWindow = globalThis.window;
+                const originalLocalStorage = globalThis.localStorage;
+                const originalSessionStorage = globalThis.sessionStorage;
+                const originalNavigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+
+                globalThis.window = { location: { href: 'https://example.com/archive/index.html#/' } };
+                globalThis.localStorage = new StorageMock();
+                globalThis.sessionStorage = new StorageMock();
+                Object.defineProperty(globalThis, 'navigator', {
+                    value: { storage: {} },
+                    configurable: true,
+                    writable: true,
+                });
+
+                try {
+                    const { clearAllStorage, getArchiveScopeId } = await import('./src/pages_assets/storage.js');
+                    const scopeId = getArchiveScopeId();
+                    const otherScopeId = scopeId === 'deadbeef' ? 'feedface' : 'deadbeef';
+
+                    const currentKeys = [
+                        `cass_session_dek_${scopeId}`,
+                        `cass_session_expiry_${scopeId}`,
+                        `cass_unlocked_${scopeId}`,
+                        `cass_session_${scopeId}`,
+                        `cass_expiry_${scopeId}`,
+                        `cass_storage_pref_${scopeId}`,
+                        'cass_session_dek',
+                        'cass_session_expiry',
+                        'cass_unlocked',
+                        'cass_session',
+                        'cass_expiry',
+                        'cass_storage_pref',
+                    ];
+                    const otherKeys = [
+                        `cass_session_dek_${otherScopeId}`,
+                        `cass_session_expiry_${otherScopeId}`,
+                        `cass_unlocked_${otherScopeId}`,
+                        `cass_session_${otherScopeId}`,
+                        `cass_expiry_${otherScopeId}`,
+                        `cass_storage_pref_${otherScopeId}`,
+                    ];
+
+                    for (const storage of [globalThis.localStorage, globalThis.sessionStorage]) {
+                        for (const key of currentKeys) {
+                            storage.setItem(key, 'current');
+                        }
+                        for (const key of otherKeys) {
+                            storage.setItem(key, 'other');
+                        }
+                    }
+
+                    await clearAllStorage();
+
+                    for (const storageName of ['localStorage', 'sessionStorage']) {
+                        const storage = globalThis[storageName];
+                        for (const key of currentKeys) {
+                            if (storage.getItem(key) !== null) {
+                                throw new Error(`${storageName} retained current archive session key ${key}`);
+                            }
+                        }
+                        for (const key of otherKeys) {
+                            if (storage.getItem(key) !== 'other') {
+                                throw new Error(`${storageName} should preserve other archive session key ${key} during archive-scoped clear`);
+                            }
+                        }
+                    }
+
+                    await clearAllStorage({ allArchives: true });
+
+                    for (const storageName of ['localStorage', 'sessionStorage']) {
+                        const storage = globalThis[storageName];
+                        for (const key of otherKeys) {
+                            if (storage.getItem(key) !== null) {
+                                throw new Error(`${storageName} retained all-archive session key ${key}`);
+                            }
+                        }
+                    }
+                } finally {
+                    globalThis.window = originalWindow;
+                    globalThis.localStorage = originalLocalStorage;
+                    globalThis.sessionStorage = originalSessionStorage;
+                    if (originalNavigatorDescriptor) {
+                        Object.defineProperty(globalThis, 'navigator', originalNavigatorDescriptor);
+                    } else {
+                        delete globalThis.navigator;
+                    }
+                }
+            "#,
+        )
+    }
+
+    #[test]
     fn test_variable_virtual_list_coalesces_scroll_frames() -> Result<()> {
         run_node_module_assertions(
             r#"
