@@ -14,14 +14,14 @@ a proxy signal.
 
 | Spec Area | MUST Clauses | SHOULD Clauses | Current Tested | Passing | Divergent | Score |
 |-----------|-------------:|---------------:|---------------:|--------:|----------:|-------|
-| Command surface and input validation | 17 | 0 | 0 | 0 | 0 | 0/17 |
-| Field masks and schema stability | 17 | 0 | 0 | 0 | 0 | 0/17 |
+| Command surface and input validation | 19 | 0 | 0 | 0 | 0 | 0/19 |
+| Field masks and schema stability | 18 | 0 | 0 | 0 | 0 | 0/18 |
 | Evidence, citations, pack objects | 34 | 0 | 0 | 0 | 0 | 0/34 |
-| Selection and omission behavior | 29 | 0 | 0 | 0 | 0 | 0/29 |
+| Selection and omission behavior | 30 | 0 | 0 | 0 | 0 | 0/30 |
 | Token budget and partial output | 7 | 0 | 0 | 0 | 0 | 0/7 |
 | Health, freshness, and source readiness | 15 | 0 | 0 | 0 | 0 | 0/15 |
-| Privacy and redaction | 19 | 0 | 0 | 0 | 0 | 0/19 |
-| Error envelopes and output formats | 24 | 0 | 0 | 0 | 0 | 0/24 |
+| Privacy and redaction | 21 | 0 | 0 | 0 | 0 | 0/21 |
+| Error envelopes and output formats | 25 | 0 | 0 | 0 | 0 | 0/25 |
 | Implementation boundaries | 10 | 0 | 0 | 0 | 0 | 0/10 |
 | Required verification commands | 6 | 0 | 0 | 0 | 0 | 0/6 |
 
@@ -40,10 +40,13 @@ a proxy signal.
 | AP-CMD-009 | MUST | Input Flags | `--redaction off` marks `privacy.redaction_policy="off"` and `sensitive_output=true`. | Privacy unit test and JSON golden. | Planned |
 | AP-CMD-010 | MUST | Input Flags | `--require-evidence` turns an empty pack into `pack-no-evidence`. | CLI fixture with no hits. | Planned |
 | AP-CMD-011 | MUST | Input Flags | `--explain-selection` exposes score components and omission diagnostics. | Planner unit test plus full field-mask golden. | Planned |
+| AP-CMD-012 | MUST | Input Flags | `--refresh` runs only the existing safe incremental refresh path before packing. | CLI integration fixture that snapshots index/quarantine state and verifies no hidden repair path runs. | Planned |
+| AP-CMD-013 | MUST | Input Flags | `--timeout <ms>` marks usable partial packs as partial and returns timeout/partial errors truthfully when no usable pack can be emitted. | Timeout fixture covering partial success and no-pack failure. | Planned |
 | AP-MASK-001 | MUST | Field Masks | `standard` includes exactly the documented top-level fields. | JSON schema/golden assertion. | Planned |
 | AP-MASK-002 | MUST | Field Masks | `minimal` includes only the documented dotted fields. | Minimal mask golden. | Planned |
 | AP-MASK-003 | MUST | Field Masks | `full` includes all defined response fields and `selection_debug` only when requested. | Full mask golden pair. | Planned |
 | AP-MASK-004 | MUST | Field Masks | Unknown explicit mask fields are ignored with `_meta.warnings[]` and exit 0. | CLI warning test. | Planned |
+| AP-MASK-005 | MUST | Field Masks | Explicit field masks with no valid fields fail with `err.kind="pack-invalid-field"`. | CLI error-envelope test with all-invalid field list. | Planned |
 | AP-SCHEMA-001 | MUST | JSON Response Schema | All object keys are stable and snake_case. | Golden plus schema walk rejecting non-snake keys. | Planned |
 | AP-SCHEMA-002 | MUST | JSON Response Schema | `_meta.partial`, format, request id, generated time, elapsed time, and warnings are present. | Scrubbed JSON golden. | Planned |
 | AP-SCHEMA-003 | MUST | JSON Response Schema | `realized` truthfully reports search mode, fallback, semantic join, candidates, selected evidence, and selected sessions. | Fixture covering lexical fallback and semantic unavailable. | Planned |
@@ -64,6 +67,7 @@ a proxy signal.
 | AP-SEL-004 | MUST | Deterministic Selection | Null timestamps sort last in tie-breaks and score according to freshness policy. | Timestamp policy unit test. | Planned |
 | AP-SEL-005 | MUST | Deterministic Selection | Diversity scoring changes as selected sources and sessions accumulate. | Greedy selection unit test. | Planned |
 | AP-SEL-006 | MUST | Deterministic Selection | Duplicate penalties cover span hash, content hash, and overlapping source ranges. | Duplicate-heavy planner unit tests. | Planned |
+| AP-SEL-007 | MUST | Selection Fields | Without `--explain-selection`, `selection` exposes only score, token cost, and selected reason. | JSON golden pair with and without explain-selection. | Planned |
 | AP-OMIT-001 | MUST | Omitted Item Schema | Omitted rows include stable candidate id, source path, line, agent, reason, score, and estimated tokens. | Omission schema unit test. | Planned |
 | AP-OMIT-002 | MUST | Omitted Reasons | Reasons are exactly the documented snake_case values. | Enum serialization/schema test. | Planned |
 | AP-OMIT-003 | MUST | Omitted Reasons | Hard-omitted candidates are emitted once and removed from future consideration. | Planner regression for stale/duplicate hard omissions. | Planned |
@@ -87,9 +91,12 @@ a proxy signal.
 | AP-PRIV-007 | MUST | Privacy Contract | `privacy.redaction_applied=true` when any excerpt changes. | JSON fixture. | Planned |
 | AP-PRIV-008 | MUST | Privacy Contract | Fully redacted candidates are omitted with `redacted_to_empty`. | Redaction unit test. | Planned |
 | AP-PRIV-009 | MUST | Privacy Contract | Pack never reads `.env` directly and includes `.env` content only when indexed evidence passes policy. | No-mock fixture with `.env` file present and indexed secret text. | Planned |
+| AP-PRIV-010 | MUST | Privacy Contract | Skill payload excerpts are included only when `--include-skill-content` is explicitly set. | Privacy fixture pair for default exclusion and explicit inclusion. | Planned |
+| AP-PRIV-011 | MUST | Privacy Contract | `--redaction off` is accepted only for local operator workflows and is visibly marked sensitive. | CLI/privacy fixture for allowed local use and rejected non-local use. | Planned |
 | AP-ERR-001 | MUST | Error Contract | Errors use existing `CliError` envelope and kebab-case `err.kind`. | Error-envelope tests for every pack kind. | Planned |
 | AP-ERR-002 | MUST | Error Contract | Consumers can branch on `err.kind`; numeric code alone is not relied on. | Introspect/docs schema test. | Planned |
 | AP-ERR-003 | MUST | Error Contract | Empty search results succeed by default with `no_evidence_found`. | Empty fixture golden. | Planned |
+| AP-ERR-004 | MUST | Error Contract | `pack-invalid-field`, `pack-budget-too-small`, `partial-result`, and `timeout` use documented codes, retryability, and hints. | Table-driven error-envelope regression. | Planned |
 | AP-FMT-001 | MUST | Format Contracts | Pretty JSON and compact JSON contain the same fields. | Structural equality test after parsing. | Planned |
 | AP-FMT-002 | MUST | Format Contracts | JSONL emits meta, pack, evidence items, omitted, and privacy in documented order. | JSONL golden. | Planned |
 | AP-FMT-003 | MUST | Format Contracts | TOON encodes the same payload through the existing `toon` crate path. | JSON-vs-TOON decoded equality test if decoder is available; otherwise golden. | Planned |
