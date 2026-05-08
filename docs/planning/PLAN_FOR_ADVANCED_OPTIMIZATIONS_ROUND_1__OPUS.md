@@ -10,10 +10,10 @@ Non-negotiables in this repo/workflow:
 - No script-based repo-wide code transformations.
 - After substantive changes, always run:
   ```bash
-  cargo fmt --check
-  cargo check --all-targets
-  cargo clippy --all-targets -- -D warnings
-  cargo test
+  rch exec -- env CARGO_TARGET_DIR=/tmp/cass-optimization-gates-target cargo fmt --check
+  rch exec -- env CARGO_TARGET_DIR=/tmp/cass-optimization-gates-target cargo check --all-targets
+  rch exec -- env CARGO_TARGET_DIR=/tmp/cass-optimization-gates-target cargo clippy --all-targets -- -D warnings
+  rch exec -- env CARGO_TARGET_DIR=/tmp/cass-optimization-gates-target cargo test
   ```
 
 ---
@@ -174,7 +174,7 @@ fn dot_product_f16(a: &[f16], b: &[f32]) -> f32 {
 
 **Analysis**: LLVM may auto-vectorize with `-C opt-level=3`, but F16→F32 conversion per element is expensive regardless. Verify auto-vectorization with:
 ```bash
-RUSTFLAGS="--emit=asm" cargo build --release
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-asm-target RUSTFLAGS="--emit=asm" cargo build --release
 # Check for vmulps/vaddps (AVX) or mulps/addps (SSE) instructions
 ```
 
@@ -562,11 +562,11 @@ pub fn canonicalize_for_embedding_streaming(text: &str) -> String {
 ```yaml
 # .github/workflows/perf.yml
 - name: Run benchmarks
-  run: cargo bench --bench search_perf -- --save-baseline pr
+  run: rch exec -- env CARGO_TARGET_DIR=/tmp/cass-bench-pr-target cargo bench --bench search_perf -- --save-baseline pr
 
 - name: Compare to main baseline
   run: |
-    cargo install critcmp
+    # Ensure critcmp is installed in the runner image before this step.
     critcmp main pr --threshold 10  # Fail if >10% regression
 ```
 
@@ -580,23 +580,23 @@ Additional:
 
 Always run after changes:
 ```bash
-cargo fmt --check
-cargo check --all-targets
-cargo clippy --all-targets -- -D warnings
-cargo test
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-optimization-gates-target cargo fmt --check
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-optimization-gates-target cargo check --all-targets
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-optimization-gates-target cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-optimization-gates-target cargo test
 ```
 
 For profiling builds:
 ```bash
-RUSTFLAGS="-C force-frame-pointers=yes" cargo build --profile profiling
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-profiling-target RUSTFLAGS="-C force-frame-pointers=yes" cargo build --profile profiling
 ```
 
 For benchmark comparison:
 ```bash
-cargo bench --bench search_perf -- --save-baseline before
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-bench-before-target cargo bench --bench search_perf -- --save-baseline before
 # Make changes
-cargo bench --bench search_perf -- --save-baseline after
-cargo install critcmp && critcmp before after
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-bench-after-target cargo bench --bench search_perf -- --save-baseline after
+critcmp before after
 ```
 
 ---
