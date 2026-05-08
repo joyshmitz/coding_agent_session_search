@@ -37,7 +37,7 @@ SUITE="query_parser"
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
-CASS_BIN="${PROJECT_ROOT}/target/debug/cass"
+CASS_BIN="${CASS_BIN:-${RCH_TARGET_DIR}/debug/cass}"
 SANDBOX_DIR=""
 
 ensure_rch() {
@@ -52,9 +52,6 @@ run_cargo() {
 }
 
 ensure_cass_binary() {
-    if [[ ! -x "$CASS_BIN" ]]; then
-        CASS_BIN="${RCH_TARGET_DIR}/debug/cass"
-    fi
     if [[ ! -x "$CASS_BIN" ]]; then
         e2e_info "Building cass binary through rch..."
         ensure_rch

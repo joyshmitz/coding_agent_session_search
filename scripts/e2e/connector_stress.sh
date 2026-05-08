@@ -36,7 +36,7 @@ skipped=0
 SUITE="connector_stress"
 
 # ─── Globals ────────────────────────────────────────────────────────────────
-CASS_BIN="${PROJECT_ROOT}/target/debug/cass"
+CASS_BIN="${CASS_BIN:-${RCH_TARGET_DIR}/debug/cass}"
 stress_ok=true
 
 CONNECTORS=(claude codex gemini cline amp aider opencode pi_agent factory cursor)
@@ -54,9 +54,6 @@ run_cargo() {
 }
 
 ensure_cass_binary() {
-    if [[ ! -x "$CASS_BIN" ]]; then
-        CASS_BIN="${RCH_TARGET_DIR}/debug/cass"
-    fi
     if [[ ! -x "$CASS_BIN" ]]; then
         e2e_info "Building cass binary through rch..."
         ensure_rch

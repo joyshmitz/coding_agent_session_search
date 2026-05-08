@@ -36,7 +36,7 @@ SUITE="security_paths"
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
-CASS_BIN="${PROJECT_ROOT}/target/debug/cass"
+CASS_BIN="${CASS_BIN:-${RCH_TARGET_DIR}/debug/cass}"
 
 ensure_rch() {
     if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
@@ -50,9 +50,6 @@ run_cargo() {
 }
 
 ensure_cass_binary() {
-    if [[ ! -x "$CASS_BIN" ]]; then
-        CASS_BIN="${RCH_TARGET_DIR}/debug/cass"
-    fi
     if [[ ! -x "$CASS_BIN" ]]; then
         e2e_info "Building cass binary through rch..."
         ensure_rch
