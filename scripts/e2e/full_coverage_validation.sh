@@ -4,14 +4,21 @@
 #
 # Usage: ./scripts/e2e/full_coverage_validation.sh
 #
+# Environment:
+#   RCH_BIN         rch executable (default: rch)
+#   RCH_TARGET_DIR  cargo target dir for offloaded full-coverage gates
+#
 # Part of br-jv3y: Create full_coverage_validation.sh Master Script
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_TARGET_DIR="${RCH_TARGET_DIR:-${TMPDIR:-/tmp}/rch_target_cass_full_coverage}"
 
 # Source the E2E logging library
+# shellcheck disable=SC1091
 source "${PROJECT_ROOT}/scripts/lib/e2e_log.sh"
 
 # Initialize logging
@@ -40,6 +47,19 @@ mkdir -p "${OUTPUT_DIR}" "${E2E_DIR}"
 
 now_ms() {
     date +%s%3N 2>/dev/null || echo $(($(date +%s) * 1000))
+}
+
+ensure_rch() {
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        e2e_error "rch binary not found; full coverage Cargo gates must be offloaded"
+        exit 1
+    fi
+}
+
+# Invoked indirectly through run_cmd's "$@" command dispatch.
+# shellcheck disable=SC2317
+run_cargo() {
+    "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$RCH_TARGET_DIR" cargo "$@"
 }
 
 run_cmd() {
@@ -73,20 +93,22 @@ run_cmd() {
     local err_msg
     err_msg=$(tail -3 "$log_file" | tr '\n' ' ')
     e2e_test_fail "$test_name" "$suite" "$duration" 0 "$err_msg" "CommandFailure"
-    return $exit_code
+    return "$exit_code"
 }
 
 # ─── Phase 1: Unit Tests ───────────────────────────────────────────────────
+
+ensure_rch
 
 phase_start=$(now_ms)
 e2e_phase_start "unit_tests" "Running connector/query/security unit tests"
 
 run_cmd "connector_edge_cases" "unit" "$UNIT_LOG" \
-    cargo test connectors:: --no-fail-fast
+    run_cargo test connectors:: --no-fail-fast
 run_cmd "query_parsing" "unit" "$UNIT_LOG" \
-    cargo test search::query::tests --no-fail-fast
+    run_cargo test search::query::tests --no-fail-fast
 run_cmd "security_paths" "unit" "$UNIT_LOG" \
-    cargo test pages::verify::tests --no-fail-fast
+    run_cargo test pages::verify::tests --no-fail-fast
 
 phase_end=$(now_ms)
 e2e_phase_end "unit_tests" $((phase_end - phase_start))
@@ -140,7 +162,7 @@ phase_start=$(now_ms)
 e2e_phase_start "coverage" "Generating coverage report"
 
 run_cmd "coverage_report" "coverage" "$COVERAGE_LOG" \
-    cargo +nightly llvm-cov --lib --html --output-dir "${OUTPUT_DIR}/coverage"
+    run_cargo +nightly llvm-cov --lib --html --output-dir "${OUTPUT_DIR}/coverage"
 
 phase_end=$(now_ms)
 e2e_phase_end "coverage" $((phase_end - phase_start))
