@@ -336,9 +336,9 @@ pub fn plan_answer_pack(
 
     while !remaining.is_empty() && selected.len() < request.limits.max_evidence {
         let mut best: Option<ScoredCandidate> = None;
-        let mut best_position = 0usize;
+        let mut next_remaining = Vec::with_capacity(remaining.len());
 
-        for (position, candidate_index) in remaining.iter().copied().enumerate() {
+        for candidate_index in remaining.iter().copied() {
             let candidate = &request.candidates[candidate_index];
             if let Some(reason) = hard_omission_reason(candidate, &request, &selected_state) {
                 let score = score_candidate(
@@ -372,6 +372,7 @@ pub fn plan_answer_pack(
                 continue;
             }
 
+            next_remaining.push(candidate_index);
             let token_cost = estimated_tokens(&excerpt);
             let score = score_candidate(
                 candidate,
@@ -398,15 +399,16 @@ pub fn plan_answer_pack(
                 .is_lt()
             }) {
                 best = Some(scored);
-                best_position = position;
             }
         }
 
         let Some(best_candidate) = best else {
+            remaining = next_remaining;
             break;
         };
 
-        remaining.remove(best_position);
+        next_remaining.retain(|candidate_index| *candidate_index != best_candidate.index);
+        remaining = next_remaining;
         let candidate = &request.candidates[best_candidate.index];
 
         if used_tokens.saturating_add(best_candidate.score.token_cost) > request.limits.max_tokens {
@@ -959,6 +961,7 @@ mod tests {
 
         let mut req = request(vec![first, second]);
         req.limits.max_tokens = 1_024;
+        req.limits.max_excerpt_chars = 4_096;
         req.candidates[0].excerpt = "x".repeat(4_096);
         req.candidates[1].excerpt = "y".repeat(4);
 
@@ -976,7 +979,7 @@ mod tests {
     fn source_diversity_changes_second_pick() {
         let first = candidate("a", "local", "/s/a.jsonl", 10.0);
         let same_source = candidate("b", "local", "/s/b.jsonl", 9.9);
-        let different_source = candidate("c", "remote", "/s/c.jsonl", 9.8);
+        let different_source = candidate("c", "remote", "/s/c.jsonl", 9.9);
 
         let mut req = request(vec![first, same_source, different_source]);
         req.limits.max_evidence = 2;
