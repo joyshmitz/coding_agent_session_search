@@ -24,6 +24,7 @@ pub(crate) mod raw_mirror;
 pub mod search;
 pub mod sources;
 pub mod storage;
+pub mod swarm_status;
 pub mod topology_budget;
 pub mod tui_asciicast;
 pub mod ui;
