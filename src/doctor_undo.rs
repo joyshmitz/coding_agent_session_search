@@ -569,7 +569,10 @@ mod tests {
         // Undo MUST restore the file from backup byte-identically.
         let receipt = undo_run(&data_dir, &run_id, "sha-quar-undo").expect("undo ok");
         assert_eq!(receipt.steps_succeeded, 1);
-        assert!(target.exists(), "post-undo: file restored at original location");
+        assert!(
+            target.exists(),
+            "post-undo: file restored at original location"
+        );
         assert_eq!(fs::read(&target).unwrap(), pre.to_vec());
     }
 

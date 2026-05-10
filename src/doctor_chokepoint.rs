@@ -1695,8 +1695,8 @@ mod tests {
 
         // Step 6: restore the post-mutation state and undo cleanly.
         fs::write(&target, post).unwrap();
-        let undo = crate::doctor_undo::undo_run(&data_dir, &run_id, "e2e-sha")
-            .expect("step-6 undo");
+        let undo =
+            crate::doctor_undo::undo_run(&data_dir, &run_id, "e2e-sha").expect("step-6 undo");
         assert_eq!(undo.steps_succeeded, 1);
         assert_eq!(fs::read(&target).unwrap(), pre.to_vec());
 
