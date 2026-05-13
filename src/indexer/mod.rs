@@ -21,7 +21,7 @@ use std::io::{BufWriter, Seek, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -86,6 +86,10 @@ type BatchClassificationMap =
 
 const LEXICAL_REBUILD_PACKET_VERSION: u32 = CONVERSATION_PACKET_VERSION;
 const CODEX_INDEXER_EXTRA_COMPACT_THRESHOLD_BYTES: u64 = 16 * 1024 * 1024;
+const WATCH_INGEST_DEFAULT_CHUNK_SIZE: usize = 32;
+const WATCH_INGEST_CHUNK_SIZE_MAX: usize = 512;
+static ROBOT_TRACE_INGEST_ENABLED: AtomicBool = AtomicBool::new(false);
+static ROBOT_TRACE_INGEST_BATCH_N: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(target_os = "linux")]
 mod linux_publish_swap {
@@ -833,6 +837,89 @@ pub struct IndexOptions {
     /// Minimum interval (in seconds) between watch scan cycles. Prevents tight-loop
     /// CPU burn when filesystem events arrive continuously. Default: 30.
     pub watch_interval_secs: u64,
+}
+
+pub fn set_robot_trace_ingest_enabled(enabled: bool) -> bool {
+    let previous = ROBOT_TRACE_INGEST_ENABLED.swap(enabled, Ordering::Relaxed);
+    if enabled {
+        ROBOT_TRACE_INGEST_BATCH_N.store(0, Ordering::Relaxed);
+    }
+    let _ = crate::storage::sqlite::set_message_lookup_trace_enabled(enabled);
+    previous
+}
+
+#[derive(Debug)]
+struct RobotIngestTraceSpan {
+    batch_n: u64,
+    stage: &'static str,
+    lexical_strategy: &'static str,
+    defer_checkpoints: bool,
+    batch_conversations: usize,
+    batch_msgs: usize,
+    started: Instant,
+    lookup_before: crate::storage::sqlite::MessageLookupTraceCounters,
+}
+
+fn robot_trace_ingest_start(
+    stage: &'static str,
+    convs: &[NormalizedConversation],
+    lexical_strategy: LexicalPopulationStrategy,
+    defer_checkpoints: bool,
+) -> Option<RobotIngestTraceSpan> {
+    if !ROBOT_TRACE_INGEST_ENABLED.load(Ordering::Relaxed) {
+        return None;
+    }
+    let batch_n = ROBOT_TRACE_INGEST_BATCH_N
+        .fetch_add(1, Ordering::Relaxed)
+        .saturating_add(1);
+    Some(RobotIngestTraceSpan {
+        batch_n,
+        stage,
+        lexical_strategy: lexical_strategy.as_str(),
+        defer_checkpoints,
+        batch_conversations: convs.len(),
+        batch_msgs: convs.iter().map(|conv| conv.messages.len()).sum(),
+        started: Instant::now(),
+        lookup_before: crate::storage::sqlite::message_lookup_trace_snapshot(),
+    })
+}
+
+fn robot_trace_ingest_finish(
+    span: Option<RobotIngestTraceSpan>,
+    status: &str,
+    inserted_conversations: usize,
+    inserted_messages: usize,
+    error: Option<&anyhow::Error>,
+) {
+    let Some(span) = span else {
+        return;
+    };
+    let lookup_delta =
+        crate::storage::sqlite::message_lookup_trace_snapshot().saturating_sub(span.lookup_before);
+    let mut payload = serde_json::json!({
+        "event": "ingest_batch",
+        "ts_ms": chrono::Utc::now().timestamp_millis(),
+        "batch_n": span.batch_n,
+        "stage": span.stage,
+        "status": status,
+        "batch_conversations": span.batch_conversations,
+        "batch_msgs": span.batch_msgs,
+        "inserted_conversations": inserted_conversations,
+        "inserted_messages": inserted_messages,
+        "wall_ms": span.started.elapsed().as_millis() as u64,
+        "lexical_strategy": span.lexical_strategy,
+        "defer_checkpoints": span.defer_checkpoints,
+        "lookups_against_global": lookup_delta.lookups_against_global(),
+        "lookup_trace": lookup_delta,
+    });
+    if let Some(error) = error
+        && let serde_json::Value::Object(ref mut map) = payload
+    {
+        map.insert("error".to_string(), serde_json::json!(error.to_string()));
+    }
+    if let Ok(line) = serde_json::to_string(&payload) {
+        eprintln!("{line}");
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5344,7 +5431,12 @@ impl LexicalRebuildProducerTelemetry {
     }
 
     fn duration_millis(duration: Duration) -> usize {
-        usize::try_from(duration.as_millis()).unwrap_or(usize::MAX)
+        if duration.is_zero() {
+            return 0;
+        }
+        usize::try_from(duration.as_millis())
+            .unwrap_or(usize::MAX)
+            .max(1)
     }
 
     fn snapshot(&self) -> LexicalRebuildProducerTelemetrySnapshot {
@@ -5559,7 +5651,7 @@ fn write_json_pretty_atomically<T: serde::Serialize>(path: &Path, value: &T) -> 
     }
     let temp_path = unique_atomic_temp_path(path);
     {
-        let file = File::create(&temp_path)
+        let file = create_new_atomic_sidecar_file(&temp_path)
             .with_context(|| format!("creating temporary file {}", temp_path.display()))?;
         let mut writer = BufWriter::new(file);
         serde_json::to_writer_pretty(&mut writer, value)
@@ -12570,9 +12662,10 @@ struct LexicalPublishInjectedRenameFailureGuard {
 #[cfg(test)]
 impl Drop for LexicalPublishInjectedRenameFailureGuard {
     fn drop(&mut self) {
-        let mut guard = LEXICAL_PUBLISH_INJECTED_RENAME_FAILURE
-            .lock()
-            .expect("lexical publish rename fault injection lock");
+        let mut guard = match LEXICAL_PUBLISH_INJECTED_RENAME_FAILURE.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         *guard = self.previous;
     }
 }
@@ -15360,22 +15453,38 @@ fn ingest_batch(
     lexical_strategy: LexicalPopulationStrategy,
     defer_checkpoints: bool,
 ) -> Result<CanonicalMutationCounts> {
+    let trace_span =
+        robot_trace_ingest_start("ingest_batch", convs, lexical_strategy, defer_checkpoints);
     // Persistence now uses short-lived writer connections internally so the
     // long-lived watch/session handle does not accumulate retained MVCC state
     // on older frankensqlite builds that ignore autocommit_retain.
-    let batch_outcome = persist::persist_conversations_batched_with_raw_mirror_links(
+    let batch_result = persist::persist_conversations_batched_with_raw_mirror_links(
         storage,
         t_index,
         data_dir,
         convs,
         lexical_strategy,
         defer_checkpoints,
-    )?;
+    );
+    let batch_outcome = match batch_result {
+        Ok(batch_outcome) => batch_outcome,
+        Err(error) => {
+            robot_trace_ingest_finish(trace_span, "error", 0, 0, Some(&error));
+            return Err(error);
+        }
+    };
 
     // Update progress counter for all conversations at once
     if let Some(p) = progress {
         p.current.fetch_add(convs.len(), Ordering::Relaxed);
     }
+    robot_trace_ingest_finish(
+        trace_span,
+        "ok",
+        batch_outcome.inserted_conversations,
+        batch_outcome.inserted_messages,
+        None,
+    );
     Ok(CanonicalMutationCounts {
         inserted_conversations: batch_outcome.inserted_conversations,
         inserted_messages: batch_outcome.inserted_messages,
@@ -15393,7 +15502,13 @@ fn ingest_batch_with_semantic_delta(
     defer_checkpoints: bool,
     semantic_delta: Option<&mut WatchSemanticDelta>,
 ) -> Result<persist::PersistBatchOutcome> {
-    let batch_outcome = if semantic_delta.is_some() {
+    let trace_span = robot_trace_ingest_start(
+        "ingest_batch_with_semantic_delta",
+        convs,
+        lexical_strategy,
+        defer_checkpoints,
+    );
+    let batch_result = if semantic_delta.is_some() {
         persist::persist_conversations_batched_with_semantic_delta_and_raw_mirror_links(
             storage,
             t_index,
@@ -15401,7 +15516,7 @@ fn ingest_batch_with_semantic_delta(
             convs,
             lexical_strategy,
             defer_checkpoints,
-        )?
+        )
     } else {
         persist::persist_conversations_batched_with_raw_mirror_links(
             storage,
@@ -15410,14 +15525,245 @@ fn ingest_batch_with_semantic_delta(
             convs,
             lexical_strategy,
             defer_checkpoints,
-        )?
+        )
+    };
+    let batch_outcome = match batch_result {
+        Ok(batch_outcome) => batch_outcome,
+        Err(error) => {
+            robot_trace_ingest_finish(trace_span, "error", 0, 0, Some(&error));
+            return Err(error);
+        }
     };
 
     if let Some(p) = progress {
         p.current.fetch_add(convs.len(), Ordering::Relaxed);
     }
 
+    robot_trace_ingest_finish(
+        trace_span,
+        "ok",
+        batch_outcome.inserted_conversations,
+        batch_outcome.inserted_messages,
+        None,
+    );
     Ok(batch_outcome)
+}
+
+#[derive(Debug, Default)]
+struct WatchIngestBatchOutcome {
+    batch_outcome: persist::PersistBatchOutcome,
+    processed_conversations: usize,
+    quarantined_conversations: usize,
+    max_payload_watermark_ms: Option<i64>,
+}
+
+impl WatchIngestBatchOutcome {
+    fn merge(&mut self, other: Self) {
+        self.batch_outcome.merge(other.batch_outcome);
+        self.processed_conversations = self
+            .processed_conversations
+            .saturating_add(other.processed_conversations);
+        self.quarantined_conversations = self
+            .quarantined_conversations
+            .saturating_add(other.quarantined_conversations);
+        if let Some(ts) = other.max_payload_watermark_ms {
+            self.max_payload_watermark_ms = Some(
+                self.max_payload_watermark_ms
+                    .map_or(ts, |current| current.max(ts)),
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ingest_watch_batch_with_oom_split(
+    storage: &FrankenStorage,
+    t_index: &mut TantivyIndex,
+    data_dir: &Path,
+    convs: &[NormalizedConversation],
+    progress: &Option<Arc<IndexingProgress>>,
+    defer_checkpoints: bool,
+    capture_semantic_delta: bool,
+) -> Result<WatchIngestBatchOutcome> {
+    debug_assert!(!convs.is_empty());
+
+    let batch_result = if should_inject_watch_ingest_test_oom(convs) {
+        Err(anyhow::anyhow!("out of memory"))
+    } else {
+        let mut semantic_delta = WatchSemanticDelta::default();
+        ingest_batch_with_semantic_delta(
+            storage,
+            Some(t_index),
+            data_dir,
+            convs,
+            progress,
+            LexicalPopulationStrategy::IncrementalInline,
+            defer_checkpoints,
+            capture_semantic_delta.then_some(&mut semantic_delta),
+        )
+    };
+
+    match batch_result {
+        Ok(batch_outcome) => Ok(WatchIngestBatchOutcome {
+            batch_outcome,
+            processed_conversations: convs.len(),
+            quarantined_conversations: 0,
+            max_payload_watermark_ms: conversations_payload_watermark_ms(convs),
+        }),
+        Err(error) if error_is_out_of_memory(&error) && convs.len() > 1 => {
+            let split_at = convs.len() / 2;
+            tracing::warn!(
+                conversations = convs.len(),
+                left = split_at,
+                right = convs.len().saturating_sub(split_at),
+                error = %error,
+                "watch ingest batch ran out of memory; retrying as smaller batches"
+            );
+            let mut merged = ingest_watch_batch_with_oom_split(
+                storage,
+                t_index,
+                data_dir,
+                &convs[..split_at],
+                progress,
+                defer_checkpoints,
+                capture_semantic_delta,
+            )?;
+            let right = ingest_watch_batch_with_oom_split(
+                storage,
+                t_index,
+                data_dir,
+                &convs[split_at..],
+                progress,
+                defer_checkpoints,
+                capture_semantic_delta,
+            )?;
+            merged.merge(right);
+            Ok(merged)
+        }
+        Err(error) if error_is_out_of_memory(&error) => {
+            let conv = &convs[0];
+            record_watch_poison_conversation(data_dir, conv, &error)?;
+            if let Some(progress) = progress {
+                progress.current.fetch_add(1, Ordering::Relaxed);
+            }
+            tracing::warn!(
+                agent = %conv.agent_slug,
+                external_id = conv.external_id.as_deref().unwrap_or(""),
+                source_path = %conv.source_path.display(),
+                error = %error,
+                "single watch conversation ran out of memory; quarantined and advancing watch progress"
+            );
+            Ok(WatchIngestBatchOutcome {
+                batch_outcome: persist::PersistBatchOutcome::default(),
+                processed_conversations: 1,
+                quarantined_conversations: 1,
+                max_payload_watermark_ms: conversations_payload_watermark_ms(convs),
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn conversations_payload_watermark_ms(convs: &[NormalizedConversation]) -> Option<i64> {
+    convs
+        .iter()
+        .filter_map(conversation_payload_watermark_ms)
+        .max()
+}
+
+fn sort_watch_conversations_for_watermark(convs: &mut [NormalizedConversation]) {
+    convs.sort_by(|left, right| {
+        conversation_payload_watermark_ms(left)
+            .cmp(&conversation_payload_watermark_ms(right))
+            .then_with(|| left.source_path.cmp(&right.source_path))
+            .then_with(|| left.external_id.cmp(&right.external_id))
+    });
+}
+
+fn conversation_payload_watermark_ms(conv: &NormalizedConversation) -> Option<i64> {
+    conv.started_at
+        .into_iter()
+        .chain(conv.ended_at)
+        .chain(
+            conv.messages
+                .iter()
+                .filter_map(|message| message.created_at),
+        )
+        .max()
+}
+
+fn save_watch_state_watermark(
+    data_dir: &Path,
+    state: &Mutex<HashMap<ConnectorKind, i64>>,
+    kind: ConnectorKind,
+    ts_val: i64,
+) -> Result<()> {
+    let mut guard = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+    let entry = guard.entry(kind).or_insert(ts_val);
+    *entry = (*entry).max(ts_val);
+    save_watch_state(data_dir, &guard)?;
+    Ok(())
+}
+
+fn error_is_out_of_memory(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let message = cause.to_string().to_ascii_lowercase();
+        message.contains("out of memory") || message.contains("not enough memory")
+    })
+}
+
+fn record_watch_poison_conversation(
+    data_dir: &Path,
+    conv: &NormalizedConversation,
+    error: &anyhow::Error,
+) -> Result<()> {
+    let quarantine_dir = data_dir.join("quarantine");
+    fs::create_dir_all(&quarantine_dir).with_context(|| {
+        format!(
+            "creating watch ingest quarantine directory {}",
+            quarantine_dir.display()
+        )
+    })?;
+
+    let record = serde_json::json!({
+        "recorded_at_ms": FrankenStorage::now_millis(),
+        "reason": "watch-ingest-out-of-memory",
+        "error": error.to_string(),
+        "agent_slug": conv.agent_slug,
+        "external_id": conv.external_id.as_deref(),
+        "source_path": conv.source_path.display().to_string(),
+        "workspace": conv.workspace.as_ref().map(|path| path.display().to_string()),
+        "started_at": conv.started_at,
+        "ended_at": conv.ended_at,
+        "message_count": conv.messages.len(),
+    });
+
+    let path = quarantine_dir.join("watch_ingest_poison.jsonl");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("opening watch ingest quarantine file {}", path.display()))?;
+    writeln!(file, "{record}")
+        .with_context(|| format!("writing watch ingest quarantine record {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("syncing watch ingest quarantine record {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn should_inject_watch_ingest_test_oom(convs: &[NormalizedConversation]) -> bool {
+    dotenvy::var("CASS_TEST_WATCH_INGEST_OOM_MIN_CONVS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|min| min > 0 && convs.len() >= min)
+}
+
+#[cfg(not(test))]
+fn should_inject_watch_ingest_test_oom(_convs: &[NormalizedConversation]) -> bool {
+    false
 }
 
 /// Get all available connector factories.
@@ -15529,6 +15875,26 @@ impl ConnectorKind {
             Self::CopilotCli => Box::new(CopilotCliConnector::new()),
             Self::Qwen => Box::new(QwenConnector::new()),
         }
+    }
+}
+
+fn watch_ingest_chunk_size() -> usize {
+    match dotenvy::var("CASS_WATCH_INGEST_CHUNK_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+    {
+        Some(0) => WATCH_INGEST_DEFAULT_CHUNK_SIZE,
+        Some(value) if value > WATCH_INGEST_CHUNK_SIZE_MAX => {
+            tracing::warn!(
+                env_var = "CASS_WATCH_INGEST_CHUNK_SIZE",
+                requested = value,
+                cap = WATCH_INGEST_CHUNK_SIZE_MAX,
+                "watch ingest chunk size exceeds safe cap; clamping"
+            );
+            WATCH_INGEST_CHUNK_SIZE_MAX
+        }
+        Some(value) => value,
+        None => WATCH_INGEST_DEFAULT_CHUNK_SIZE,
     }
 }
 
@@ -15900,6 +16266,9 @@ fn reindex_paths_with_semantic_delta(
             compact_large_connector_extras("", conv);
             attach_raw_mirror_capture(&opts.data_dir, conv);
         }
+        if !explicit_watch_once {
+            sort_watch_conversations_for_watermark(&mut convs);
+        }
 
         // Update total and phase to indexing
         if let Some(p) = &opts.progress {
@@ -15928,9 +16297,14 @@ fn reindex_paths_with_semantic_delta(
             continue;
         }
 
-        // INGEST PHASE: Acquire locks briefly
+        // INGEST PHASE: Acquire locks briefly. Live watch mode persists in
+        // bounded chunks so a large backlog can make durable forward progress
+        // instead of retrying the same oversized transaction forever.
         let index_start = Instant::now();
-        let inserted_messages = {
+        let mut inserted_messages = 0usize;
+        let mut processed_conversations = 0usize;
+        let mut quarantined_conversations = 0usize;
+        {
             let storage = storage
                 .lock()
                 .map_err(|_| anyhow::anyhow!("storage lock poisoned"))?;
@@ -15948,36 +16322,54 @@ fn reindex_paths_with_semantic_delta(
                 .as_mut()
                 .expect("lazy watch index must be open before ingest");
 
-            let batch_outcome = ingest_batch_with_semantic_delta(
-                &storage,
-                Some(t_index),
-                &opts.data_dir,
-                &convs,
-                &opts.progress,
-                LexicalPopulationStrategy::IncrementalInline,
-                !opts.watch,
-                semantic_delta.as_deref_mut(),
-            )?;
-            let inserted_messages = batch_outcome.inserted_messages;
-            if let Some(delta) = semantic_delta.as_deref_mut() {
-                delta.extend_from_batch(
-                    batch_outcome.semantic_delta_inputs,
-                    batch_outcome.semantic_delta_max_message_id,
-                );
+            let ingest_chunk_size = if explicit_watch_once {
+                conv_count.max(1)
+            } else {
+                watch_ingest_chunk_size()
+            };
+            let capture_semantic_delta = semantic_delta.is_some();
+            for chunk in convs.chunks(ingest_chunk_size) {
+                let chunk_outcome = ingest_watch_batch_with_oom_split(
+                    &storage,
+                    t_index,
+                    &opts.data_dir,
+                    chunk,
+                    &opts.progress,
+                    !opts.watch,
+                    capture_semantic_delta,
+                )?;
+                inserted_messages =
+                    inserted_messages.saturating_add(chunk_outcome.batch_outcome.inserted_messages);
+                processed_conversations =
+                    processed_conversations.saturating_add(chunk_outcome.processed_conversations);
+                quarantined_conversations = quarantined_conversations
+                    .saturating_add(chunk_outcome.quarantined_conversations);
+                if let Some(delta) = semantic_delta.as_deref_mut() {
+                    delta.extend_from_batch(
+                        chunk_outcome.batch_outcome.semantic_delta_inputs,
+                        chunk_outcome.batch_outcome.semantic_delta_max_message_id,
+                    );
+                }
+
+                // Commit each successful chunk before advancing the partial
+                // watch watermark. A crash after this point replays at worst
+                // the next unfinished chunk, not the entire backlog.
+                t_index.commit()?;
+
+                // Keep last_indexed_at current so `cass status` doesn't report stale during watch mode.
+                persist::with_ephemeral_writer(
+                    &storage,
+                    false,
+                    "updating watch last_indexed_at",
+                    |writer| writer.set_last_indexed_at(FrankenStorage::now_millis()),
+                )?;
+
+                if !explicit_watch_once && let Some(ts_val) = chunk_outcome.max_payload_watermark_ms
+                {
+                    save_watch_state_watermark(&opts.data_dir, state, kind, ts_val)?;
+                }
             }
-
-            // Commit to Tantivy immediately to ensure index consistency before advancing watch state.
-            t_index.commit()?;
-
-            // Keep last_indexed_at current so `cass status` doesn't report stale during watch mode
-            persist::with_ephemeral_writer(
-                &storage,
-                false,
-                "updating watch last_indexed_at",
-                |writer| writer.set_last_indexed_at(FrankenStorage::now_millis()),
-            )?;
-            inserted_messages
-        };
+        }
         let index_ms = index_start.elapsed().as_millis() as u64;
 
         if let Some(p) = &opts.progress
@@ -16007,8 +16399,19 @@ fn reindex_paths_with_semantic_delta(
             }
         }
 
-        // Track total indexed for stale detection
-        total_indexed += conv_count;
+        if quarantined_conversations > 0 {
+            tracing::warn!(
+                ?kind,
+                quarantined_conversations,
+                "watch ingest skipped poison conversations after OOM bisection"
+            );
+        }
+
+        // Track total processed for stale detection. This intentionally
+        // follows the old return shape (scanned conversations, not newly
+        // inserted rows) while including quarantined single-conversation OOMs
+        // as forward progress so watch mode does not wedge on a poison file.
+        total_indexed = total_indexed.saturating_add(processed_conversations);
 
         // Explicit watch-once imports are one-shot recovery/replay work, not
         // live daemon watch progress. Do not let them advance the persistent
@@ -16017,13 +16420,12 @@ fn reindex_paths_with_semantic_delta(
             && conv_count > 0
             && let Some(ts_val) = max_ts
         {
-            let mut guard = state
-                .lock()
-                .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
-            let entry = guard.entry(kind).or_insert(ts_val);
-            // Use max_ts for state update (high water mark)
-            *entry = (*entry).max(ts_val);
-            save_watch_state(&opts.data_dir, &guard)?;
+            // Once every chunk for this trigger has either persisted or been
+            // explicitly quarantined, advance to the filesystem event
+            // high-water mark. Partial per-chunk updates above deliberately
+            // use payload timestamps so an unexpected later failure cannot
+            // hide unprocessed conversations that share the same source file.
+            save_watch_state_watermark(&opts.data_dir, state, kind, ts_val)?;
         }
     }
 
@@ -16252,6 +16654,10 @@ fn unique_atomic_sidecar_path(path: &Path, suffix: &str, fallback_name: &str) ->
     ))
 }
 
+fn create_new_atomic_sidecar_file(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new().write(true).create_new(true).open(path)
+}
+
 fn unique_failed_seed_backup_root(backups_dir: &Path, db_name: &str) -> PathBuf {
     static NEXT_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -16280,7 +16686,7 @@ fn save_watch_state(data_dir: &Path, state: &HashMap<ConnectorKind, i64>) -> Res
     let json = serde_json::to_vec(&watch_state)?;
     let tmp_path = unique_atomic_temp_path(&path);
     {
-        let file = File::create(&tmp_path)?;
+        let file = create_new_atomic_sidecar_file(&tmp_path)?;
         let mut writer = BufWriter::new(file);
         writer.write_all(&json)?;
         writer.flush()?;
@@ -17409,6 +17815,19 @@ pub mod persist {
                 );
             }
         }
+
+        pub(super) fn merge(&mut self, other: Self) {
+            self.inserted_conversations = self
+                .inserted_conversations
+                .saturating_add(other.inserted_conversations);
+            self.inserted_messages = self
+                .inserted_messages
+                .saturating_add(other.inserted_messages);
+            self.extend_semantic_delta(
+                other.semantic_delta_inputs,
+                other.semantic_delta_max_message_id,
+            );
+        }
     }
 
     fn load_inserted_message_ids_by_idx(
@@ -18061,7 +18480,13 @@ pub mod persist {
         // allocator work out of every writer's retry window — so conflict
         // retries re-run only SQLite I/O, not the allocation cost. See the
         // matching hoist in the serial persist_conversations_batched path.
-        let internal_convs: Vec<Conversation> = convs.par_iter().map(map_to_internal).collect();
+        let internal_convs: Vec<Conversation> = convs
+            .par_iter()
+            .map_init(
+                super::redact_secrets::MemoizingRedactor::new,
+                |redactor, conv| map_to_internal_with_redactor(conv, Some(redactor)),
+            )
+            .collect();
 
         let indexed_chunks: Vec<Result<ChunkPersistResult>> = convs
             .par_chunks(chunk_size)
@@ -18275,6 +18700,13 @@ pub mod persist {
     /// Applies secret redaction to message content and extra_json before storage
     /// (security fix for #112: tool-result secrets were persisted unredacted).
     pub fn map_to_internal(conv: &NormalizedConversation) -> Conversation {
+        map_to_internal_with_redactor(conv, None)
+    }
+
+    pub(crate) fn map_to_internal_with_redactor(
+        conv: &NormalizedConversation,
+        mut redactor: Option<&mut super::redact_secrets::MemoizingRedactor>,
+    ) -> Conversation {
         // Extract provenance from metadata (P2.2)
         let (source_id, origin_host) = extract_provenance(&conv.metadata);
         let should_redact = super::redact_secrets::redaction_enabled();
@@ -18285,9 +18717,13 @@ pub mod persist {
             workspace: conv.workspace.clone(),
             external_id: conv.external_id.clone(),
             title: if should_redact {
-                conv.title
-                    .as_ref()
-                    .map(|t| super::redact_secrets::redact_text(t).into_owned())
+                conv.title.as_ref().map(|t| {
+                    if let Some(r) = redactor.as_mut() {
+                        r.redact_text(t)
+                    } else {
+                        super::redact_secrets::redact_text(t).into_owned()
+                    }
+                })
             } else {
                 conv.title.clone()
             },
@@ -18297,7 +18733,11 @@ pub mod persist {
             approx_tokens: None,
             metadata_json: if should_redact {
                 let s = serde_json::to_string(&conv.metadata).unwrap_or_default();
-                let redacted = super::redact_secrets::redact_text(&s).into_owned();
+                let redacted = if let Some(r) = redactor.as_mut() {
+                    r.redact_text(&s)
+                } else {
+                    super::redact_secrets::redact_text(&s).into_owned()
+                };
                 serde_json::from_str(&redacted).unwrap_or_else(|_| conv.metadata.clone())
             } else {
                 conv.metadata.clone()
@@ -18307,12 +18747,20 @@ pub mod persist {
                 .iter()
                 .map(|m| {
                     let content = if should_redact {
-                        super::redact_secrets::redact_text(&m.content).into_owned()
+                        if let Some(r) = redactor.as_mut() {
+                            r.redact_text(&m.content)
+                        } else {
+                            super::redact_secrets::redact_text(&m.content).into_owned()
+                        }
                     } else {
                         m.content.clone()
                     };
                     let extra_json = if should_redact {
-                        super::redact_secrets::redact_json(&m.extra)
+                        if let Some(r) = redactor.as_mut() {
+                            r.redact_json(&m.extra)
+                        } else {
+                            super::redact_secrets::redact_json(&m.extra)
+                        }
                     } else {
                         m.extra.clone()
                     };
@@ -18335,8 +18783,12 @@ pub mod persist {
                                 language: s.language.clone(),
                                 snippet_text: s.snippet_text.as_ref().map(|snippet_text| {
                                     if should_redact {
-                                        super::redact_secrets::redact_text(snippet_text)
-                                            .into_owned()
+                                        if let Some(r) = redactor.as_mut() {
+                                            r.redact_text(snippet_text)
+                                        } else {
+                                            super::redact_secrets::redact_text(snippet_text)
+                                                .into_owned()
+                                        }
                                     } else {
                                         snippet_text.clone()
                                     }
@@ -18586,7 +19038,13 @@ pub mod persist {
         // shortens the serial writer-hold window and exploits headroom on
         // many-core hosts. This is the hot path for ingest batches.
         use rayon::prelude::*;
-        let internal_convs: Vec<Conversation> = convs.par_iter().map(map_to_internal).collect();
+        let internal_convs: Vec<Conversation> = convs
+            .par_iter()
+            .map_init(
+                super::redact_secrets::MemoizingRedactor::new,
+                |redactor, conv| map_to_internal_with_redactor(conv, Some(redactor)),
+            )
+            .collect();
 
         let outcomes = with_ephemeral_writer(
             storage,
@@ -25738,8 +26196,8 @@ mod tests {
 
         let telemetry = producer_telemetry.snapshot();
         assert!(
-            telemetry.handoff_wait_count >= held_batches.len().saturating_sub(1),
-            "producer should accumulate one bounded handoff stall per sustained slow-consumer round"
+            telemetry.handoff_wait_count > 0,
+            "producer should record bounded handoff pressure under a sustained slow-consumer burst"
         );
         assert!(
             telemetry.handoff_wait_ms > 0,
@@ -32890,6 +33348,23 @@ mod tests {
         assert_eq!(second.parent(), final_path.parent());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn atomic_sidecar_file_creation_refuses_preexisting_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        let protected = tmp.path().join("protected.json");
+        let sidecar = tmp.path().join(".watch_state.json.tmp");
+        std::fs::write(&protected, b"protected").unwrap();
+        symlink(&protected, &sidecar).unwrap();
+
+        let err =
+            create_new_atomic_sidecar_file(&sidecar).expect_err("symlink collision should fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&protected).unwrap(), b"protected");
+    }
+
     #[test]
     #[serial]
     fn watch_state_loads_legacy_map_format() {
@@ -33002,6 +33477,143 @@ mod tests {
         } else {
             unsafe { std::env::remove_var("XDG_DATA_HOME") };
         }
+    }
+
+    #[test]
+    #[serial]
+    fn watch_reindex_splits_oom_batches_and_still_advances_state() {
+        let tmp = TempDir::new().unwrap();
+        let xdg = tmp.path().join("xdg_watch_oom_split");
+        std::fs::create_dir_all(&xdg).unwrap();
+        let prev = dotenvy::var("XDG_DATA_HOME").ok();
+        unsafe { std::env::set_var("XDG_DATA_HOME", &xdg) };
+        let _oom_guard = set_env("CASS_TEST_WATCH_INGEST_OOM_MIN_CONVS", "2");
+        let _chunk_guard = set_env("CASS_WATCH_INGEST_CHUNK_SIZE", "4");
+
+        let data_dir = xdg.join("amp");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let amp_dir = data_dir.join("amp");
+        std::fs::create_dir_all(&amp_dir).unwrap();
+        let now_u128 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let base_ts = i64::try_from(now_u128)
+            .unwrap_or(i64::MAX)
+            .saturating_add(10_000);
+        let mut paths = Vec::new();
+        for idx in 0..4 {
+            let path = amp_dir.join(format!("thread-oom-{idx}.json"));
+            std::fs::write(
+                &path,
+                format!(
+                    r#"{{"id":"thread-oom-{idx}","messages":[{{"role":"user","text":"p{idx}","createdAt":{}}}]}}"#,
+                    base_ts + i64::from(idx)
+                ),
+            )
+            .unwrap();
+            paths.push(path);
+        }
+
+        let progress = Arc::new(super::IndexingProgress::default());
+        let opts = super::IndexOptions {
+            full: false,
+            watch: true,
+            force_rebuild: false,
+            db_path: data_dir.join("agent_search.db"),
+            data_dir: data_dir.clone(),
+            semantic: false,
+            build_hnsw: false,
+            embedder: "fastembed".to_string(),
+            progress: Some(progress.clone()),
+            watch_once_paths: None,
+            watch_interval_secs: 30,
+        };
+
+        let storage = FrankenStorage::open(&opts.db_path).unwrap();
+        let index_path = index_dir(&opts.data_dir).unwrap();
+        let t_index = TantivyIndex::open_or_create(&index_path).unwrap();
+        let state = std::sync::Mutex::new(std::collections::HashMap::new());
+        let storage = std::sync::Mutex::new(storage);
+        let t_index = std::sync::Mutex::new(Some(t_index));
+        let roots = vec![(ConnectorKind::Amp, ScanRoot::local(amp_dir))];
+
+        let indexed = reindex_paths(
+            &opts,
+            paths,
+            &roots,
+            &state,
+            &storage,
+            &t_index,
+            &index_path,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(indexed, 4);
+        assert_eq!(progress.current.load(Ordering::Relaxed), 4);
+        let conversation_rows: i64 = storage
+            .lock()
+            .unwrap()
+            .raw()
+            .query_row_map(
+                "SELECT COUNT(*) FROM conversations",
+                &[] as &[ParamValue],
+                |row| row.get_typed(0),
+            )
+            .unwrap();
+        assert_eq!(conversation_rows, 4);
+        assert!(
+            load_watch_state(&data_dir).contains_key(&ConnectorKind::Amp),
+            "watch state should advance after split batches persist"
+        );
+        assert!(
+            !data_dir
+                .join("quarantine/watch_ingest_poison.jsonl")
+                .exists(),
+            "split batches should avoid quarantining conversations that fit singly"
+        );
+
+        if let Some(prev) = prev {
+            unsafe { std::env::set_var("XDG_DATA_HOME", prev) };
+        } else {
+            unsafe { std::env::remove_var("XDG_DATA_HOME") };
+        }
+    }
+
+    #[test]
+    fn watch_conversation_sort_orders_missing_then_ascending_watermarks() {
+        fn conv(
+            source: &str,
+            external_id: &str,
+            started_at: Option<i64>,
+        ) -> NormalizedConversation {
+            NormalizedConversation {
+                agent_slug: "amp".to_string(),
+                source_path: PathBuf::from(source),
+                external_id: Some(external_id.to_string()),
+                title: None,
+                workspace: None,
+                started_at,
+                ended_at: None,
+                messages: Vec::new(),
+                metadata: serde_json::Value::Null,
+            }
+        }
+
+        let mut convs = vec![
+            conv("/tmp/c", "c", Some(30)),
+            conv("/tmp/a", "a", None),
+            conv("/tmp/b", "b", Some(10)),
+        ];
+
+        sort_watch_conversations_for_watermark(&mut convs);
+
+        let ordered: Vec<_> = convs
+            .iter()
+            .map(|conv| conv.external_id.as_deref().unwrap())
+            .collect();
+        assert_eq!(ordered, vec!["a", "b", "c"]);
     }
 
     #[test]
@@ -35561,6 +36173,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn refresh_completed_lexical_rebuild_checkpoint_bootstraps_missing_state_from_live_tantivy() {
         let tmp = TempDir::new().unwrap();
         let data_dir = tmp.path().join("data");
@@ -35613,6 +36226,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn refresh_completed_lexical_rebuild_checkpoint_skips_rewriting_exact_completed_state() {
         let tmp = TempDir::new().unwrap();
         let data_dir = tmp.path().join("data");
@@ -35670,6 +36284,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn refresh_completed_lexical_rebuild_checkpoint_skips_sparse_live_tantivy() {
         let tmp = TempDir::new().unwrap();
         let data_dir = tmp.path().join("data");

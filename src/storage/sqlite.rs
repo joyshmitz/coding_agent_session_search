@@ -262,6 +262,75 @@ impl LazyFrankenDb {
 
 static FRANKEN_RETRY_JITTER_STATE: AtomicU64 = AtomicU64::new(0x9e37_79b9_7f4a_7c15);
 static DOCTOR_MUTATION_DB_OPEN_BYPASS_DEPTH: AtomicUsize = AtomicUsize::new(0);
+static MESSAGE_LOOKUP_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
+static MESSAGE_LOOKUP_EXACT_IDX_PROBES: AtomicU64 = AtomicU64::new(0);
+static MESSAGE_LOOKUP_BOUNDED_QUERIES: AtomicU64 = AtomicU64::new(0);
+static MESSAGE_LOOKUP_FULL_SCAN_QUERIES: AtomicU64 = AtomicU64::new(0);
+static MESSAGE_LOOKUP_ROWS_MATERIALIZED: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub(crate) struct MessageLookupTraceCounters {
+    pub exact_idx_probes: u64,
+    pub bounded_lookup_queries: u64,
+    pub full_scan_queries: u64,
+    pub rows_materialized: u64,
+}
+
+impl MessageLookupTraceCounters {
+    pub(crate) fn saturating_sub(self, before: Self) -> Self {
+        Self {
+            exact_idx_probes: self
+                .exact_idx_probes
+                .saturating_sub(before.exact_idx_probes),
+            bounded_lookup_queries: self
+                .bounded_lookup_queries
+                .saturating_sub(before.bounded_lookup_queries),
+            full_scan_queries: self
+                .full_scan_queries
+                .saturating_sub(before.full_scan_queries),
+            rows_materialized: self
+                .rows_materialized
+                .saturating_sub(before.rows_materialized),
+        }
+    }
+
+    pub(crate) fn lookups_against_global(self) -> u64 {
+        self.exact_idx_probes.saturating_add(self.rows_materialized)
+    }
+}
+
+pub(crate) fn set_message_lookup_trace_enabled(enabled: bool) -> bool {
+    MESSAGE_LOOKUP_TRACE_ENABLED.swap(enabled, Ordering::Relaxed)
+}
+
+pub(crate) fn message_lookup_trace_snapshot() -> MessageLookupTraceCounters {
+    MessageLookupTraceCounters {
+        exact_idx_probes: MESSAGE_LOOKUP_EXACT_IDX_PROBES.load(Ordering::Relaxed),
+        bounded_lookup_queries: MESSAGE_LOOKUP_BOUNDED_QUERIES.load(Ordering::Relaxed),
+        full_scan_queries: MESSAGE_LOOKUP_FULL_SCAN_QUERIES.load(Ordering::Relaxed),
+        rows_materialized: MESSAGE_LOOKUP_ROWS_MATERIALIZED.load(Ordering::Relaxed),
+    }
+}
+
+fn record_message_lookup_exact_idx_probe() {
+    if MESSAGE_LOOKUP_TRACE_ENABLED.load(Ordering::Relaxed) {
+        MESSAGE_LOOKUP_EXACT_IDX_PROBES.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn record_message_lookup_bounded_queries(query_count: u64, rows: usize) {
+    if MESSAGE_LOOKUP_TRACE_ENABLED.load(Ordering::Relaxed) {
+        MESSAGE_LOOKUP_BOUNDED_QUERIES.fetch_add(query_count, Ordering::Relaxed);
+        MESSAGE_LOOKUP_ROWS_MATERIALIZED.fetch_add(rows as u64, Ordering::Relaxed);
+    }
+}
+
+fn record_message_lookup_full_scan_query(rows: usize) {
+    if MESSAGE_LOOKUP_TRACE_ENABLED.load(Ordering::Relaxed) {
+        MESSAGE_LOOKUP_FULL_SCAN_QUERIES.fetch_add(1, Ordering::Relaxed);
+        MESSAGE_LOOKUP_ROWS_MATERIALIZED.fetch_add(rows as u64, Ordering::Relaxed);
+    }
+}
 
 pub(crate) struct DoctorMutationDbOpenBypassGuard;
 
@@ -3856,28 +3925,52 @@ impl FrankenStorage {
             }
         }
 
-        if missing_tables.is_empty() {
-            return Ok(());
+        if !missing_tables.is_empty() {
+            info!(
+                missing_tables = ?missing_tables,
+                "repairing missing current-schema tables on an already-versioned cass database"
+            );
+
+            for batch in current_schema_repair_batches_for_missing_tables(&missing_tables)? {
+                self.conn
+                    .execute_batch(batch.sql)
+                    .with_context(|| format!("repairing current-schema batch {}", batch.name))?;
+            }
+
+            for &(table_name, probe_sql) in REQUIRED_CURRENT_SCHEMA_TABLE_PROBES {
+                if !missing_tables.contains(&table_name) {
+                    continue;
+                }
+                self.conn
+                    .query(probe_sql)
+                    .with_context(|| format!("verifying repaired schema table {table_name}"))?;
+            }
         }
+        self.repair_missing_conversation_token_columns()?;
+        Ok(())
+    }
 
-        info!(
-            missing_tables = ?missing_tables,
-            "repairing missing current-schema tables on an already-versioned cass database"
-        );
-
-        for batch in current_schema_repair_batches_for_missing_tables(&missing_tables)? {
-            self.conn
-                .execute_batch(batch.sql)
-                .with_context(|| format!("repairing current-schema batch {}", batch.name))?;
-        }
-
-        for &(table_name, probe_sql) in REQUIRED_CURRENT_SCHEMA_TABLE_PROBES {
-            if !missing_tables.contains(&table_name) {
+    fn repair_missing_conversation_token_columns(&self) -> Result<()> {
+        let columns = franken_table_column_names(&self.conn, "conversations")
+            .with_context(|| "inspecting conversations columns for token-summary repair")?;
+        let mut missing_columns = Vec::new();
+        for &(column_name, column_type) in REQUIRED_CONVERSATION_TOKEN_COLUMNS {
+            if columns.contains(column_name) {
                 continue;
             }
-            self.conn
-                .query(probe_sql)
-                .with_context(|| format!("verifying repaired schema table {table_name}"))?;
+            let sql = format!("ALTER TABLE conversations ADD COLUMN {column_name} {column_type};");
+            self.conn.execute(&sql).with_context(|| {
+                format!("adding missing conversations.{column_name} token-summary column")
+            })?;
+            missing_columns.push(column_name);
+        }
+        if !missing_columns.is_empty() {
+            tracing::warn!(
+                target: "cass::schema_repair",
+                db_path = %self.db_path.display(),
+                missing_columns = ?missing_columns,
+                "cass#222: repaired missing conversations token-summary columns"
+            );
         }
         Ok(())
     }
@@ -3895,11 +3988,11 @@ impl FrankenStorage {
     ///
     /// This pass runs at indexer startup as defense in depth: it scans each
     /// child table for rows whose parent row has gone missing and removes them
-    /// in a single transaction, breaking the failure cycle even when the
+    /// in bounded committed chunks, breaking the failure cycle even when the
     /// underlying transaction-discipline bug has not been fully root-caused.
-    /// The pass is bounded (one count + one DELETE per child table), idempotent
-    /// (a clean database is a no-op), and emits a `WARN` after a successful
-    /// commit so the upstream `drop_close` condition stays visible.
+    /// The pass is idempotent (a clean database is a no-op), and emits a
+    /// `WARN` after successful cleanup so the upstream `drop_close` condition
+    /// stays visible.
     pub(crate) fn cleanup_orphan_fk_rows(&self) -> Result<OrphanFkCleanupReport> {
         let mut report = OrphanFkCleanupReport::default();
         let orphan_message_ids = match collect_orphan_message_ids(&self.conn) {
@@ -3919,74 +4012,54 @@ impl FrankenStorage {
             report.record("messages", orphan_message_ids.len() as i64);
         }
 
-        let mut to_delete: SmallVec<[&'static OrphanFkTable; 8]> = SmallVec::new();
+        let mut direct_orphan_batches: SmallVec<[(&'static OrphanFkTable, Vec<i64>); 8]> =
+            SmallVec::new();
         for entry in ORPHAN_DIRECT_CHILD_TABLES {
-            let count: i64 = match self
-                .conn
-                .query_row_map(entry.count_sql, fparams![], |row| row.get_typed::<i64>(0))
-            {
-                Ok(c) => c,
-                Err(err) => {
-                    // Tolerant probe: a missing child or parent table (older
-                    // schema, freshly-rebuilt DB) just means there's nothing to
-                    // clean up. Anything else is logged at debug and skipped
-                    // rather than failing indexer startup.
-                    tracing::debug!(
-                        target: "cass::fk_repair",
-                        child_table = entry.child_table,
-                        error = %err,
-                        "skipping orphan probe (table or column unavailable)"
-                    );
-                    continue;
-                }
-            };
-            if count > 0 {
-                report.record(entry.child_table, count);
-                to_delete.push(entry);
-            }
-        }
-
-        if orphan_message_ids.is_empty() && to_delete.is_empty() {
-            return Ok(report);
-        }
-
-        let mut tx = self.conn.transaction()?;
-        if !orphan_message_ids.is_empty() {
-            for entry in ORPHAN_MESSAGE_DEPENDENT_TABLES {
-                if let Err(err) =
-                    delete_rows_by_i64_chunks(&tx, entry.delete_prefix, &orphan_message_ids)
+            let ids: Vec<i64> =
+                match self
+                    .conn
+                    .query_map_collect(entry.orphan_id_sql, fparams![], |row| row.get_typed(0))
                 {
-                    if error_indicates_missing_table(&err) {
+                    Ok(ids) => ids,
+                    Err(err)
+                        if error_indicates_missing_table(&err)
+                            || error_indicates_missing_column(&err) =>
+                    {
+                        // Tolerant probe: a missing child/parent table or FK
+                        // column on older schemas means there is nothing to
+                        // clean up for this table.
                         tracing::debug!(
                             target: "cass::fk_repair",
                             child_table = entry.child_table,
                             error = %err,
-                            "skipping orphan-message dependent cleanup (table unavailable)"
+                            "skipping orphan probe (table or column unavailable)"
                         );
                         continue;
                     }
-                    return Err(err).with_context(|| {
-                        format!(
-                            "deleting rows from {} that depend on orphan messages",
-                            entry.child_table
-                        )
-                    });
-                }
+                    Err(err) => {
+                        return Err(err).with_context(|| {
+                            format!("probing orphan rows in {}", entry.child_table)
+                        });
+                    }
+                };
+            if !ids.is_empty() {
+                report.record(entry.child_table, ids.len() as i64);
+                direct_orphan_batches.push((entry, ids));
             }
         }
-        for entry in &to_delete {
-            tx.execute_compat(entry.delete_sql, fparams![])
+
+        if orphan_message_ids.is_empty() && direct_orphan_batches.is_empty() {
+            return Ok(report);
+        }
+
+        if !orphan_message_ids.is_empty() {
+            delete_orphan_message_ids_bisecting_oom(&self.conn, &orphan_message_ids)
+                .context("deleting orphan message rows and dependent children")?;
+        }
+        for (entry, ids) in &direct_orphan_batches {
+            delete_direct_orphan_ids_bisecting_oom(&self.conn, entry, ids)
                 .with_context(|| format!("deleting orphan rows from {}", entry.child_table))?;
         }
-        if !orphan_message_ids.is_empty() {
-            delete_rows_by_i64_chunks(
-                &tx,
-                "DELETE FROM messages WHERE id IN (",
-                &orphan_message_ids,
-            )
-            .context("deleting orphan rows from messages")?;
-        }
-        tx.commit()?;
 
         // WARN only fires after a successful commit so the message accurately
         // reflects what actually happened on disk. db_path is included so logs
@@ -5147,6 +5220,20 @@ const REQUIRED_CURRENT_SCHEMA_TABLE_PROBES: &[(&str, &str)] = &[
     ),
 ];
 
+const REQUIRED_CONVERSATION_TOKEN_COLUMNS: &[(&str, &str)] = &[
+    ("total_input_tokens", "INTEGER"),
+    ("total_output_tokens", "INTEGER"),
+    ("total_cache_read_tokens", "INTEGER"),
+    ("total_cache_creation_tokens", "INTEGER"),
+    ("grand_total_tokens", "INTEGER"),
+    ("estimated_cost_usd", "REAL"),
+    ("primary_model", "TEXT"),
+    ("api_call_count", "INTEGER"),
+    ("tool_call_count", "INTEGER"),
+    ("user_message_count", "INTEGER"),
+    ("assistant_message_count", "INTEGER"),
+];
+
 fn error_indicates_missing_table(err: &impl std::fmt::Display) -> bool {
     err.to_string()
         .to_ascii_lowercase()
@@ -5274,6 +5361,126 @@ fn delete_rows_by_i64_chunks(
     Ok(deleted)
 }
 
+fn delete_orphan_message_ids_bisecting_oom(conn: &FrankenConnection, ids: &[i64]) -> Result<usize> {
+    let mut deleted = 0usize;
+    for chunk in ids.chunks(ORPHAN_FK_ID_CHUNK_SIZE) {
+        deleted = deleted.saturating_add(delete_orphan_message_id_chunk(conn, chunk)?);
+    }
+    Ok(deleted)
+}
+
+fn delete_orphan_message_id_chunk(conn: &FrankenConnection, ids: &[i64]) -> Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    match delete_orphan_message_id_chunk_once(conn, ids) {
+        Ok(deleted) => Ok(deleted),
+        Err(err) if is_out_of_memory_error(&err) && ids.len() > 1 => {
+            let split_at = ids.len() / 2;
+            tracing::warn!(
+                target: "cass::fk_repair",
+                rows = ids.len(),
+                left = split_at,
+                right = ids.len().saturating_sub(split_at),
+                error = %err,
+                "orphan-message cleanup ran out of memory; retrying as smaller batches"
+            );
+            let left = delete_orphan_message_id_chunk(conn, &ids[..split_at])?;
+            let right = delete_orphan_message_id_chunk(conn, &ids[split_at..])?;
+            Ok(left.saturating_add(right))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn delete_orphan_message_id_chunk_once(conn: &FrankenConnection, ids: &[i64]) -> Result<usize> {
+    let mut tx = conn.transaction()?;
+    let mut deleted = 0usize;
+    for entry in ORPHAN_MESSAGE_DEPENDENT_TABLES {
+        match delete_rows_by_i64_chunks(&tx, entry.delete_prefix, ids) {
+            Ok(count) => {
+                deleted = deleted.saturating_add(count);
+            }
+            Err(err) if error_indicates_missing_table(&err) => {
+                tracing::debug!(
+                    target: "cass::fk_repair",
+                    child_table = entry.child_table,
+                    error = %err,
+                    "skipping orphan-message dependent cleanup (table unavailable)"
+                );
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!(
+                        "deleting rows from {} that depend on orphan messages",
+                        entry.child_table
+                    )
+                });
+            }
+        }
+    }
+    deleted = deleted.saturating_add(
+        delete_rows_by_i64_chunks(&tx, "DELETE FROM messages WHERE id IN (", ids)
+            .context("deleting orphan rows from messages")?,
+    );
+    tx.commit()?;
+    Ok(deleted)
+}
+
+fn delete_direct_orphan_ids_bisecting_oom(
+    conn: &FrankenConnection,
+    entry: &'static OrphanFkTable,
+    ids: &[i64],
+) -> Result<usize> {
+    let mut deleted = 0usize;
+    for chunk in ids.chunks(ORPHAN_FK_ID_CHUNK_SIZE) {
+        deleted = deleted.saturating_add(delete_direct_orphan_id_chunk(conn, entry, chunk)?);
+    }
+    Ok(deleted)
+}
+
+fn delete_direct_orphan_id_chunk(
+    conn: &FrankenConnection,
+    entry: &'static OrphanFkTable,
+    ids: &[i64],
+) -> Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+
+    match delete_direct_orphan_id_chunk_once(conn, entry, ids) {
+        Ok(deleted) => Ok(deleted),
+        Err(err) if is_out_of_memory_error(&err) && ids.len() > 1 => {
+            let split_at = ids.len() / 2;
+            tracing::warn!(
+                target: "cass::fk_repair",
+                child_table = entry.child_table,
+                rows = ids.len(),
+                left = split_at,
+                right = ids.len().saturating_sub(split_at),
+                error = %err,
+                "direct orphan cleanup ran out of memory; retrying as smaller batches"
+            );
+            let left = delete_direct_orphan_id_chunk(conn, entry, &ids[..split_at])?;
+            let right = delete_direct_orphan_id_chunk(conn, entry, &ids[split_at..])?;
+            Ok(left.saturating_add(right))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn delete_direct_orphan_id_chunk_once(
+    conn: &FrankenConnection,
+    entry: &'static OrphanFkTable,
+    ids: &[i64],
+) -> Result<usize> {
+    let mut tx = conn.transaction()?;
+    let deleted = delete_rows_by_i64_chunks(&tx, entry.delete_prefix, ids)?;
+    tx.commit()?;
+    Ok(deleted)
+}
+
 fn sql_placeholders(count: usize) -> String {
     debug_assert!(count > 0);
     let mut placeholders = String::with_capacity(count.saturating_mul(2).saturating_sub(1));
@@ -5287,45 +5494,40 @@ fn sql_placeholders(count: usize) -> String {
 }
 
 /// Tables whose FK parent rows can go missing when an index transaction is
-/// dropped mid-flight. The count and delete SQL strings are intentionally
+/// dropped mid-flight. The select and delete SQL strings are intentionally
 /// static (no dynamic table names) so they can be audited at a glance and so
-/// they cannot be subverted by injected identifiers. Each entry's count and
-/// delete statements share the identical predicate to guarantee they identify
-/// the same row set.
+/// they cannot be subverted by injected identifiers. The select statement
+/// yields the integer FK key used by the matching chunked delete.
 struct OrphanFkTable {
     child_table: &'static str,
-    count_sql: &'static str,
-    delete_sql: &'static str,
+    orphan_id_sql: &'static str,
+    delete_prefix: &'static str,
 }
 
 const ORPHAN_DIRECT_CHILD_TABLES: &[OrphanFkTable] = &[
     OrphanFkTable {
         child_table: "message_metrics",
-        count_sql: "SELECT COUNT(*) FROM message_metrics \
-                    WHERE NOT EXISTS (SELECT 1 FROM messages WHERE messages.id = message_metrics.message_id)",
-        delete_sql: "DELETE FROM message_metrics \
-                     WHERE NOT EXISTS (SELECT 1 FROM messages WHERE messages.id = message_metrics.message_id)",
+        orphan_id_sql: "SELECT message_id FROM message_metrics \
+                        WHERE NOT EXISTS (SELECT 1 FROM messages WHERE messages.id = message_metrics.message_id)",
+        delete_prefix: "DELETE FROM message_metrics WHERE message_id IN (",
     },
     OrphanFkTable {
         child_table: "token_usage",
-        count_sql: "SELECT COUNT(*) FROM token_usage \
-                    WHERE NOT EXISTS (SELECT 1 FROM messages WHERE messages.id = token_usage.message_id)",
-        delete_sql: "DELETE FROM token_usage \
-                     WHERE NOT EXISTS (SELECT 1 FROM messages WHERE messages.id = token_usage.message_id)",
+        orphan_id_sql: "SELECT message_id FROM token_usage \
+                        WHERE NOT EXISTS (SELECT 1 FROM messages WHERE messages.id = token_usage.message_id)",
+        delete_prefix: "DELETE FROM token_usage WHERE message_id IN (",
     },
     OrphanFkTable {
         child_table: "snippets",
-        count_sql: "SELECT COUNT(*) FROM snippets \
-                    WHERE NOT EXISTS (SELECT 1 FROM messages WHERE messages.id = snippets.message_id)",
-        delete_sql: "DELETE FROM snippets \
-                     WHERE NOT EXISTS (SELECT 1 FROM messages WHERE messages.id = snippets.message_id)",
+        orphan_id_sql: "SELECT message_id FROM snippets \
+                        WHERE NOT EXISTS (SELECT 1 FROM messages WHERE messages.id = snippets.message_id)",
+        delete_prefix: "DELETE FROM snippets WHERE message_id IN (",
     },
     OrphanFkTable {
         child_table: "conversation_tags",
-        count_sql: "SELECT COUNT(*) FROM conversation_tags \
-                    WHERE NOT EXISTS (SELECT 1 FROM conversations WHERE conversations.id = conversation_tags.conversation_id)",
-        delete_sql: "DELETE FROM conversation_tags \
-                     WHERE NOT EXISTS (SELECT 1 FROM conversations WHERE conversations.id = conversation_tags.conversation_id)",
+        orphan_id_sql: "SELECT conversation_id FROM conversation_tags \
+                        WHERE NOT EXISTS (SELECT 1 FROM conversations WHERE conversations.id = conversation_tags.conversation_id)",
+        delete_prefix: "DELETE FROM conversation_tags WHERE conversation_id IN (",
     },
 ];
 
@@ -5351,9 +5553,9 @@ const ORPHAN_MESSAGE_DEPENDENT_TABLES: &[OrphanMessageDependentTable] = &[
 
 /// Summary of orphan rows detected and removed by `cleanup_orphan_fk_rows`.
 ///
-/// Counts come from the count-phase `SELECT COUNT(*)` rather than from the
-/// `DELETE`'s rows-changed return, so they reflect "orphans observed before
-/// the delete transaction started." Under the function's intended use — a
+/// Counts come from the probe phase rather than from the `DELETE`'s
+/// rows-changed return, so they reflect "orphans observed before cleanup
+/// started." Under the function's intended use — a
 /// single indexer-startup pass holding the index run lock — no concurrent
 /// writers exist, so these counts match the primary orphan roots identified
 /// before the delete transaction starts. Dependent rows below an orphan
@@ -6594,8 +6796,51 @@ impl FrankenStorage {
                 &missing_tail_positions,
             )?;
         }
+        self.raise_lexical_rebuild_footprints_to_exact_message_counts(&mut footprints)?;
 
         Ok(footprints)
+    }
+
+    fn raise_lexical_rebuild_footprints_to_exact_message_counts(
+        &self,
+        footprints: &mut [LexicalRebuildConversationFootprintRow],
+    ) -> Result<()> {
+        if footprints.is_empty() {
+            return Ok(());
+        }
+
+        let positions_by_conversation: HashMap<i64, usize> = footprints
+            .iter()
+            .enumerate()
+            .map(|(position, footprint)| (footprint.conversation_id, position))
+            .collect();
+        self.conn
+            .query_with_params_for_each(
+                "SELECT conversation_id, COUNT(*) AS message_count
+                 FROM messages
+                 GROUP BY conversation_id
+                 ORDER BY conversation_id ASC",
+                &[] as &[SqliteValue],
+                |row| {
+                    let conversation_id: i64 = row.get_typed(0)?;
+                    let exact_count: i64 = row.get_typed(1)?;
+                    let Some(position) = positions_by_conversation.get(&conversation_id) else {
+                        return Ok(());
+                    };
+                    let exact_count = usize::try_from(exact_count.max(0)).unwrap_or(usize::MAX);
+                    let footprint = &mut footprints[*position];
+                    if exact_count > footprint.message_count {
+                        footprint.message_count = exact_count;
+                        footprint.message_bytes =
+                            footprint.message_bytes.max(exact_count.saturating_mul(
+                                LEXICAL_REBUILD_PLANNER_ESTIMATED_BYTES_PER_MESSAGE,
+                            ));
+                    }
+                    Ok(())
+                },
+            )
+            .with_context(|| "raising lexical rebuild footprints to exact message counts")?;
+        Ok(())
     }
 
     fn fill_missing_lexical_rebuild_footprint_tails(
@@ -11519,6 +11764,7 @@ fn franken_existing_message_lookup(
     let mut indexed_replay = HashSet::with_capacity(incoming_messages.len());
     let mut exact_idx_match = true;
     for msg in incoming_messages {
+        record_message_lookup_exact_idx_probe();
         let Some((role, author, created_at, content)) = tx
             .query_row_map(
                 "SELECT role, author, created_at, content
@@ -11570,15 +11816,14 @@ fn franken_existing_message_lookup(
     }
 
     let (rows, replay_full_scan) = if requires_full_scan {
-        (
-            tx.query_params(
-                "SELECT idx, role, author, created_at, content
-                 FROM messages INDEXED BY sqlite_autoindex_messages_1
-                 WHERE conversation_id = ?1",
-                fparams![conversation_id],
-            )?,
-            true,
-        )
+        let rows = tx.query_params(
+            "SELECT idx, role, author, created_at, content
+             FROM messages INDEXED BY sqlite_autoindex_messages_1
+             WHERE conversation_id = ?1",
+            fparams![conversation_id],
+        )?;
+        record_message_lookup_full_scan_query(rows.len());
+        (rows, true)
     } else if let Some((min_created_at, max_created_at)) = created_bounds {
         let mut rows = tx.query_params(
             "SELECT idx, role, author, created_at, content
@@ -11597,17 +11842,17 @@ fn franken_existing_message_lookup(
                AND created_at <= ?3",
             fparams![conversation_id, min_created_at, max_created_at],
         )?);
+        record_message_lookup_bounded_queries(2, rows.len());
         (rows, false)
     } else {
-        (
-            tx.query_params(
-                "SELECT idx, role, author, created_at, content
-                 FROM messages INDEXED BY sqlite_autoindex_messages_1
-                 WHERE conversation_id = ?1",
-                fparams![conversation_id],
-            )?,
-            true,
-        )
+        let rows = tx.query_params(
+            "SELECT idx, role, author, created_at, content
+             FROM messages INDEXED BY sqlite_autoindex_messages_1
+             WHERE conversation_id = ?1",
+            fparams![conversation_id],
+        )?;
+        record_message_lookup_full_scan_query(rows.len());
+        (rows, true)
     };
 
     let mut by_idx = HashMap::with_capacity(rows.len());
@@ -11665,9 +11910,25 @@ fn franken_existing_message_lookup_with_pending(
         pending_message_fingerprints.get(&conversation_id),
         pending_message_replay_fingerprints.get(&conversation_id),
     ) {
+        if incoming_messages.iter().all(|msg| {
+            by_idx.contains_key(&msg.idx) || replay.contains(&message_replay_fingerprint(msg))
+        }) {
+            return Ok(ExistingMessageLookup {
+                by_idx: by_idx.clone(),
+                replay: replay.clone(),
+            });
+        }
+
+        let fresh = franken_existing_message_lookup(tx, conversation_id, incoming_messages)?;
+        let mut merged_by_idx = by_idx.clone();
+        let mut merged_replay = replay.clone();
+        merged_by_idx.extend(fresh.by_idx);
+        merged_replay.extend(fresh.replay);
+        pending_message_fingerprints.insert(conversation_id, merged_by_idx.clone());
+        pending_message_replay_fingerprints.insert(conversation_id, merged_replay.clone());
         return Ok(ExistingMessageLookup {
-            by_idx: by_idx.clone(),
-            replay: replay.clone(),
+            by_idx: merged_by_idx,
+            replay: merged_replay,
         });
     }
 
@@ -17636,6 +17897,97 @@ mod tests {
     }
 
     #[test]
+    fn insert_conversations_batched_refreshes_partial_pending_message_lookup() {
+        use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
+        use std::path::PathBuf;
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+
+        let agent = Agent {
+            id: None,
+            slug: "codex".into(),
+            name: "Codex".into(),
+            version: Some("0.2.3".into()),
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).unwrap();
+
+        let make_message = |idx: i64, content: &str| Message {
+            id: None,
+            idx,
+            role: if idx == 0 {
+                MessageRole::User
+            } else {
+                MessageRole::Agent
+            },
+            author: None,
+            created_at: Some(1_700_000_000_000 + idx),
+            content: content.into(),
+            extra_json: serde_json::Value::Null,
+            snippets: Vec::new(),
+        };
+
+        let base_conv = |messages: Vec<Message>| Conversation {
+            id: None,
+            agent_slug: "codex".into(),
+            workspace: Some(PathBuf::from("/tmp/workspace")),
+            external_id: Some("partial-cache-session".into()),
+            title: Some("Partial cache session".into()),
+            source_path: PathBuf::from("/tmp/partial-cache.jsonl"),
+            started_at: Some(1_700_000_000_000),
+            ended_at: Some(1_700_000_000_100),
+            approx_tokens: None,
+            metadata_json: serde_json::Value::Null,
+            messages,
+            source_id: "local".into(),
+            origin_host: None,
+        };
+
+        let canonical = base_conv(vec![
+            make_message(0, "canonical zero"),
+            make_message(20, "canonical twenty"),
+        ]);
+        storage
+            .insert_conversation_tree(agent_id, None, &canonical)
+            .unwrap();
+
+        let exact_prefix = base_conv(vec![make_message(0, "canonical zero")]);
+        let conflicting_tail = base_conv(vec![make_message(20, "conflicting twenty")]);
+
+        let outcomes = storage
+            .insert_conversations_batched(&[
+                (agent_id, None, &exact_prefix),
+                (agent_id, None, &conflicting_tail),
+            ])
+            .unwrap();
+
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes[0].inserted_indices.is_empty());
+        assert!(
+            outcomes[1].inserted_indices.is_empty(),
+            "the second batch item must refresh the partial pending lookup and retain the canonical idx=20 row"
+        );
+
+        let stored_messages: Vec<(i64, String)> = storage
+            .conn
+            .query_map_collect(
+                "SELECT idx, content FROM messages ORDER BY idx",
+                fparams![],
+                |row| Ok((row.get_typed(0)?, row.get_typed(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            stored_messages,
+            vec![
+                (0, "canonical zero".to_string()),
+                (20, "canonical twenty".to_string()),
+            ]
+        );
+    }
+
+    #[test]
     fn insert_conversations_batched_reprocessing_conversation_is_idempotent() {
         use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
         use std::path::PathBuf;
@@ -19518,6 +19870,90 @@ mod tests {
                 message_bytes: 11 * LEXICAL_REBUILD_PLANNER_ESTIMATED_BYTES_PER_MESSAGE,
             }],
             "missing tail-cache metadata should fall back to messages MAX(idx) instead of treating legacy conversations as empty"
+        );
+    }
+
+    #[test]
+    fn list_conversation_footprints_for_lexical_rebuild_raises_stale_low_tail_cache() {
+        use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
+        use std::path::PathBuf;
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("agent_search.db");
+        let storage = SqliteStorage::open(&db_path).unwrap();
+        let agent = Agent {
+            id: None,
+            slug: "codex".into(),
+            name: "Codex".into(),
+            version: Some("0.2.3".into()),
+            kind: AgentKind::Cli,
+        };
+        let agent_id = storage.ensure_agent(&agent).unwrap();
+        let conversation_id = storage
+            .insert_conversation_tree(
+                agent_id,
+                None,
+                &Conversation {
+                    id: None,
+                    agent_slug: "codex".into(),
+                    workspace: Some(PathBuf::from("/tmp/workspace")),
+                    external_id: Some("footprint-stale-tail".to_string()),
+                    title: Some("footprint-stale-tail".to_string()),
+                    source_path: PathBuf::from("/tmp/footprint-stale-tail.jsonl"),
+                    started_at: Some(1_700_000_000_000),
+                    ended_at: Some(1_700_000_000_100),
+                    approx_tokens: None,
+                    metadata_json: serde_json::Value::Null,
+                    messages: (0..3)
+                        .map(|idx| Message {
+                            id: None,
+                            idx,
+                            role: MessageRole::User,
+                            author: None,
+                            created_at: Some(1_700_000_000_010 + idx),
+                            content: format!("message {idx}"),
+                            extra_json: serde_json::Value::Null,
+                            snippets: Vec::new(),
+                        })
+                        .collect(),
+                    source_id: LOCAL_SOURCE_ID.into(),
+                    origin_host: None,
+                },
+            )
+            .unwrap()
+            .conversation_id;
+
+        storage
+            .conn
+            .execute_compat(
+                "UPDATE conversations
+                 SET last_message_idx = 0, last_message_created_at = 1700000000010
+                 WHERE id = ?1",
+                fparams![conversation_id],
+            )
+            .unwrap();
+        storage
+            .conn
+            .execute_compat(
+                "UPDATE conversation_tail_state
+                 SET last_message_idx = 0, last_message_created_at = 1700000000010
+                 WHERE conversation_id = ?1",
+                fparams![conversation_id],
+            )
+            .unwrap();
+
+        let footprints = storage
+            .list_conversation_footprints_for_lexical_rebuild()
+            .unwrap();
+
+        assert_eq!(
+            footprints,
+            vec![LexicalRebuildConversationFootprintRow {
+                conversation_id,
+                message_count: 3,
+                message_bytes: 3 * LEXICAL_REBUILD_PLANNER_ESTIMATED_BYTES_PER_MESSAGE,
+            }],
+            "stale-low tail caches must not under-plan lexical shards and trip doc>plan invariants"
         );
     }
 
@@ -23288,6 +23724,31 @@ mod tests {
     }
 
     #[test]
+    fn schema_repair_adds_missing_conversations_token_columns() {
+        let conn = FrankenConnection::open(":memory:").unwrap();
+        conn.execute_batch(
+            "CREATE TABLE conversations (
+                 id INTEGER PRIMARY KEY,
+                 agent_id INTEGER NOT NULL,
+                 source_path TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        let storage = FrankenStorage::new(conn, std::path::PathBuf::from(":memory:"));
+
+        storage.repair_missing_conversation_token_columns().unwrap();
+        storage.repair_missing_conversation_token_columns().unwrap();
+
+        let columns = franken_table_column_names(&storage.conn, "conversations").unwrap();
+        for &(column_name, _) in REQUIRED_CONVERSATION_TOKEN_COLUMNS {
+            assert!(
+                columns.contains(column_name),
+                "schema repair should add conversations.{column_name}"
+            );
+        }
+    }
+
+    #[test]
     fn franken_meta_schema_version_in_sync() {
         let storage = franken_storage_in_memory();
 
@@ -24437,5 +24898,62 @@ mod tests {
         let second = storage.cleanup_orphan_fk_rows().unwrap();
         assert_eq!(second.total, 0);
         assert!(second.per_table.is_empty());
+    }
+
+    #[test]
+    fn cleanup_orphan_fk_rows_handles_more_than_one_delete_chunk() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("orphan_fk_chunked_self_heal.db");
+        let storage = FrankenStorage::open(&db_path).unwrap();
+        let orphan_count = ORPHAN_FK_ID_CHUNK_SIZE + 3;
+
+        storage.raw().execute("PRAGMA foreign_keys = OFF").unwrap();
+        for idx in 0..orphan_count {
+            let message_id = 10_000_i64 + i64::try_from(idx).unwrap();
+            let conversation_id = 20_000_i64 + i64::try_from(idx).unwrap();
+            storage
+                .raw()
+                .execute_compat(
+                    "INSERT INTO messages(id, conversation_id, idx, role, content) \
+                     VALUES(?1, ?2, 0, 'user', 'orphan message')",
+                    fparams![message_id, conversation_id],
+                )
+                .unwrap();
+            storage
+                .raw()
+                .execute_compat(
+                    "INSERT INTO message_metrics(
+                         message_id, created_at_ms, hour_id, day_id, agent_slug,
+                         role, content_chars, content_tokens_est
+                     ) VALUES(?1, 0, 0, 0, 'test-agent', 'user', 14, 2)",
+                    fparams![message_id],
+                )
+                .unwrap();
+        }
+        storage.raw().execute("PRAGMA foreign_keys = ON").unwrap();
+
+        let report = storage.cleanup_orphan_fk_rows().unwrap();
+
+        assert_eq!(report.total, i64::try_from(orphan_count).unwrap());
+        let messages_count = report
+            .per_table
+            .iter()
+            .find(|(table, _)| *table == "messages")
+            .map(|(_, count)| *count);
+        assert_eq!(messages_count, Some(i64::try_from(orphan_count).unwrap()));
+        let messages_after: i64 = storage
+            .raw()
+            .query_row_map("SELECT COUNT(*) FROM messages", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        assert_eq!(messages_after, 0);
+        let metrics_after: i64 = storage
+            .raw()
+            .query_row_map("SELECT COUNT(*) FROM message_metrics", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        assert_eq!(metrics_after, 0);
     }
 }

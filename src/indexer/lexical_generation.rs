@@ -1704,14 +1704,11 @@ pub(crate) fn store_manifest(
         )
     })?;
     let final_path = manifest_path(generation_dir);
-    let tmp_path = generation_dir.join(format!(
-        "{}.tmp-{}",
-        LEXICAL_GENERATION_MANIFEST_FILE, manifest.attempt_id
-    ));
+    let tmp_path = unique_manifest_temp_path(generation_dir);
     let serialized =
         serde_json::to_vec_pretty(manifest).context("serializing lexical generation manifest")?;
     {
-        let file = fs::File::create(&tmp_path).with_context(|| {
+        let file = create_new_manifest_temp_file(&tmp_path).with_context(|| {
             format!(
                 "creating scratch lexical generation manifest at {}",
                 tmp_path.display()
@@ -1745,6 +1742,27 @@ pub(crate) fn store_manifest(
     })?;
     sync_parent_directory(&final_path)?;
     Ok(())
+}
+
+fn unique_manifest_temp_path(generation_dir: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_NONCE: AtomicU64 = AtomicU64::new(0);
+    let nonce = NEXT_NONCE.fetch_add(1, Ordering::Relaxed);
+    generation_dir.join(format!(
+        "{}.tmp-{}.{}.{}",
+        LEXICAL_GENERATION_MANIFEST_FILE,
+        std::process::id(),
+        now_ms(),
+        nonce
+    ))
+}
+
+fn create_new_manifest_temp_file(path: &Path) -> std::io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
 }
 
 #[cfg(not(windows))]
@@ -2016,6 +2034,42 @@ mod tests {
         let reloaded = load_manifest(&gen_dir).unwrap().unwrap();
         assert_eq!(reloaded.attempt_id, "attempt-b");
         assert_eq!(reloaded.build_state, LexicalGenerationBuildState::Built);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manifest_temp_creation_refuses_preexisting_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TempDir::new().unwrap();
+        let protected = tmp.path().join("protected.json");
+        let temp_path = tmp.path().join("manifest.tmp");
+        fs::write(&protected, b"protected").unwrap();
+        symlink(&protected, &temp_path).unwrap();
+
+        let err =
+            create_new_manifest_temp_file(&temp_path).expect_err("symlink collision should fail");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&protected).unwrap(), b"protected");
+    }
+
+    #[test]
+    fn store_manifest_keeps_attempt_id_out_of_temp_filename() {
+        let tmp = TempDir::new().unwrap();
+        let gen_dir = tmp.path().join("gen-path-like-attempt");
+        let manifest = LexicalGenerationManifest::new_scratch(
+            "gen-path-like-attempt",
+            "../../not-a-temp-path",
+            "fp-abc",
+            1_700_000_000_000,
+        );
+
+        store_manifest(&gen_dir, &manifest).unwrap();
+
+        let loaded = load_manifest(&gen_dir).unwrap().unwrap();
+        assert_eq!(loaded.attempt_id, "../../not-a-temp-path");
+        assert!(manifest_path(&gen_dir).exists());
+        assert!(!tmp.path().join("not-a-temp-path").exists());
     }
 
     #[test]

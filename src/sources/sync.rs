@@ -144,17 +144,15 @@ fn remote_find_regular_files_command(remote_path: &str) -> String {
 
 fn parse_remote_home_stdout(stdout: &[u8]) -> Option<String> {
     let output = String::from_utf8_lossy(stdout);
-    let mut candidates = output
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.starts_with('/') && !line.contains('\0'));
-
-    let home = candidates.next()?;
-    if candidates.next().is_some() {
-        return None;
+    for line in output.lines() {
+        if let Some(home) = line.trim().strip_prefix("CASS_HOME_MARKER:")
+            && home.starts_with('/')
+            && !home.contains('\0')
+        {
+            return Some(home.to_string());
+        }
     }
-
-    Some(home.to_string())
+    None
 }
 
 fn parse_null_terminated_utf8_paths(bytes: &[u8]) -> Vec<String> {
@@ -524,7 +522,7 @@ impl SyncEngine {
         cmd.args(strict_ssh_cli_tokens(timeout_secs))
             .arg("--")
             .arg(host)
-            .arg("printf '%s\\n' \"$HOME\"")
+            .arg("printf 'CASS_HOME_MARKER:%s\\n' \"$HOME\"")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -2932,11 +2930,11 @@ mod tests {
     #[test]
     fn test_parse_remote_home_stdout_accepts_single_absolute_candidate() {
         assert_eq!(
-            parse_remote_home_stdout(b"Welcome to host\n/home/user\n"),
+            parse_remote_home_stdout(b"Welcome to host\nCASS_HOME_MARKER:/home/user\n"),
             Some("/home/user".to_string())
         );
         assert_eq!(
-            parse_remote_home_stdout(b"/Users/test user\r\n"),
+            parse_remote_home_stdout(b"CASS_HOME_MARKER:/Users/test user\r\n"),
             Some("/Users/test user".to_string())
         );
     }
@@ -2944,7 +2942,10 @@ mod tests {
     #[test]
     fn test_parse_remote_home_stdout_rejects_missing_or_ambiguous_home() {
         assert_eq!(parse_remote_home_stdout(b"Welcome to host\n"), None);
-        assert_eq!(parse_remote_home_stdout(b"/etc/motd\n/home/user\n"), None);
+        assert_eq!(
+            parse_remote_home_stdout(b"CASS_HOME_MARKER:not_absolute\n"),
+            None
+        );
     }
 
     #[test]

@@ -1438,21 +1438,12 @@ fn query_track_a_timeseries_from_raw(
     let has_has_plan =
         join_message_metrics && table_has_column(conn, "message_metrics", "has_plan");
 
-    let conversation_sql = if has_origin_host {
-        "SELECT id, TRIM(COALESCE(source_id, '')), TRIM(COALESCE(origin_host, '')) FROM conversations"
+    let source_id_sql = "TRIM(COALESCE(c.source_id, ''))";
+    let origin_host_sql = if has_origin_host {
+        "TRIM(COALESCE(c.origin_host, ''))"
     } else {
-        "SELECT id, TRIM(COALESCE(source_id, '')), '' FROM conversations"
+        "''"
     };
-    let conversation_sources: BTreeMap<i64, (String, String)> = conn
-        .query_map_collect(conversation_sql, &[], |row: &Row| {
-            Ok((
-                row.get_typed::<i64>(0)?,
-                (row.get_typed::<String>(1)?, row.get_typed::<String>(2)?),
-            ))
-        })
-        .map_err(|e| analytics_query_error("Analytics query failed", e))?
-        .into_iter()
-        .collect();
 
     let mut from_sql = String::from("messages m JOIN conversations c ON c.id = m.conversation_id");
     if has_agents {
@@ -1543,13 +1534,15 @@ fn query_track_a_timeseries_from_raw(
                 {api_thinking_expr},
                 {api_covered_expr},
                 {tool_call_expr},
-                {has_plan_expr}
+                {has_plan_expr},
+                {source_id_sql},
+                {origin_host_sql}
          FROM {from_sql}{where_sql}"
     );
 
-    let row_buckets: Vec<(i64, i64, UsageBucket)> = conn
+    let row_buckets: Vec<(String, String, i64, UsageBucket)> = conn
         .query_map_collect(&sql, &params, |row: &Row| {
-            let conversation_id: i64 = row.get_typed(0)?;
+            // let _conversation_id: i64 = row.get_typed(0)?; // skipped
             let role: String = row.get_typed(1)?;
             let created_at_ms: i64 = row.get_typed(2)?;
             let content_tokens_est: i64 = row.get_typed(3)?;
@@ -1561,6 +1554,9 @@ fn query_track_a_timeseries_from_raw(
             let api_covered: i64 = row.get_typed(9)?;
             let tool_call_count: i64 = row.get_typed(10)?;
             let has_plan: i64 = row.get_typed(11)?;
+            let source_id: String = row.get_typed(12)?;
+            let origin_host: String = row.get_typed(13)?;
+
             let normalized_created_at_ms = normalize_epoch_millis(created_at_ms);
             let bucket_id = match group_by {
                 GroupBy::Hour => crate::storage::sqlite::FrankenStorage::hour_id_from_millis(
@@ -1608,21 +1604,12 @@ fn query_track_a_timeseries_from_raw(
                 bucket.plan_api_tokens_total = bucket.api_tokens_total;
             }
 
-            Ok((conversation_id, bucket_id, bucket))
+            Ok((source_id, origin_host, bucket_id, bucket))
         })
         .map_err(|e| analytics_query_error("Analytics query failed", e))?;
 
     let mut grouped_buckets: BTreeMap<i64, UsageBucket> = BTreeMap::new();
-    for (conversation_id, bucket_id, bucket) in row_buckets {
-        let (source_id, origin_host) = conversation_sources
-            .get(&conversation_id)
-            .cloned()
-            .unwrap_or_else(|| {
-                (
-                    crate::sources::provenance::LOCAL_SOURCE_ID.to_string(),
-                    String::new(),
-                )
-            });
+    for (source_id, origin_host, bucket_id, bucket) in row_buckets {
         let normalized_key = normalized_analytics_source_identity_value(&source_id, &origin_host);
         if !analytics_source_filter_matches_key(&filter.source, &normalized_key) {
             continue;
@@ -2284,21 +2271,12 @@ fn query_track_a_breakdown_from_raw(
     let has_message_metrics_created_at = message_metrics_has_message_id
         && table_has_column(conn, "message_metrics", "created_at_ms");
 
-    let conversation_sql = if has_origin_host {
-        "SELECT id, TRIM(COALESCE(source_id, '')), TRIM(COALESCE(origin_host, '')) FROM conversations"
+    let source_id_sql = "TRIM(COALESCE(c.source_id, ''))";
+    let origin_host_sql = if has_origin_host {
+        "TRIM(COALESCE(c.origin_host, ''))"
     } else {
-        "SELECT id, TRIM(COALESCE(source_id, '')), '' FROM conversations"
+        "''"
     };
-    let conversation_sources: BTreeMap<i64, (String, String)> = conn
-        .query_map_collect(conversation_sql, &[], |row: &Row| {
-            Ok((
-                row.get_typed::<i64>(0)?,
-                (row.get_typed::<String>(1)?, row.get_typed::<String>(2)?),
-            ))
-        })
-        .map_err(|e| analytics_query_error("Breakdown query failed", e))?
-        .into_iter()
-        .collect();
 
     let mut from_sql = String::from("messages m JOIN conversations c ON c.id = m.conversation_id");
     if has_agents {
@@ -2401,13 +2379,15 @@ fn query_track_a_breakdown_from_raw(
                 {api_thinking_expr},
                 {api_covered_expr},
                 {tool_call_expr},
-                {has_plan_expr}
+                {has_plan_expr},
+                {source_id_sql},
+                {origin_host_sql}
          FROM {from_sql}{where_sql}"
     );
 
     let row_buckets = conn
         .query_map_collect(&sql, &params, |row: &Row| {
-            let conversation_id: i64 = row.get_typed(0)?;
+            // let _conversation_id: i64 = row.get_typed(0)?; // skipped
             let dim_key: String = row.get_typed(1)?;
             let role: String = row.get_typed(2)?;
             let content_tokens_est: i64 = row.get_typed(3)?;
@@ -2419,6 +2399,8 @@ fn query_track_a_breakdown_from_raw(
             let api_covered: i64 = row.get_typed(9)?;
             let tool_call_count: i64 = row.get_typed(10)?;
             let has_plan: i64 = row.get_typed(11)?;
+            let source_id: String = row.get_typed(12)?;
+            let origin_host: String = row.get_typed(13)?;
 
             let mut bucket = UsageBucket {
                 message_count: 1,
@@ -2450,30 +2432,22 @@ fn query_track_a_breakdown_from_raw(
                 + api_cache_read_tokens
                 + api_cache_creation_tokens
                 + api_thinking_tokens;
-            Ok((conversation_id, dim_key, bucket))
+            Ok((source_id, origin_host, dim_key, bucket))
         })
         .map_err(|e| analytics_query_error("Breakdown query failed", e))?;
 
     let mut grouped_buckets: BTreeMap<String, UsageBucket> = BTreeMap::new();
-    for (conversation_id, dim_key, bucket) in row_buckets {
-        let (source_id, origin_host) = conversation_sources
-            .get(&conversation_id)
-            .cloned()
-            .unwrap_or_else(|| {
-                (
-                    crate::sources::provenance::LOCAL_SOURCE_ID.to_string(),
-                    String::new(),
-                )
-            });
+    for (source_id, origin_host, dim_key, bucket) in row_buckets {
         let normalized_source_key =
             normalized_analytics_source_identity_value(&source_id, &origin_host);
         if !analytics_source_filter_matches_key(&filter.source, &normalized_source_key) {
             continue;
         }
-        let group_key = match dim {
-            Dim::Source => normalized_source_key,
-            Dim::Agent | Dim::Workspace => dim_key,
-            Dim::Model => unreachable!("track A raw breakdown does not support model dimension"),
+
+        let group_key = if matches!(dim, Dim::Source) {
+            normalized_source_key
+        } else {
+            dim_key
         };
         grouped_buckets.entry(group_key).or_default().merge(&bucket);
     }
@@ -2939,21 +2913,12 @@ fn query_tools_from_raw(
         table_has_column(conn, "message_metrics", "api_cache_creation_tokens");
     let has_api_thinking_tokens = table_has_column(conn, "message_metrics", "api_thinking_tokens");
 
-    let conversation_sql = if has_origin_host {
-        "SELECT id, TRIM(COALESCE(source_id, '')), TRIM(COALESCE(origin_host, '')) FROM conversations"
+    let source_id_sql = "TRIM(COALESCE(c.source_id, ''))";
+    let origin_host_sql = if has_origin_host {
+        "TRIM(COALESCE(c.origin_host, ''))"
     } else {
-        "SELECT id, TRIM(COALESCE(source_id, '')), '' FROM conversations"
+        "''"
     };
-    let conversation_sources: BTreeMap<i64, (String, String)> = conn
-        .query_map_collect(conversation_sql, &[], |row: &Row| {
-            Ok((
-                row.get_typed::<i64>(0)?,
-                (row.get_typed::<String>(1)?, row.get_typed::<String>(2)?),
-            ))
-        })
-        .map_err(|e| analytics_query_error("Tool report query failed", e))?
-        .into_iter()
-        .collect();
 
     let mut from_sql = String::from("messages m JOIN conversations c ON c.id = m.conversation_id");
     if has_agents {
@@ -3027,35 +2992,43 @@ fn query_tools_from_raw(
                 {agent_sql},
                 {tool_call_expr},
                 {content_tokens_expr},
-                {api_tokens_expr}
+                {api_tokens_expr},
+                {source_id_sql},
+                {origin_host_sql}
          FROM {from_sql}{where_sql}"
     );
 
-    let raw_rows: Vec<(i64, String, i64, i64, i64)> = conn
+    let raw_rows = conn
         .query_map_collect(&sql, &params, |row: &Row| {
+            // let _conversation_id: i64 = row.get_typed(0)?; // skipped
+            let key: String = row.get_typed(1)?;
+            let tool_call_count: i64 = row.get_typed(2)?;
+            let content_tokens_est: i64 = row.get_typed(3)?;
+            let api_tokens_total: i64 = row.get_typed(4)?;
+            let source_id: String = row.get_typed(5)?;
+            let origin_host: String = row.get_typed(6)?;
+
             Ok((
-                row.get_typed::<i64>(0)?,
-                row.get_typed::<String>(1)?,
-                row.get_typed::<i64>(2)?,
-                row.get_typed::<i64>(3)?,
-                row.get_typed::<i64>(4)?,
+                source_id,
+                origin_host,
+                key,
+                tool_call_count,
+                content_tokens_est,
+                api_tokens_total,
             ))
         })
         .map_err(|e| analytics_query_error("Tool report query failed", e))?;
 
     let mut grouped_rows: BTreeMap<String, (i64, i64, i64, i64)> = BTreeMap::new();
-    for (conversation_id, key, tool_call_count, content_tokens_est_total, api_tokens_total) in
-        raw_rows
+    for (
+        source_id,
+        origin_host,
+        key,
+        tool_call_count,
+        content_tokens_est_total,
+        api_tokens_total,
+    ) in raw_rows
     {
-        let (source_id, origin_host) = conversation_sources
-            .get(&conversation_id)
-            .cloned()
-            .unwrap_or_else(|| {
-                (
-                    crate::sources::provenance::LOCAL_SOURCE_ID.to_string(),
-                    String::new(),
-                )
-            });
         let normalized_source_key =
             normalized_analytics_source_identity_value(&source_id, &origin_host);
         if !analytics_source_filter_matches_key(&filter.source, &normalized_source_key) {

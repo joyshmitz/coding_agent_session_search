@@ -783,13 +783,13 @@ fn parse_ssh_config(content: &str) -> Vec<DiscoveredHost> {
         }
 
         // Parse key-value pairs
-        let parts: Vec<&str> = line.splitn(2, |c: char| c.is_whitespace()).collect();
-        if parts.len() != 2 {
+        let (key, value) = if let Some(idx) = line.find(|c: char| c.is_whitespace() || c == '=') {
+            let k = &line[..idx];
+            let v = line[idx..].trim_start_matches(|c: char| c.is_whitespace() || c == '=');
+            (k.to_lowercase(), v)
+        } else {
             continue;
-        }
-
-        let key = parts[0].to_lowercase();
-        let value = parts[1].trim();
+        };
 
         match key.as_str() {
             "host" => {
@@ -2100,6 +2100,28 @@ Host production !legacy-prod
         assert_eq!(hosts[0].user.as_deref(), Some("ubuntu"));
         assert_eq!(hosts[1].name, "production");
         assert_eq!(hosts[1].user.as_deref(), Some("deploy"));
+    }
+
+    #[test]
+    fn test_parse_ssh_config() {
+        let content = "
+            Host example
+                HostName example.com
+                User testuser
+
+            Host=another
+                Port=2222
+                IdentityFile = ~/.ssh/id_rsa
+        ";
+        let hosts = parse_ssh_config(content);
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0].name, "example");
+        assert_eq!(hosts[0].hostname.as_deref(), Some("example.com"));
+        assert_eq!(hosts[0].user.as_deref(), Some("testuser"));
+
+        assert_eq!(hosts[1].name, "another");
+        assert_eq!(hosts[1].port, Some(2222));
+        assert_eq!(hosts[1].identity_file.as_deref(), Some("~/.ssh/id_rsa"));
     }
 
     // ==========================================================================

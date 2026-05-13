@@ -750,7 +750,7 @@ fn semantic_runtime_surface(inputs: SemanticRuntimeInputs<'_>) -> SemanticRuntim
             can_search: false,
             fallback_mode: Some("lexical"),
             hint: Some(
-                "Run 'cass index --semantic' to finish backfilling current semantic assets, or keep using --mode lexical."
+                "Run 'cass index --semantic' to finish backfilling current semantic assets; search will use lexical fallback until then."
                     .to_string(),
             ),
             embedder_id: base_embedder_id,
@@ -768,7 +768,7 @@ fn semantic_runtime_surface(inputs: SemanticRuntimeInputs<'_>) -> SemanticRuntim
             can_search: false,
             fallback_mode: Some("lexical"),
             hint: Some(
-                "Run 'cass index --semantic' to refresh semantic assets for the current database, or keep using --mode lexical."
+                "Run 'cass index --semantic' to refresh semantic assets for the current database; search will use lexical fallback until then."
                     .to_string(),
             ),
             embedder_id: base_embedder_id,
@@ -1293,34 +1293,34 @@ fn semantic_hint(
 ) -> Option<String> {
     let hint = match (preference, availability) {
         (SemanticPreference::HashFallback, SemanticAvailability::IndexMissing { .. }) => {
-            "Run 'cass index --semantic --embedder hash' to build the hash vector index, or use --mode lexical"
+            "Run 'cass index --semantic --embedder hash' to build the hash vector index; lexical search remains available without semantic assets"
         }
         (SemanticPreference::HashFallback, SemanticAvailability::LoadFailed { .. })
         | (SemanticPreference::HashFallback, SemanticAvailability::DatabaseUnavailable { .. }) => {
-            "Run 'cass index --semantic --embedder hash' after the database is healthy, or use --mode lexical"
+            "Run 'cass index --semantic --embedder hash' after the database is healthy; lexical search remains available"
         }
         (SemanticPreference::HashFallback, _) => {
-            "Run 'cass index --semantic --embedder hash' to build the hash vector index, or use --mode lexical"
+            "Run 'cass index --semantic --embedder hash' to build the hash vector index; lexical search remains available"
         }
         (_, SemanticAvailability::NotInstalled)
         | (_, SemanticAvailability::NeedsConsent)
         | (_, SemanticAvailability::ModelMissing { .. }) => {
-            "Run 'cass models install' and then 'cass index --semantic', or use --mode lexical"
+            "Run 'cass models install' and then 'cass index --semantic'; lexical search remains available without the model"
         }
         (_, SemanticAvailability::IndexMissing { .. })
         | (_, SemanticAvailability::UpdateAvailable { .. })
         | (_, SemanticAvailability::IndexBuilding { .. }) => {
-            "Run 'cass index --semantic' to build or refresh vector assets, or use --mode lexical"
+            "Run 'cass index --semantic' to build or refresh vector assets; lexical search remains available"
         }
         (_, SemanticAvailability::Downloading { .. }) | (_, SemanticAvailability::Verifying) => {
-            "Wait for the semantic model installation to finish, or use --mode lexical"
+            "Wait for the semantic model installation to finish; lexical search remains available"
         }
         (_, SemanticAvailability::Disabled { .. }) => {
-            "Semantic search is disabled by policy; use --mode lexical or re-enable semantic search"
+            "Semantic search is disabled by policy; lexical search remains available, or re-enable semantic search"
         }
         (_, SemanticAvailability::DatabaseUnavailable { .. })
         | (_, SemanticAvailability::LoadFailed { .. }) => {
-            "Restore the semantic assets and database, or use --mode lexical"
+            "Restore the semantic assets and database; lexical search remains available when the archive database is healthy"
         }
         (_, SemanticAvailability::Ready { .. }) | (_, SemanticAvailability::HashFallback) => {
             return None;

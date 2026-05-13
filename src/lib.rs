@@ -340,6 +340,10 @@ pub enum Commands {
         /// Also honored via CASS_INDEX_NO_PROGRESS_EVENTS=1 env var.
         #[arg(long, default_value_t = false)]
         no_progress_events: bool,
+
+        /// Emit per-ingest-batch NDJSON timing and lookup counters on stderr for perf bisection.
+        #[arg(long, default_value_t = false)]
+        robot_trace_ingest: bool,
     },
     /// Generate shell completions to stdout
     Completions {
@@ -1258,6 +1262,9 @@ pub enum Commands {
         #[arg(long)]
         example_config: bool,
     },
+    /// Inspect and prune raw-mirror evidence under explicit operator control
+    #[command(subcommand)]
+    Mirror(MirrorCommand),
     /// Manage remote sources (P5.x)
     #[command(subcommand)]
     Sources(SourcesCommand),
@@ -1300,6 +1307,45 @@ pub enum Commands {
         /// Override data dir for model storage
         #[arg(long)]
         data_dir: Option<PathBuf>,
+    },
+}
+
+/// Raw-mirror maintenance commands.
+#[derive(Subcommand, Debug, Clone)]
+pub enum MirrorCommand {
+    /// Plan or apply raw-mirror manifest/blob retention.
+    Prune {
+        /// Override data dir
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+
+        /// Retire captures older than a duration such as 90d, 24h, or 3600s.
+        #[arg(long)]
+        older_than: Option<String>,
+
+        /// Retire oldest captures until unique raw blob bytes are at or below this size.
+        #[arg(long, alias = "target-size")]
+        max_size: Option<String>,
+
+        /// Preserve raw mirror captures linked to conversations with this tag.
+        #[arg(long = "keep-tag")]
+        keep_tag: Vec<String>,
+
+        /// Refuse to prune blobs referenced by captures newer than this duration.
+        #[arg(long, default_value = "7d")]
+        safety_hold_down: String,
+
+        /// Preview only. This is the default; accepted for explicit automation.
+        #[arg(long, default_value_t = false, conflicts_with = "apply")]
+        dry_run: bool,
+
+        /// Apply the prune plan. Without this flag, cass only writes a dry-run audit record.
+        #[arg(long, default_value_t = false)]
+        apply: bool,
+
+        /// Output as JSON (`--robot` also works)
+        #[arg(long, visible_alias = "robot")]
+        json: bool,
     },
 }
 
@@ -2256,6 +2302,92 @@ fn command_accepts_leading_structured_flag(command: &str) -> bool {
     )
 }
 
+fn data_dir_insertion_index(rest: &[String], command_index: usize) -> Option<usize> {
+    let command = rest.get(command_index)?.to_ascii_lowercase();
+    match command.as_str() {
+        "tui" | "index" | "search" | "pack" | "stats" | "diag" | "status" | "triage" | "state"
+        | "health" | "doctor" | "context" | "sessions" | "timeline" | "daemon" => {
+            Some(command_index + 1)
+        }
+        "mirror" => rest
+            .get(command_index + 1)
+            .is_some_and(|action| action.eq_ignore_ascii_case("prune"))
+            .then_some(command_index + 2),
+        "sources" => rest
+            .get(command_index + 1)
+            .is_some_and(|action| action.eq_ignore_ascii_case("artifact-manifest"))
+            .then_some(command_index + 2),
+        "models" => rest
+            .get(command_index + 1)
+            .is_some_and(|action| {
+                ["install", "verify", "backfill", "remove", "check-update"]
+                    .iter()
+                    .any(|candidate| action.eq_ignore_ascii_case(candidate))
+            })
+            .then_some(command_index + 2),
+        "analytics" => rest
+            .get(command_index + 1)
+            .is_some_and(|action| {
+                ["status", "tokens", "tools", "models", "rebuild", "validate"]
+                    .iter()
+                    .any(|candidate| action.eq_ignore_ascii_case(candidate))
+            })
+            .then_some(command_index + 2),
+        _ => None,
+    }
+}
+
+fn recover_leading_data_dir_to_subcommand(rest: &mut Vec<String>, corrections: &mut Vec<String>) {
+    let mut index = 0;
+    let mut leading = Vec::new();
+    let mut data_dir_args = Vec::new();
+
+    while index < rest.len() {
+        let arg = &rest[index];
+        if arg == "--data-dir" {
+            let Some(value) = rest.get(index + 1) else {
+                return;
+            };
+            if value.starts_with('-') {
+                return;
+            }
+            data_dir_args.push(arg.clone());
+            data_dir_args.push(value.clone());
+            index += 2;
+            continue;
+        }
+        if arg.starts_with("--data-dir=") {
+            data_dir_args.push(arg.clone());
+            index += 1;
+            continue;
+        }
+        if let Some(span) = structured_output_request_span_at(rest, index) {
+            leading.extend(rest[index..index + span].iter().cloned());
+            index += span;
+            continue;
+        }
+        if arg.starts_with('-') {
+            return;
+        }
+
+        let Some(insertion_index) = data_dir_insertion_index(rest, index) else {
+            return;
+        };
+        if data_dir_args.is_empty() {
+            return;
+        }
+
+        let mut normalized = Vec::with_capacity(rest.len());
+        normalized.extend(leading);
+        normalized.extend(rest[index..insertion_index].iter().cloned());
+        normalized.extend(data_dir_args);
+        normalized.extend(rest[insertion_index..].iter().cloned());
+        *rest = normalized;
+        corrections.push("Leading --data-dir moved onto the data-dir-aware subcommand".to_string());
+        return;
+    }
+}
+
 fn move_leading_structured_flag_to_subcommand(rest: &mut Vec<String>) -> bool {
     let mut leading_count = 0;
     while rest
@@ -2284,8 +2416,15 @@ fn move_leading_structured_flag_to_subcommand(rest: &mut Vec<String>) -> bool {
 fn robot_docs_topic_shorthand(arg: &str) -> Option<&'static str> {
     match arg.to_ascii_lowercase().as_str() {
         "commands" | "command" | "cmds" => Some("commands"),
+        "env" | "environment" | "vars" | "variables" => Some("env"),
+        "paths" | "path" | "dirs" | "directories" => Some("paths"),
         "schemas" | "schema" => Some("schemas"),
         "examples" | "example" => Some("examples"),
+        "contracts" | "contract" | "api-contract" | "api_contract" => Some("contracts"),
+        "wrap" | "wrapping" | "line-wrap" | "line_wrap" => Some("wrap"),
+        "sources" | "source" | "remotes" | "remote" => Some("sources"),
+        "analytics" | "metrics" => Some("analytics"),
+        "doctor" | "diagnostics" | "diag" => Some("doctor"),
         "exit-codes" | "exit_codes" | "exitcodes" | "codes" => Some("exit-codes"),
         "guide" | "quickstart" | "quick-start" => Some("guide"),
         _ => None,
@@ -2297,10 +2436,15 @@ fn recover_robot_docs_topic_shorthands(rest: &mut Vec<String>, corrections: &mut
         .iter()
         .take_while(|arg| matches!(arg.as_str(), "--json" | "--robot"))
         .count();
-    let Some(topic) = rest
-        .get(leading_structured_count)
-        .and_then(|arg| robot_docs_topic_shorthand(arg))
-    else {
+    let Some(arg) = rest.get(leading_structured_count) else {
+        return;
+    };
+    // Topic aliases that are also real commands must stay commands. Structured
+    // command help is handled by `recover_structured_help_requests` instead.
+    if is_canonical_top_level_command_arg(arg) {
+        return;
+    }
+    let Some(topic) = robot_docs_topic_shorthand(arg) else {
         return;
     };
 
@@ -2309,6 +2453,283 @@ fn recover_robot_docs_topic_shorthands(rest: &mut Vec<String>, corrections: &mut
     rest.insert(leading_structured_count + 1, topic.to_string());
     corrections.push(format!(
         "'{alias}' → 'robot-docs {topic}' (robot-docs topic shorthand)"
+    ));
+}
+
+#[cfg(test)]
+mod robot_docs_shorthand_regression_tests {
+    use super::*;
+
+    #[test]
+    fn doctor_subcommand_is_not_rewritten_to_robot_docs() {
+        let mut rest = vec!["doctor".to_string(), "--json".to_string()];
+        let mut corrections = Vec::new();
+        recover_robot_docs_topic_shorthands(&mut rest, &mut corrections);
+        assert_eq!(rest, vec!["doctor".to_string(), "--json".to_string()]);
+        assert!(
+            corrections.is_empty(),
+            "no rewrite should happen for `cass doctor --json`"
+        );
+    }
+
+    #[test]
+    fn other_real_subcommands_are_not_rewritten() {
+        for sub in &["diag", "sources", "analytics", "health", "Doctor"] {
+            let mut rest = vec![sub.to_string(), "--json".to_string()];
+            let mut corrections = Vec::new();
+            recover_robot_docs_topic_shorthands(&mut rest, &mut corrections);
+            assert_eq!(
+                rest,
+                vec![sub.to_string(), "--json".to_string()],
+                "real subcommand {sub} should not be rewritten",
+            );
+            assert!(
+                corrections.is_empty(),
+                "no rewrite should happen for `cass {sub} --json`",
+            );
+        }
+    }
+
+    #[test]
+    fn topic_shorthand_still_fires_for_non_subcommands() {
+        for (alias, expected_topic) in &[
+            ("schemas", "schemas"),
+            ("exit-codes", "exit-codes"),
+            ("guide", "guide"),
+            ("examples", "examples"),
+            ("env", "env"),
+        ] {
+            let mut rest = vec![alias.to_string(), "--json".to_string()];
+            let mut corrections = Vec::new();
+            recover_robot_docs_topic_shorthands(&mut rest, &mut corrections);
+            assert_eq!(
+                rest,
+                vec![
+                    "robot-docs".to_string(),
+                    expected_topic.to_string(),
+                    "--json".to_string()
+                ],
+                "shorthand for {alias} should still rewrite to robot-docs {expected_topic}",
+            );
+            assert_eq!(corrections.len(), 1);
+        }
+    }
+
+    #[test]
+    fn structured_help_does_not_steal_search_query_named_help() {
+        let raw = vec![
+            "cass".to_string(),
+            "search".to_string(),
+            "help".to_string(),
+            "--json".to_string(),
+        ];
+        let (normalized, note) = normalize_args(raw);
+        assert_eq!(
+            normalized,
+            vec![
+                "cass".to_string(),
+                "search".to_string(),
+                "help".to_string(),
+                "--json".to_string()
+            ]
+        );
+        assert!(
+            note.as_deref()
+                .is_none_or(|note| !note.contains("structured help request")),
+            "a search query named `help` must not be treated as a help request"
+        );
+    }
+
+    #[test]
+    fn structured_help_targets_command_after_leading_json_flag() {
+        let raw = vec![
+            "cass".to_string(),
+            "--json".to_string(),
+            "search".to_string(),
+            "--help".to_string(),
+        ];
+        let (normalized, note) = normalize_args(raw);
+        assert_eq!(
+            normalized,
+            vec![
+                "cass".to_string(),
+                "robot-docs".to_string(),
+                "commands".to_string()
+            ]
+        );
+        assert!(
+            note.as_deref()
+                .is_some_and(|note| note.contains("structured help request")),
+            "leading structured flags should still route command help to robot docs"
+        );
+    }
+
+    #[test]
+    fn leading_data_dir_moves_to_health_subcommand() {
+        let raw = vec![
+            "cass".to_string(),
+            "--data-dir".to_string(),
+            "/tmp/cass-data".to_string(),
+            "health".to_string(),
+            "--json".to_string(),
+        ];
+        let (normalized, note) = normalize_args(raw);
+        assert_eq!(
+            normalized,
+            vec![
+                "cass".to_string(),
+                "health".to_string(),
+                "--data-dir".to_string(),
+                "/tmp/cass-data".to_string(),
+                "--json".to_string()
+            ]
+        );
+        assert!(
+            note.as_deref()
+                .is_some_and(|note| note.contains("Leading --data-dir moved")),
+            "leading data dir should be reported as a correction"
+        );
+    }
+
+    #[test]
+    fn leading_structured_and_data_dir_move_to_nested_models_subcommand() {
+        let raw = vec![
+            "cass".to_string(),
+            "--json".to_string(),
+            "--data-dir=/tmp/cass-data".to_string(),
+            "models".to_string(),
+            "verify".to_string(),
+        ];
+        let (normalized, note) = normalize_args(raw);
+        assert_eq!(
+            normalized,
+            vec![
+                "cass".to_string(),
+                "models".to_string(),
+                "verify".to_string(),
+                "--data-dir=/tmp/cass-data".to_string(),
+                "--json".to_string()
+            ]
+        );
+        assert!(
+            note.as_deref()
+                .is_some_and(|note| note.contains("Leading --data-dir moved")),
+            "nested data-dir-aware commands should get the data dir after the nested verb"
+        );
+    }
+}
+
+fn structured_output_request_span_at(rest: &[String], index: usize) -> Option<usize> {
+    let arg = rest.get(index)?;
+    if matches!(arg.as_str(), "--json" | "--robot") {
+        return Some(1);
+    }
+    if arg == "--robot-format" {
+        return rest
+            .get(index + 1)
+            .is_some_and(|value| is_robot_format_alias_value(value))
+            .then_some(2);
+    }
+    if let Some(value) = arg.strip_prefix("--robot-format=")
+        && is_robot_format_alias_value(value)
+    {
+        return Some(1);
+    }
+    parse_format_alias_at(rest, index).map(|(consumed, _, _)| consumed)
+}
+
+fn is_canonical_top_level_command_arg(arg: &str) -> bool {
+    CANONICAL_TOP_LEVEL_COMMANDS
+        .iter()
+        .any(|command| arg.eq_ignore_ascii_case(command))
+}
+
+fn contains_structured_output_request(rest: &[String]) -> bool {
+    (0..rest.len()).any(|index| structured_output_request_span_at(rest, index).is_some())
+}
+
+fn prefix_is_structured_output_requests(rest: &[String], end: usize) -> bool {
+    let mut index = 0;
+    while index < end {
+        let Some(span) = structured_output_request_span_at(rest, index) else {
+            return false;
+        };
+        index += span;
+    }
+    true
+}
+
+fn structured_help_request_index(rest: &[String]) -> Option<usize> {
+    rest.iter()
+        .enumerate()
+        .find_map(|(index, arg)| match arg.as_str() {
+            "--help" | "-h" => Some(index),
+            "help" if prefix_is_structured_output_requests(rest, index) => Some(index),
+            _ => None,
+        })
+}
+
+fn first_command_arg_after_structured_prefix(rest: &[String]) -> Option<&str> {
+    let mut index = 0;
+    while index < rest.len() {
+        if let Some(span) = structured_output_request_span_at(rest, index) {
+            index += span;
+            continue;
+        }
+        let arg = &rest[index];
+        if !arg.starts_with('-') {
+            return Some(arg);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn help_request_target(rest: &[String], help_index: usize) -> Option<&str> {
+    if rest.get(help_index).is_some_and(|arg| arg == "help") {
+        let mut index = help_index + 1;
+        while index < rest.len() {
+            if let Some(span) = structured_output_request_span_at(rest, index) {
+                index += span;
+                continue;
+            }
+            let arg = &rest[index];
+            if !arg.starts_with('-') {
+                return Some(arg);
+            }
+            index += 1;
+        }
+        return None;
+    }
+
+    if help_index > 0 {
+        return first_command_arg_after_structured_prefix(rest);
+    }
+
+    None
+}
+
+fn recover_structured_help_requests(rest: &mut Vec<String>, corrections: &mut Vec<String>) {
+    let Some(help_index) = structured_help_request_index(rest) else {
+        return;
+    };
+    if !contains_structured_output_request(rest) {
+        return;
+    }
+
+    let topic = help_request_target(rest, help_index)
+        .and_then(robot_docs_topic_shorthand)
+        .unwrap_or_else(|| {
+            if help_request_target(rest, help_index).is_some() {
+                "commands"
+            } else {
+                "guide"
+            }
+        });
+    let original = rest.join(" ");
+    *rest = vec!["robot-docs".to_string(), topic.to_string()];
+    corrections.push(format!(
+        "'{original}' → 'robot-docs {topic}' (structured help request)"
     ));
 }
 
@@ -3644,7 +4065,8 @@ fn recover_multiword_query_positionals(rest: &mut Vec<String>, corrections: &mut
 /// 20. **Search-result source aliases**: `view source_path=file source_id=local` → `view file --source local`
 /// 21. **Robot-docs topic shorthand**: `commands --json` → `robot-docs commands`
 /// 22. **Current-session shorthand**: `current --json` → `sessions --current --json`
-/// 23. **Global flag hoisting**: Moves global flags to front regardless of position
+/// 23. **Structured help recovery**: `help search --json` → `robot-docs commands`
+/// 24. **Global flag hoisting**: Moves global flags to front regardless of position
 ///
 /// Returns normalized argv plus an optional correction note teaching proper syntax.
 fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
@@ -4054,8 +4476,10 @@ fn normalize_args(raw: Vec<String>) -> (Vec<String>, Option<String>) {
     }
 
     let mut normalized = Vec::with_capacity(1 + globals.len() + rest.len());
+    recover_structured_help_requests(&mut rest, &mut corrections);
     recover_robot_docs_topic_shorthands(&mut rest, &mut corrections);
     recover_current_session_shorthands(&mut rest, &mut corrections);
+    recover_leading_data_dir_to_subcommand(&mut rest, &mut corrections);
     if move_leading_structured_flag_to_subcommand(&mut rest) {
         corrections.push(
             "Leading --json/--robot moved after the subcommand (structured output flag)".into(),
@@ -4693,6 +5117,7 @@ const CANONICAL_TOP_LEVEL_COMMANDS: &[&str] = &[
     "context",
     "swarm",
     "timeline",
+    "mirror",
     "export",
     "export-html",
     "pages",
@@ -5341,6 +5766,7 @@ async fn execute_cli(
         | Commands::Triage { .. }
         | Commands::View { .. }
         | Commands::Pages { .. }
+        | Commands::Mirror(..)
         | Commands::Import(..)
         | Commands::Analytics(..) => {
             tracing_subscriber::fmt()
@@ -5369,6 +5795,7 @@ async fn execute_cli(
                     json,
                     progress_interval_ms,
                     no_progress_events,
+                    robot_trace_ingest,
                 } => {
                     let structured_format = resolve_subcommand_structured_format(cli, json);
                     run_index_with_data(
@@ -5387,6 +5814,7 @@ async fn execute_cli(
                         idempotency_key,
                         progress_interval_ms,
                         no_progress_events,
+                        robot_trace_ingest,
                     )?;
                 }
                 Commands::Search {
@@ -6640,6 +7068,9 @@ async fn execute_cli(
                         source,
                     )?;
                 }
+                Commands::Mirror(subcmd) => {
+                    run_mirror_command(subcmd, cli)?;
+                }
                 Commands::Swarm(subcmd) => {
                     run_swarm_command(subcmd, cli)?;
                 }
@@ -6673,6 +7104,209 @@ async fn handle_import(cmd: ImportCommand, cli: &Cli) -> CliResult<()> {
             import_chatgpt_export(&path, output_dir.as_deref(), structured_format).await
         }
     }
+}
+
+fn run_mirror_command(cmd: MirrorCommand, cli: &Cli) -> CliResult<()> {
+    match cmd {
+        MirrorCommand::Prune {
+            data_dir,
+            older_than,
+            max_size,
+            keep_tag,
+            safety_hold_down,
+            dry_run: _,
+            apply,
+            json,
+        } => {
+            let structured_format = resolve_subcommand_structured_format(cli, json);
+            run_mirror_prune(
+                data_dir,
+                older_than,
+                max_size,
+                keep_tag,
+                safety_hold_down,
+                apply,
+                structured_format,
+            )
+        }
+    }
+}
+
+fn run_mirror_prune(
+    data_dir_override: Option<PathBuf>,
+    older_than: Option<String>,
+    max_size: Option<String>,
+    keep_tags: Vec<String>,
+    safety_hold_down: String,
+    apply: bool,
+    output_format: Option<RobotFormat>,
+) -> CliResult<()> {
+    if older_than.is_none() && max_size.is_none() {
+        return Err(CliError::usage(
+            "cass mirror prune needs at least one retention predicate",
+            Some("Pass --older-than 90d and/or --max-size 100GB. Dry-run is the default; add --apply to prune.".to_string()),
+        ));
+    }
+
+    let data_dir = data_dir_override.unwrap_or_else(default_data_dir);
+    let older_than_ms = older_than
+        .as_deref()
+        .map(parse_duration_millis)
+        .transpose()?;
+    let max_size_bytes = max_size.as_deref().map(parse_size_bytes).transpose()?;
+    let safety_hold_down_ms = parse_duration_millis(&safety_hold_down)?;
+
+    if apply
+        && let Some(active_index) =
+            active_index_run_details(&data_dir, &data_dir.join("agent_search.db"))
+    {
+        return Err(CliError {
+            code: 7,
+            kind: "lock-busy",
+            message: format!(
+                "refusing to apply raw-mirror prune while an index run is active in {}",
+                active_index.data_dir.display()
+            ),
+            hint: Some(
+                "Wait for indexing/watch work to finish, then rerun `cass mirror prune --apply`."
+                    .to_string(),
+            ),
+            retryable: true,
+        });
+    }
+
+    let report = crate::raw_mirror::prune(
+        &data_dir,
+        crate::raw_mirror::RawMirrorPruneOptions {
+            older_than_ms,
+            max_size_bytes,
+            keep_tags,
+            safety_hold_down_ms,
+            apply,
+        },
+    )
+    .map_err(|err| CliError {
+        code: 9,
+        kind: "raw-mirror",
+        message: format!("raw-mirror prune failed: {err}"),
+        hint: Some(
+            "Run `cass mirror prune --dry-run --json` first and inspect the plan before applying."
+                .to_string(),
+        ),
+        retryable: false,
+    })?;
+
+    if let Some(fmt) = output_format {
+        return output_structured_value(
+            serde_json::json!({
+                "success": true,
+                "data_dir": data_dir.display().to_string(),
+                "prune": report,
+            }),
+            fmt,
+        );
+    }
+
+    println!("Raw-mirror prune ({})", report.mode);
+    println!("  Root: {}", report.root_path);
+    println!("  Manifests: {}", report.manifest_count);
+    println!("  Unique blobs: {}", report.unique_blob_count);
+    println!("  Current blob bytes: {}", report.current_blob_bytes);
+    println!("  Pinned manifests: {}", report.pinned_manifest_count);
+    println!("  Pinned blobs: {}", report.pinned_blob_count);
+    println!("  Planned manifests: {}", report.planned_manifest_count);
+    println!("  Planned blobs: {}", report.planned_blob_count);
+    println!("  Planned reclaim bytes: {}", report.planned_reclaim_bytes);
+    if apply {
+        println!("  Applied manifests: {}", report.applied_manifest_count);
+        println!("  Applied blobs: {}", report.applied_blob_count);
+        println!("  Applied reclaim bytes: {}", report.applied_reclaim_bytes);
+    }
+    if let Some(path) = report.audit_log_path {
+        println!("  Audit log: {path}");
+    }
+    Ok(())
+}
+
+fn parse_duration_millis(raw: &str) -> std::result::Result<i64, CliError> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err(CliError::usage(
+            "empty duration",
+            Some("Use a duration like 90d, 24h, 30m, or 3600s.".to_string()),
+        ));
+    }
+    let split_at = value
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(value.len());
+    let (digits, suffix) = value.split_at(split_at);
+    let amount = digits.parse::<i64>().map_err(|_| {
+        CliError::usage(
+            format!("invalid duration `{value}`"),
+            Some("Use an integer duration like 90d, 24h, 30m, or 3600s.".to_string()),
+        )
+    })?;
+    let unit_ms = match suffix.trim().to_ascii_lowercase().as_str() {
+        "" | "s" | "sec" | "secs" | "second" | "seconds" => 1_000,
+        "m" | "min" | "mins" | "minute" | "minutes" => 60_000,
+        "h" | "hr" | "hrs" | "hour" | "hours" => 3_600_000,
+        "d" | "day" | "days" => 86_400_000,
+        other => {
+            return Err(CliError::usage(
+                format!("unknown duration unit `{other}` in `{value}`"),
+                Some("Supported units: s, m, h, d.".to_string()),
+            ));
+        }
+    };
+    amount.checked_mul(unit_ms).ok_or_else(|| {
+        CliError::usage(
+            format!("duration `{value}` is too large"),
+            Some("Use a smaller retention duration.".to_string()),
+        )
+    })
+}
+
+fn parse_size_bytes(raw: &str) -> std::result::Result<u64, CliError> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return Err(CliError::usage(
+            "empty size",
+            Some("Use a size like 100GB, 512MiB, or 1048576.".to_string()),
+        ));
+    }
+    let split_at = value
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(value.len());
+    let (digits, suffix) = value.split_at(split_at);
+    let amount = digits.parse::<u64>().map_err(|_| {
+        CliError::usage(
+            format!("invalid size `{value}`"),
+            Some("Use an integer size like 100GB, 512MiB, or 1048576.".to_string()),
+        )
+    })?;
+    let multiplier = match suffix.trim().to_ascii_lowercase().as_str() {
+        "" | "b" | "byte" | "bytes" => 1,
+        "k" | "kb" => 1_000,
+        "m" | "mb" => 1_000_000,
+        "g" | "gb" => 1_000_000_000,
+        "t" | "tb" => 1_000_000_000_000,
+        "kib" => 1024,
+        "mib" => 1024 * 1024,
+        "gib" => 1024 * 1024 * 1024,
+        "tib" => 1024_u64.pow(4),
+        other => {
+            return Err(CliError::usage(
+                format!("unknown size unit `{other}` in `{value}`"),
+                Some("Supported units: B, KB, MB, GB, TB, KiB, MiB, GiB, TiB.".to_string()),
+            ));
+        }
+    };
+    amount.checked_mul(multiplier).ok_or_else(|| {
+        CliError::usage(
+            format!("size `{value}` is too large"),
+            Some("Use a smaller size limit.".to_string()),
+        )
+    })
 }
 
 fn run_swarm_command(cmd: SwarmCommand, cli: &Cli) -> CliResult<()> {
@@ -10958,7 +11592,10 @@ fn state_meta_json_inner(
                 hnsw_path: None,
                 hnsw_ready: false,
                 progressive_ready: false,
-                hint: Some("Use --mode lexical until semantic assets are repaired".to_string()),
+                hint: Some(
+                    "Repair semantic assets when convenient; lexical search remains available."
+                        .to_string(),
+                ),
                 fast_tier: Default::default(),
                 quality_tier: Default::default(),
                 backlog: Default::default(),
@@ -10986,7 +11623,7 @@ fn state_meta_json_inner(
         assets.semantic.hnsw_ready = false;
         assets.semantic.progressive_ready = false;
         assets.semantic.hint = Some(
-            "Run 'cass index --full' first. Optional later: run 'cass models install' and 'cass index --semantic', or keep using --mode lexical."
+            "Run 'cass index --full' first. Optional later: run 'cass models install' and 'cass index --semantic'."
                 .to_string(),
         );
         assets.semantic.fast_tier = Default::default();
@@ -12239,6 +12876,7 @@ fn describe_command(cli: &Cli) -> String {
         Some(Commands::ExportHtml { .. }) => "export-html".to_string(),
         Some(Commands::Expand { .. }) => "expand".to_string(),
         Some(Commands::Timeline { .. }) => "timeline".to_string(),
+        Some(Commands::Mirror(..)) => "mirror".to_string(),
         Some(Commands::Sources(..)) => "sources".to_string(),
         Some(Commands::Models(..)) => "models".to_string(),
         Some(Commands::Swarm(..)) => "swarm".to_string(),
@@ -12309,6 +12947,9 @@ fn is_robot_mode(command: &Commands, cli: &Cli) -> bool {
         }
         Commands::Doctor { json, .. } => resolve_subcommand_structured_format(cli, *json).is_some(),
         Commands::Timeline { json, .. } => {
+            resolve_subcommand_structured_format(cli, *json).is_some()
+        }
+        Commands::Mirror(MirrorCommand::Prune { json, .. }) => {
             resolve_subcommand_structured_format(cli, *json).is_some()
         }
         Commands::Sources(SourcesCommand::List { json, .. }) => {
@@ -12656,11 +13297,13 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "  cass diag [--json] [--verbose] [--data-dir DIR]".to_string(),
             "  cass sessions [--workspace DIR] [--current] [--limit N] [--json]".to_string(),
             "  cass view <path> [-n LINE] [-C CONTEXT] [--json]".to_string(),
-            "  cass index [--full] [--watch] [--json] [--data-dir DIR]".to_string(),
+            "  cass index [--full] [--watch] [--json] [--robot-trace-ingest] [--data-dir DIR]"
+                .to_string(),
             "                    In --json mode, NDJSON events stream on stderr:".to_string(),
             "                      {event:started|phase|progress|completed|error, ...}".to_string(),
             "                    Tune with --progress-interval-ms N (250..60000, default 2000),".to_string(),
             "                    disable with --no-progress-events or CASS_INDEX_NO_PROGRESS_EVENTS=1.".to_string(),
+            "                    Add --robot-trace-ingest for per-batch wall_ms, batch_msgs, and duplicate-lookup counters on stderr.".to_string(),
             "                    From another shell: `cass status --json` shows live progress.".to_string(),
             "  cass tui [--once] [--data-dir DIR] [--reset-state] [--asciicast FILE]"
                 .to_string(),
@@ -12688,6 +13331,23 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "                    Requests derived rebuild inside safe-auto-run; never bypasses archive/source authority gates.".to_string(),
             "                    Robots should read introspect.response_schemas doctor-* contracts and branch on".to_string(),
             "                    err.kind/status/operation_outcome.kind/outcome_kind/asset_class/risk_level/fallback_mode.".to_string(),
+            // Keep the doctor command reference complete for agents; several
+            // diagnostic modes are easier to discover here than in clap help.
+            "  cass doctor --ls --json           List per-run artifact dirs under <data_dir>/doctor/runs/ (read-only).".to_string(),
+            "  cass doctor --undo <RUN_ID> --json".to_string(),
+            "                    Restore byte-identically from the per-run backups; `latest` alias supported. Refuses on tamper.".to_string(),
+            "  cass doctor --robot-triage --json One-shot agent triage: summary, findings, recommended_command in one envelope.".to_string(),
+            "  cass doctor --diff [<REF>|<A>..<B>] --json".to_string(),
+            "                    Drift detection (`<REF>` mode) or run-to-run plan comparison (`<A>..<B>` mode). Read-only.".to_string(),
+            "  cass doctor --gc-before <ISO> --yes --json".to_string(),
+            "                    Quarantine doctor runs older than the cutoff. Never deletes (per AGENTS.md RULE NUMBER 1).".to_string(),
+            "  cass doctor --watch --watch-interval-ms <N> --watch-iterations <N> --json".to_string(),
+            "                    Long-running JSONL monitor; emits one `kind: watch-tick` event per poll. SIGINT exits 130.".to_string(),
+            "  cass doctor --explain <RUN_ID> --json".to_string(),
+            "                    Single envelope with run manifest + every recorded action + flattened band timeline.".to_string(),
+            "  cass doctor --emit-capabilities --json".to_string(),
+            "                    Self-describe: detectors[], fixers[], exit_codes[], data_paths[], env_vars[].".to_string(),
+            "  cass robot-docs doctor             Paste-ready agent handbook for the doctor surface.".to_string(),
             "  cass introspect [--json]         Full API schema: commands, arguments, response_schemas (alphabetical).".to_string(),
             "  cass api-version [--json]        Show crate_version + api_version + contract_version.".to_string(),
             "  cass state [--json]              Alias of `cass status` (index/db/rebuild/semantic readiness).".to_string(),
@@ -12700,6 +13360,7 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "  cass expand <path> --line N [-C CONTEXT] [--json]  Show messages around a specific line in a session.".to_string(),
             "  cass resume <path> [--shell]     Resolve a session path into its native-harness resume command.".to_string(),
             "  cass timeline [--since DATE] [--until DATE] [--json]  Activity timeline over a time range.".to_string(),
+            "  cass mirror prune [--older-than 90d] [--max-size 100GB] [--keep-tag important] [--apply] [--json]  Plan or apply raw-mirror retention with an audit log.".to_string(),
             "  cass context <path> [--json]     Find related sessions for a given source path.".to_string(),
             "  cass export <path> [--format markdown] [--output FILE]  Export a conversation to markdown / other formats.".to_string(),
             "  cass export-html <path> [--output-dir DIR] [--json]  Self-contained HTML export (optional encryption).".to_string(),
@@ -12894,6 +13555,7 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             String::new(),
             "# Full workflow".to_string(),
             "  cass index --full                        # index all sessions".to_string(),
+            "  cass index --full --json --robot-trace-ingest 2>/tmp/cass-ingest-trace.jsonl".to_string(),
             "  cass search \"cma-es\" --robot             # search".to_string(),
             "  cass view <source_path> -n <line>        # examine result".to_string(),
             String::new(),
@@ -14778,10 +15440,10 @@ fn run_cli_search(
                 client.set_semantic_indexes_context(embedder, indexes, filter_maps, roles, ann_path)
             {
                 let hint = if prefer_hash {
-                    "Run 'cass index --semantic --embedder hash' to rebuild the hash vector index, or use --mode lexical"
+                    "Run 'cass index --semantic --embedder hash' to rebuild the hash vector index, or omit --mode semantic when lexical evidence is acceptable"
                         .to_string()
                 } else {
-                    "Run 'cass models install' and then 'cass index --semantic', or use --mode lexical"
+                    "Run 'cass models install' and then 'cass index --semantic', or omit --mode semantic when lexical evidence is acceptable"
                         .to_string()
                 };
                 if hybrid_fail_open {
@@ -14801,10 +15463,10 @@ fn run_cli_search(
             let _ = client.clear_semantic_context();
             let summary = setup.availability.summary();
             let hint = if prefer_hash {
-                "Run 'cass index --semantic --embedder hash' to build the hash vector index, or use --mode lexical"
+                "Run 'cass index --semantic --embedder hash' to build the hash vector index, or omit --mode semantic when lexical evidence is acceptable"
                     .to_string()
             } else {
-                "Run 'cass models install' and then 'cass index --semantic', or use --mode lexical"
+                "Run 'cass models install' and then 'cass index --semantic', or omit --mode semantic when lexical evidence is acceptable"
                     .to_string()
             };
             if hybrid_fail_open {
@@ -14946,7 +15608,7 @@ fn run_cli_search(
                             kind: CliErrorKind::SemanticUnavailable.kind_str(),
                             message: "Semantic search not available".to_string(),
                             hint: Some(
-                                "Run 'cass tui' and press Alt+S to set up semantic search, or use --mode lexical"
+                                "Run 'cass tui' and press Alt+S to set up semantic search, or omit --mode semantic when lexical evidence is acceptable"
                                     .to_string(),
                             ),
                             retryable: false,
@@ -14956,7 +15618,10 @@ fn run_cli_search(
                             code: 9,
                             kind: CliErrorKind::Search.kind_str(),
                             message: format!("semantic search failed: {e}"),
-                            hint: Some("Try --mode lexical as fallback".to_string()),
+                            hint: Some(
+                                "Retry with the default hybrid-preferred mode when lexical evidence is acceptable"
+                                    .to_string(),
+                            ),
                             retryable: true,
                         }
                     }
@@ -15011,7 +15676,7 @@ fn run_cli_search(
                         kind: CliErrorKind::SemanticUnavailable.kind_str(),
                         message: "Hybrid search not available (requires semantic search)".to_string(),
                         hint: Some(
-                            "Run 'cass tui' and press Alt+S to set up semantic search, or use --mode lexical"
+                            "Run 'cass tui' and press Alt+S to set up semantic search, or omit --mode hybrid when lexical evidence is acceptable"
                                 .to_string(),
                         ),
                         retryable: false,
@@ -15021,7 +15686,10 @@ fn run_cli_search(
                         code: 9,
                         kind: CliErrorKind::Search.kind_str(),
                         message: format!("hybrid search failed: {e}"),
-                        hint: Some("Try --mode lexical as fallback".to_string()),
+                        hint: Some(
+                            "Retry with the default hybrid-preferred mode when lexical evidence is acceptable"
+                                .to_string(),
+                        ),
                         retryable: true,
                     });
                 }
@@ -18468,6 +19136,7 @@ fn run_stats(
             Ok((r.get_typed(0)?, r.get_typed(1)?))
         })
         .unwrap_or((None, None));
+    let raw_mirror_summary = crate::raw_mirror::storage_summary(&data_dir);
 
     // Get per-source breakdown if requested (P3.7)
     let source_rows: Vec<(String, i64, i64)> = if by_source {
@@ -18511,6 +19180,7 @@ fn run_stats(
                 "oldest": oldest.and_then(|ts| chrono::DateTime::from_timestamp_millis(ts).map(|d| d.to_rfc3339())),
                 "newest": newest.and_then(|ts| chrono::DateTime::from_timestamp_millis(ts).map(|d| d.to_rfc3339())),
             },
+            "raw_mirror": &raw_mirror_summary,
             "db_path": db_path.display().to_string(),
         });
 
@@ -18563,6 +19233,31 @@ fn run_stats(
     println!("Totals:");
     println!("  Conversations: {conversation_count}");
     println!("  Messages: {message_count}");
+    println!();
+    println!("Raw Mirror:");
+    if raw_mirror_summary.initialized {
+        println!(
+            "  Storage bytes: {}",
+            raw_mirror_summary.total_storage_bytes
+        );
+        println!("  Manifests: {}", raw_mirror_summary.manifest_count);
+        println!("  Unique blobs: {}", raw_mirror_summary.unique_blob_count);
+        println!("  Blob bytes: {}", raw_mirror_summary.total_blob_bytes);
+        println!(
+            "  Largest blob bytes: {}",
+            raw_mirror_summary.largest_blob_bytes
+        );
+        if raw_mirror_summary.missing_blob_count > 0
+            || raw_mirror_summary.invalid_manifest_count > 0
+        {
+            println!(
+                "  Warnings: {} missing blob(s), {} invalid manifest(s)",
+                raw_mirror_summary.missing_blob_count, raw_mirror_summary.invalid_manifest_count
+            );
+        }
+    } else {
+        println!("  Status: not initialized");
+    }
     println!();
     println!("By Agent:");
     for (agent, count) in &agent_rows {
@@ -22743,12 +23438,18 @@ fn doctor_forensic_bundle_root(data_dir: &Path) -> PathBuf {
 fn doctor_forensic_create_private_dir(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        use std::os::unix::fs::DirBuilderExt;
 
         let mut builder = std::fs::DirBuilder::new();
         builder.mode(0o700);
         builder.create(path)?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        let meta = std::fs::symlink_metadata(path)?;
+        if meta.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "refusing to use a symlink as a forensic directory",
+            ));
+        }
         Ok(())
     }
 
@@ -22766,7 +23467,16 @@ fn doctor_forensic_create_private_dir_all(path: &Path) -> io::Result<()> {
         let mut builder = std::fs::DirBuilder::new();
         builder.recursive(true).mode(0o700);
         builder.create(path)?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        let meta = std::fs::symlink_metadata(path)?;
+        if meta.file_type().is_symlink() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "refusing to use a symlink as a forensic directory",
+            ));
+        }
+        if meta.permissions().mode() & 0o777 != 0o700 {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+        }
         Ok(())
     }
 
@@ -22781,11 +23491,10 @@ fn doctor_forensic_create_private_file(path: &Path) -> io::Result<std::fs::File>
     options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        use std::os::unix::fs::OpenOptionsExt;
 
         options.mode(0o600);
         let file = options.open(path)?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
         Ok(file)
     }
 
@@ -24532,6 +25241,8 @@ impl DoctorMutationLockObservation {
 
 const DOCTOR_STORAGE_MIN_FREE_BYTES: u64 = 1024 * 1024 * 1024;
 const CASS_TEST_DOCTOR_STORAGE_AVAILABLE_BYTES: &str = "CASS_TEST_DOCTOR_STORAGE_AVAILABLE_BYTES";
+const CASS_RAW_MIRROR_SIZE_WARN_THRESHOLD_BYTES: &str = "CASS_RAW_MIRROR_SIZE_WARN_THRESHOLD_BYTES";
+const DOCTOR_RAW_MIRROR_SIZE_WARN_THRESHOLD_BYTES_DEFAULT: u64 = 100 * 1_000_000_000;
 const CASS_TEST_DOCTOR_CANDIDATE_PROMOTION_FAILPOINT: &str =
     "CASS_TEST_DOCTOR_CANDIDATE_PROMOTION_FAILPOINT";
 const CASS_TEST_DOCTOR_RENAME_FAILURE: &str = "CASS_TEST_DOCTOR_RENAME_FAILURE";
@@ -28358,7 +29069,32 @@ fn doctor_raw_mirror_count_interrupted_captures(root: &Path) -> usize {
         .count()
 }
 
+fn doctor_raw_mirror_size_warn_threshold_bytes() -> u64 {
+    dotenvy::var(CASS_RAW_MIRROR_SIZE_WARN_THRESHOLD_BYTES)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(DOCTOR_RAW_MIRROR_SIZE_WARN_THRESHOLD_BYTES_DEFAULT)
+}
+
+fn doctor_raw_mirror_size_warning(total_blob_bytes: u64, threshold_bytes: u64) -> Option<String> {
+    (threshold_bytes > 0 && total_blob_bytes >= threshold_bytes).then(|| {
+        format!(
+            "raw_mirror.size: verified raw-mirror blobs use {total_blob_bytes} bytes, at or above the warn threshold of {threshold_bytes} bytes; inspect `cass mirror prune --older-than 90d --json` and apply only after reviewing the plan"
+        )
+    })
+}
+
 fn collect_doctor_raw_mirror_report(data_dir: &Path) -> DoctorRawMirrorReport {
+    collect_doctor_raw_mirror_report_with_threshold(
+        data_dir,
+        doctor_raw_mirror_size_warn_threshold_bytes(),
+    )
+}
+
+fn collect_doctor_raw_mirror_report_with_threshold(
+    data_dir: &Path,
+    size_warn_threshold_bytes: u64,
+) -> DoctorRawMirrorReport {
     let root = doctor_raw_mirror_root(data_dir);
     let root_path = root.display().to_string();
     let mut report = DoctorRawMirrorReport {
@@ -28484,6 +29220,11 @@ fn collect_doctor_raw_mirror_report(data_dir: &Path) -> DoctorRawMirrorReport {
         .sum();
     report.summary.verified_blob_count = verified_blob_bytes.len();
     report.summary.total_blob_bytes = verified_blob_bytes.values().copied().sum();
+    if let Some(warning) =
+        doctor_raw_mirror_size_warning(report.summary.total_blob_bytes, size_warn_threshold_bytes)
+    {
+        report.warnings.push(warning);
+    }
 
     report.status = if report.summary.invalid_manifest_count > 0
         || report.summary.missing_blob_count > 0
@@ -28491,6 +29232,11 @@ fn collect_doctor_raw_mirror_report(data_dir: &Path) -> DoctorRawMirrorReport {
         || report.summary.manifest_checksum_mismatch_count > 0
         || report.summary.manifest_checksum_not_recorded_count > 0
         || report.summary.interrupted_capture_count > 0
+        || doctor_raw_mirror_size_warning(
+            report.summary.total_blob_bytes,
+            size_warn_threshold_bytes,
+        )
+        .is_some()
     {
         "warn".to_string()
     } else if report.summary.manifest_count == 0 {
@@ -28776,6 +29522,24 @@ fn build_doctor_archive_scan_context(data_dir: &Path, db_path: &Path) -> DoctorA
             recommendation: "cass doctor archive-normalize --dry-run --json",
             safe_to_normalize: true,
             normalization_kind: Some("write_metadata_annotation"),
+        }));
+    }
+    let raw_mirror_size_warn_threshold = doctor_raw_mirror_size_warn_threshold_bytes();
+    if let Some(warning) = doctor_raw_mirror_size_warning(
+        raw_mirror.summary.total_blob_bytes,
+        raw_mirror_size_warn_threshold,
+    ) {
+        findings.push(doctor_archive_finding(DoctorArchiveFindingInput {
+            severity: "medium",
+            scope: "raw_mirror",
+            asset_class: "raw_mirror_blob",
+            finding_kind: "raw_mirror_size",
+            dedupe_seed: "raw-mirror-size",
+            evidence: vec![warning],
+            confidence: "high",
+            recommendation: "cass mirror prune --older-than 90d --json",
+            safe_to_normalize: false,
+            normalization_kind: None,
         }));
     }
     if raw_mirror.summary.manifest_checksum_not_recorded_count > 0 {
@@ -35401,6 +36165,19 @@ fn run_doctor_undo(
                 message: format!("actions.jsonl unparseable: {detail}"),
                 hint: Some(
                     "Inspect the run dir; refusing to undo a partially-corrupt journal.".to_string(),
+                ),
+                retryable: false,
+            },
+            crate::doctor_undo::UndoError::QuarantineDestinationExists(path) => CliError {
+                code: 4,
+                kind: "refused-unsafe",
+                message: format!(
+                    "undo refused: quarantine destination already exists at {}",
+                    path.display()
+                ),
+                hint: Some(
+                    "The undo quarantine target would be overwritten. Inspect the undo quarantine directory before retrying."
+                        .to_string(),
                 ),
                 retryable: false,
             },
@@ -45841,6 +46618,8 @@ fn apply_diag_quarantine_cleanup(
     index_path: &Path,
     rebuild_active: bool,
     provided_approval_fingerprint: Option<&str>,
+    journal_run_dir: Option<&Path>,
+    journal_run_id: Option<&str>,
 ) -> DiagCleanupApplyResult {
     use crate::indexer::lexical_generation::LexicalCleanupDisposition;
 
@@ -46016,6 +46795,7 @@ fn apply_diag_quarantine_cleanup(
         };
 
         let action_id = doctor_cleanup_action_id(&action);
+        let mutation_started_at_ms = doctor_now_ms();
         let mut mutation_receipt = execute_doctor_fs_mutation(DoctorFsMutationRequest {
             operation_id: &result.approval_fingerprint,
             action_id: &action_id,
@@ -46032,6 +46812,7 @@ fn apply_diag_quarantine_cleanup(
             planned_bytes: action.planned_reclaimable_bytes,
             required_min_age_seconds: None,
         });
+        let mutation_ended_at_ms = doctor_now_ms();
         mutation_receipt.forensic_bundle = result.forensic_bundle.clone();
         match mutation_receipt.status {
             DoctorActionStatus::Applied => {
@@ -46047,6 +46828,20 @@ fn apply_diag_quarantine_cleanup(
                     reclaimed_bytes,
                     "pruned retained lexical publish backup outside retention cap"
                 );
+                if let (Some(run_dir), Some(run_id)) = (journal_run_dir, journal_run_id)
+                    && let Err(err) = journal_fs_mutation_receipt_to_actions_log(
+                        run_dir,
+                        run_id,
+                        &mutation_receipt,
+                        mutation_started_at_ms,
+                        mutation_ended_at_ms,
+                    )
+                {
+                    result.warnings.push(format!(
+                        "failed to journal cleanup mutation to actions.jsonl ({} run-dir): {err}",
+                        run_dir.display()
+                    ));
+                }
             }
             _ => {
                 let err = mutation_receipt.blocked_reasons.join("; ");
@@ -46117,6 +46912,7 @@ fn apply_diag_quarantine_cleanup(
             }
 
             let action_id = doctor_cleanup_action_id(&action);
+            let mutation_started_at_ms = doctor_now_ms();
             let mut mutation_receipt = execute_doctor_fs_mutation(DoctorFsMutationRequest {
                 operation_id: &result.approval_fingerprint,
                 action_id: &action_id,
@@ -46133,6 +46929,7 @@ fn apply_diag_quarantine_cleanup(
                 planned_bytes: action.planned_reclaimable_bytes,
                 required_min_age_seconds: None,
             });
+            let mutation_ended_at_ms = doctor_now_ms();
             mutation_receipt.forensic_bundle = result.forensic_bundle.clone();
             match mutation_receipt.status {
                 DoctorActionStatus::Applied => {
@@ -46151,6 +46948,20 @@ fn apply_diag_quarantine_cleanup(
                         reclaimed_bytes,
                         "pruned reclaimable lexical generation"
                     );
+                    if let (Some(run_dir), Some(run_id)) = (journal_run_dir, journal_run_id)
+                        && let Err(err) = journal_fs_mutation_receipt_to_actions_log(
+                            run_dir,
+                            run_id,
+                            &mutation_receipt,
+                            mutation_started_at_ms,
+                            mutation_ended_at_ms,
+                        )
+                    {
+                        result.warnings.push(format!(
+                            "failed to journal cleanup mutation to actions.jsonl ({} run-dir): {err}",
+                            run_dir.display()
+                        ));
+                    }
                 }
                 _ => {
                     let err = mutation_receipt.blocked_reasons.join("; ");
@@ -46243,6 +47054,78 @@ fn doctor_fs_mutation_receipt_for_request(
             "not_captured_for_non_doctor_mutation_executor_call",
         ),
     }
+}
+
+/// Pass-13 structural refactor: translate a `DoctorFsMutationReceipt` produced
+/// by the existing FsMutationExecutor into an `ActionRecord::Mutation` and
+/// append it to `<run_dir>/actions.jsonl` so `cass doctor --undo <run-id>`,
+/// `cass doctor --diff`, and `cass doctor --ls` see real production mutations
+/// (not only mutations from new pass-1+ fixers that flow through
+/// `doctor_chokepoint::mutate()`).
+///
+/// Only successful `Applied` mutations are journalled. Blocked / Failed /
+/// Refused / Skipped / Planned receipts are silently ignored — they didn't
+/// touch the filesystem, so there's nothing to undo. A journaling failure is
+/// returned to the caller; production callers downgrade the error to a
+/// warning rather than abort the cleanup (the mutation itself already
+/// succeeded; failing to journal is observability loss, not data loss).
+///
+/// **Scope.** Pass-13 wires journaling for the cleanup-apply path
+/// (`apply_diag_quarantine_cleanup`), which is the only `run_doctor_impl` path
+/// where `execute_doctor_fs_mutation` performs destructive ops on existing
+/// files. The archive-reconstruction `doctor_candidate_*` helpers also call
+/// `execute_doctor_fs_mutation`/`execute_doctor_fs_write_mutation` but write
+/// only into a fresh staging tree — their inverse is "remove the staging tree
+/// after dry-run rejection", which is already handled by the candidate
+/// lifecycle. Journaling those receipts is pass-14+ work if/when staging-tree
+/// drops become user-visible state changes.
+fn journal_fs_mutation_receipt_to_actions_log(
+    run_dir: &Path,
+    run_id: &str,
+    receipt: &DoctorFsMutationReceipt,
+    started_at_ms: i64,
+    ended_at_ms: i64,
+) -> std::io::Result<()> {
+    if !matches!(receipt.status, DoctorActionStatus::Applied) {
+        return Ok(());
+    }
+    let op_label: &str = match receipt.mutation_kind {
+        DoctorFsMutationKind::PruneCleanupTarget => "prune-cleanup-target",
+        DoctorFsMutationKind::RemoveStaleLegacyIndexLock => "remove-stale-legacy-index-lock",
+        DoctorFsMutationKind::CopyFileToStaging => "copy-file-to-staging",
+        DoctorFsMutationKind::WriteFileToStaging => "write-file-to-staging",
+        DoctorFsMutationKind::PromoteStagedFile => "promote-staged-file",
+        DoctorFsMutationKind::RestoreStagedFile => "restore-staged-file",
+        DoctorFsMutationKind::MoveFileToQuarantine => "move-file-to-quarantine",
+    };
+    // `before_blake3` is the file's pre-mutation hash. For ops where the
+    // executor verified the source-equals-target's pre-mutation content
+    // (prune, remove-stale-lock, quarantine), that's `actual_source_blake3`.
+    // For ops that write into a previously-empty target (copy/write/promote/
+    // restore-into-fresh-tree), the destination had no pre-image — None.
+    let before_blake3 = match receipt.mutation_kind {
+        DoctorFsMutationKind::PruneCleanupTarget
+        | DoctorFsMutationKind::RemoveStaleLegacyIndexLock
+        | DoctorFsMutationKind::MoveFileToQuarantine => receipt.actual_source_blake3.clone(),
+        DoctorFsMutationKind::CopyFileToStaging
+        | DoctorFsMutationKind::WriteFileToStaging
+        | DoctorFsMutationKind::PromoteStagedFile
+        | DoctorFsMutationKind::RestoreStagedFile => None,
+    };
+    let after_blake3 = receipt.actual_target_blake3.clone();
+    crate::doctor_runs::append_action(
+        run_dir,
+        &crate::doctor_runs::ActionRecord::Mutation {
+            run_id: run_id.to_string(),
+            fm_id: receipt.operation_id.clone(),
+            path: receipt.target_path.clone(),
+            op: op_label.to_string(),
+            before_blake3,
+            after_blake3,
+            started_at_ms,
+            ended_at_ms,
+        },
+    )
 }
 
 fn execute_doctor_fs_mutation(request: DoctorFsMutationRequest<'_>) -> DoctorFsMutationReceipt {
@@ -56116,6 +56999,30 @@ paths = ["~/.claude/projects"]
         );
     }
 
+    #[test]
+    fn raw_mirror_report_warns_when_verified_blob_bytes_cross_threshold() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = temp.path().join("cass-data");
+        let source_path = data_dir.join("sessions/large-source.jsonl");
+        let bytes = b"{\"type\":\"message\",\"text\":\"size warning\"}\n";
+        let manifest =
+            raw_mirror_test_manifest(&data_dir, "codex", "local", &source_path, bytes, Vec::new());
+        write_raw_mirror_test_manifest(&data_dir, &manifest, bytes);
+
+        let report = collect_doctor_raw_mirror_report_with_threshold(&data_dir, 1);
+
+        assert_eq!(report.status, "warn");
+        assert_eq!(report.summary.total_blob_bytes, bytes.len() as u64);
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("raw_mirror.size")
+                    && warning.contains("cass mirror prune --older-than 90d --json")),
+            "raw mirror size warning should include the canonical prune dry-run: {report:#?}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn raw_mirror_report_rejects_symlink_manifest_entries() {
@@ -56624,6 +57531,205 @@ paths = ["~/.claude/projects"]
                 .archive_preservation_assertion
                 .contains("never imply archive corruption")
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Pass-13 structural refactor: journal_fs_mutation_receipt_to_actions_log
+    //
+    // These tests cover the new bridge between the FsMutationExecutor's
+    // `DoctorFsMutationReceipt` and the per-run `actions.jsonl` journal owned
+    // by `crate::doctor_runs`. The bridge is what makes `cass doctor --undo`,
+    // `cass doctor --diff`, and `cass doctor --ls` see real production
+    // cleanup-apply mutations (not just mutations from new fixers that go
+    // through `doctor_chokepoint::mutate()`).
+    // -----------------------------------------------------------------------
+
+    fn pass13_synthetic_receipt(
+        kind: DoctorFsMutationKind,
+        status: DoctorActionStatus,
+        target_path: &str,
+    ) -> DoctorFsMutationReceipt {
+        DoctorFsMutationReceipt {
+            schema_version: 1,
+            operation_id: "op-pass13-test".to_string(),
+            action_id: "act-pass13-test".to_string(),
+            mutation_kind: kind,
+            fallback_kind: None,
+            mode: DoctorRepairMode::CleanupApply,
+            asset_class: DoctorAssetClass::QuarantinedLexicalGeneration,
+            source_path: None,
+            redacted_source_path: None,
+            target_path: target_path.to_string(),
+            redacted_target_path: target_path.to_string(),
+            staging_root: None,
+            redacted_staging_root: None,
+            expected_source_blake3: None,
+            actual_source_blake3: Some("aa".repeat(32)),
+            actual_target_blake3: Some("bb".repeat(32)),
+            planned_bytes: 0,
+            affected_bytes: 0,
+            status,
+            blocked_reasons: Vec::new(),
+            precondition_checks: Vec::new(),
+            forensic_bundle: doctor_forensic_bundle_uncaptured("test"),
+        }
+    }
+
+    #[test]
+    fn pass13_journal_bridge_writes_actions_jsonl_entry_for_applied_receipt() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let run_dir = temp.path().join("run-dir");
+        std::fs::create_dir_all(&run_dir).expect("create run dir");
+
+        let receipt = pass13_synthetic_receipt(
+            DoctorFsMutationKind::PruneCleanupTarget,
+            DoctorActionStatus::Applied,
+            "/data/doctor/x.idx",
+        );
+        journal_fs_mutation_receipt_to_actions_log(&run_dir, "run-id-1", &receipt, 100, 200)
+            .expect("journal must succeed");
+
+        let actions_path = run_dir.join("actions.jsonl");
+        let body = std::fs::read_to_string(&actions_path).expect("read actions.jsonl");
+        assert!(body.contains("\"kind\":\"mutation\""));
+        assert!(body.contains("\"path\":\"/data/doctor/x.idx\""));
+        assert!(body.contains("\"op\":\"prune-cleanup-target\""));
+        assert!(body.contains("\"run_id\":\"run-id-1\""));
+        assert!(
+            body.ends_with('\n'),
+            "must end with newline (atomic append)"
+        );
+    }
+
+    #[test]
+    fn pass13_journal_bridge_silently_skips_non_applied_receipts() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let run_dir = temp.path().join("run-dir");
+        std::fs::create_dir_all(&run_dir).expect("create run dir");
+
+        for status in [
+            DoctorActionStatus::Planned,
+            DoctorActionStatus::Skipped,
+            DoctorActionStatus::Blocked,
+            DoctorActionStatus::Failed,
+            DoctorActionStatus::Refused,
+        ] {
+            let receipt = pass13_synthetic_receipt(
+                DoctorFsMutationKind::PruneCleanupTarget,
+                status,
+                "/data/doctor/y.idx",
+            );
+            journal_fs_mutation_receipt_to_actions_log(&run_dir, "run-id-2", &receipt, 100, 200)
+                .expect("journal must succeed (silent skip)");
+        }
+
+        // No actions.jsonl entry should be written for any non-Applied status.
+        let actions_path = run_dir.join("actions.jsonl");
+        if actions_path.exists() {
+            let body = std::fs::read_to_string(&actions_path).expect("read actions.jsonl");
+            assert!(
+                body.is_empty(),
+                "non-Applied receipts must NOT emit journal entries; got: {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pass13_journal_bridge_emits_correct_op_labels_per_mutation_kind() {
+        let cases = [
+            (
+                DoctorFsMutationKind::PruneCleanupTarget,
+                "prune-cleanup-target",
+            ),
+            (
+                DoctorFsMutationKind::RemoveStaleLegacyIndexLock,
+                "remove-stale-legacy-index-lock",
+            ),
+            (
+                DoctorFsMutationKind::CopyFileToStaging,
+                "copy-file-to-staging",
+            ),
+            (
+                DoctorFsMutationKind::WriteFileToStaging,
+                "write-file-to-staging",
+            ),
+            (
+                DoctorFsMutationKind::PromoteStagedFile,
+                "promote-staged-file",
+            ),
+            (
+                DoctorFsMutationKind::RestoreStagedFile,
+                "restore-staged-file",
+            ),
+            (
+                DoctorFsMutationKind::MoveFileToQuarantine,
+                "move-file-to-quarantine",
+            ),
+        ];
+        for (kind, expected_op_label) in cases {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let run_dir = temp.path().join("run-dir");
+            std::fs::create_dir_all(&run_dir).expect("create run dir");
+            let receipt = pass13_synthetic_receipt(
+                kind,
+                DoctorActionStatus::Applied,
+                "/data/doctor/probe.bin",
+            );
+            journal_fs_mutation_receipt_to_actions_log(&run_dir, "run-id-op-label", &receipt, 1, 2)
+                .expect("journal must succeed");
+            let body =
+                std::fs::read_to_string(run_dir.join("actions.jsonl")).expect("read actions.jsonl");
+            assert!(
+                body.contains(&format!("\"op\":\"{expected_op_label}\"")),
+                "expected op label `{expected_op_label}` for {kind:?}; body: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn pass13_journal_bridge_records_before_hash_for_destructive_kinds_only() {
+        // Prune / RemoveStaleLock / MoveToQuarantine all act on existing files;
+        // their actual_source_blake3 IS the file's pre-mutation hash.
+        // Copy/Write/Promote/Restore write into previously-empty targets; their
+        // destination has no pre-image, so before_blake3 must be `null`.
+        let destructive = [
+            DoctorFsMutationKind::PruneCleanupTarget,
+            DoctorFsMutationKind::RemoveStaleLegacyIndexLock,
+            DoctorFsMutationKind::MoveFileToQuarantine,
+        ];
+        for kind in destructive {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let run_dir = temp.path().join("run-dir");
+            std::fs::create_dir_all(&run_dir).expect("create run dir");
+            let receipt = pass13_synthetic_receipt(kind, DoctorActionStatus::Applied, "/x");
+            journal_fs_mutation_receipt_to_actions_log(&run_dir, "rid", &receipt, 1, 2)
+                .expect("journal");
+            let body = std::fs::read_to_string(run_dir.join("actions.jsonl")).expect("read");
+            assert!(
+                body.contains(&format!("\"before_blake3\":\"{}\"", "aa".repeat(32))),
+                "destructive {kind:?} must record before_blake3 from actual_source_blake3"
+            );
+        }
+
+        let non_destructive = [
+            DoctorFsMutationKind::CopyFileToStaging,
+            DoctorFsMutationKind::WriteFileToStaging,
+            DoctorFsMutationKind::PromoteStagedFile,
+            DoctorFsMutationKind::RestoreStagedFile,
+        ];
+        for kind in non_destructive {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let run_dir = temp.path().join("run-dir");
+            std::fs::create_dir_all(&run_dir).expect("create run dir");
+            let receipt = pass13_synthetic_receipt(kind, DoctorActionStatus::Applied, "/x");
+            journal_fs_mutation_receipt_to_actions_log(&run_dir, "rid", &receipt, 1, 2)
+                .expect("journal");
+            let body = std::fs::read_to_string(run_dir.join("actions.jsonl")).expect("read");
+            assert!(
+                body.contains("\"before_blake3\":null"),
+                "non-destructive {kind:?} must record before_blake3=null; got: {body}"
+            );
+        }
     }
 }
 
@@ -58670,6 +59776,7 @@ fn run_status(
             "healthy": healthy,
             "initialized": !not_initialized,
             "explanation": explanation,
+            "data_dir": data_dir.display().to_string(),
             "index": state.get("index").cloned().unwrap_or(serde_json::Value::Null),
             "database": serde_json::json!({
                 "exists": db_exists,
@@ -59219,6 +60326,7 @@ fn run_health(
             "healthy": healthy,
             "initialized": !not_initialized,
             "explanation": explanation,
+            "data_dir": data_dir.display().to_string(),
             "recommended_action": recommended_action,
             "recommended_commands": recommended_commands,
             "errors": errors,
@@ -63211,13 +64319,79 @@ pub(crate) fn run_doctor_impl(
 
     let cleanup_apply_started = Instant::now();
     let cleanup_apply_result = if cleanup_apply_requested && fix_can_mutate {
+        // Pass-13 structural refactor: create a per-run journal directory so the
+        // FsMutationExecutor's `Applied` receipts also land in `actions.jsonl`.
+        // `cass doctor --undo <run-id>` / `--ls` / `--diff` then see real
+        // production mutations from the cleanup-apply path, not only mutations
+        // produced by `doctor_chokepoint::mutate()` from new fixers.
+        //
+        // Journaling is best-effort: if the run-dir cannot be created we still
+        // run the cleanup (the FsMutationExecutor itself is the safety gate),
+        // we just lose the post-hoc observability for this invocation.
+        let target_sha = option_env!("VERGEN_GIT_SHA").unwrap_or("unknown");
+        let journal_run_id = crate::doctor_runs::RunId::new(target_sha);
+        let journal_run_id_str = journal_run_id.as_str().to_string();
+        let journal_run_dir = match crate::doctor_runs::create_run_dir(&data_dir, &journal_run_id) {
+            Ok(dir) => {
+                let _ = crate::doctor_runs::append_action(
+                    &dir,
+                    &crate::doctor_runs::ActionRecord::RunStarted {
+                        schema_version: crate::doctor_runs::RUN_ARTIFACT_SCHEMA_VERSION,
+                        run_id: journal_run_id_str.clone(),
+                        target_sha: target_sha.to_string(),
+                        mode: "cleanup-apply".to_string(),
+                        started_at_ms: doctor_now_ms(),
+                    },
+                );
+                Some(dir)
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "cass::doctor::cleanup",
+                    run_id = %journal_run_id_str,
+                    error = %err,
+                    "failed to create per-run journal directory; cleanup-apply will proceed without journaling"
+                );
+                None
+            }
+        };
         let result = apply_diag_quarantine_cleanup(
             &data_dir,
             &db_path,
             &index_path,
             rebuild_active,
             requested_plan_fingerprint.as_deref(),
+            journal_run_dir.as_deref(),
+            journal_run_dir
+                .as_ref()
+                .map(|_| journal_run_id_str.as_str()),
         );
+        if let Some(run_dir) = journal_run_dir.as_deref() {
+            // RunEnded records the cleanup-apply outcome so `cass doctor --diff`
+            // and `--ls` distinguish a fully-applied run from a partially-
+            // applied run, a no-op, or one blocked by the apply gate. We keep
+            // exit_code = 0 because cleanup-apply is not the surface that
+            // produces a non-zero process exit — the outer doctor exit is
+            // computed separately from cleanup_status further down.
+            let exit_code_kind: &str = if result.applied {
+                "success"
+            } else if result.pruned_asset_count > 0 {
+                "partial-success"
+            } else if !result.blocked_reasons.is_empty() {
+                "blocked"
+            } else {
+                "no-op"
+            };
+            let _ = crate::doctor_runs::append_action(
+                run_dir,
+                &crate::doctor_runs::ActionRecord::RunEnded {
+                    run_id: journal_run_id_str.clone(),
+                    exit_code: 0,
+                    exit_code_kind: exit_code_kind.to_string(),
+                    ended_at_ms: doctor_now_ms(),
+                },
+            );
+        }
         let cleanup_status = if result.applied {
             "pass"
         } else if result.before_reclaim_candidate_count > 0
@@ -65237,7 +66411,7 @@ fn build_mistake_recovery_capabilities() -> Vec<MistakeRecoveryCapability> {
             "cass commands --json",
             "cass robot-docs commands",
             true,
-            "Robot-docs topic shorthands such as commands, schemas, examples, exit-codes, and guide route to robot-docs instead of search.",
+            "Non-command robot-docs topic shorthands such as commands, schemas, examples, env, paths, exit-codes, and guide route to robot-docs instead of search.",
         ),
         mistake_recovery_capability(
             "cass search \"query\" limit=5",
@@ -65250,6 +66424,24 @@ fn build_mistake_recovery_capabilities() -> Vec<MistakeRecoveryCapability> {
             "cass robot-docs guide",
             true,
             "robot-docs is already machine-readable; redundant robot/json flags are removed and the guide topic is used by default.",
+        ),
+        mistake_recovery_capability(
+            "cass help --json",
+            "cass robot-docs guide",
+            true,
+            "Structured help requests route to the agent guide instead of clap's human help path.",
+        ),
+        mistake_recovery_capability(
+            "cass help commands --json",
+            "cass robot-docs commands",
+            true,
+            "Structured help for robot-docs topics routes directly to the matching robot-docs topic.",
+        ),
+        mistake_recovery_capability(
+            "cass search --help --json",
+            "cass robot-docs commands",
+            true,
+            "Structured command help routes to the machine-readable command reference while plain --help remains native clap help.",
         ),
         mistake_recovery_capability(
             "cass ready --json",
@@ -65286,6 +66478,12 @@ fn build_mistake_recovery_capabilities() -> Vec<MistakeRecoveryCapability> {
             "cass status --json",
             true,
             "A leading robot-mode flag is canonicalized to the subcommand's JSON output flag.",
+        ),
+        mistake_recovery_capability(
+            "cass --data-dir /tmp/cass health --json",
+            "cass health --data-dir /tmp/cass --json",
+            true,
+            "A leading data-dir override is moved onto the data-dir-aware subcommand.",
         ),
         mistake_recovery_capability(
             "cass search --query auth --json",
@@ -65614,8 +66812,25 @@ fn run_introspect(output_format: Option<RobotFormat>) -> CliResult<()> {
     });
 
     if let Some(fmt) = structured_format {
-        let payload = serde_json::to_value(&response).unwrap_or_default();
-        return output_structured_value(payload, fmt);
+        use std::io::Write;
+
+        let stdout = std::io::stdout();
+        let mut stdout = stdout.lock();
+        match fmt {
+            RobotFormat::Json => {
+                let _ = serde_json::to_writer_pretty(&mut stdout, &response);
+                let _ = writeln!(stdout);
+            }
+            RobotFormat::Jsonl | RobotFormat::Compact | RobotFormat::Sessions => {
+                let _ = serde_json::to_writer(&mut stdout, &response);
+                let _ = writeln!(stdout);
+            }
+            RobotFormat::Toon => {
+                let payload = serde_json::to_value(&response).unwrap_or_default();
+                return output_structured_value(payload, fmt);
+            }
+        }
+        return Ok(());
     }
 
     // Human-readable output
@@ -69135,7 +70350,10 @@ fn response_schema_pack() -> serde_json::Value {
                 "properties": {
                     "text": { "type": "string" },
                     "normalized": { "type": "string" },
-                    "filters": { "type": "object" }
+                    "filters": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string" }
+                    }
                 }
             }),
         ),
@@ -69196,8 +70414,33 @@ fn response_schema_pack() -> serde_json::Value {
                     "active_rebuild": { "type": "boolean" },
                     "lock_state": { "type": ["string", "null"] },
                     "missing_database": { "type": "boolean" },
-                    "source_sync_gaps": { "type": "array" },
-                    "source_readiness": { "type": "array" }
+                    "source_sync_gaps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "source_id": { "type": "string" },
+                                "origin_kind": { "type": "string" },
+                                "kind": { "type": "string" },
+                                "lag_seconds": { "type": ["integer", "null"] },
+                                "last_synced_at_ms": { "type": ["integer", "null"] },
+                                "recommended_action": { "type": ["string", "null"] }
+                            }
+                        }
+                    },
+                    "source_readiness": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "source_id": { "type": "string" },
+                                "origin_kind": { "type": "string" },
+                                "readiness": { "type": "string" },
+                                "healthy": { "type": "boolean" },
+                                "evidence_count": { "type": "integer" }
+                            }
+                        }
+                    }
                 }
             }),
         ),
@@ -69220,9 +70463,43 @@ fn response_schema_pack() -> serde_json::Value {
                 "type": "object",
                 "properties": {
                     "title": { "type": "string" },
-                    "answer_outline": { "type": "array" },
-                    "source_summary": { "type": "array" },
-                    "handoff": { "type": "array" }
+                    "answer_outline": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "rank": { "type": "integer" },
+                                "heading": { "type": "string" },
+                                "evidence_ids": { "type": "array", "items": { "type": "string" } }
+                            }
+                        }
+                    },
+                    "source_summary": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "source_id": { "type": "string" },
+                                "origin_kind": { "type": "string" },
+                                "session_count": { "type": "integer" },
+                                "evidence_count": { "type": "integer" },
+                                "newest_evidence_at_ms": { "type": ["integer", "null"] },
+                                "healthy": { "type": "boolean" }
+                            }
+                        }
+                    },
+                    "handoff": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "rank": { "type": "integer" },
+                                "kind": { "type": "string" },
+                                "text": { "type": "string" },
+                                "evidence_ids": { "type": "array", "items": { "type": "string" } }
+                            }
+                        }
+                    }
                 }
             }),
         ),
@@ -69242,7 +70519,13 @@ fn response_schema_pack() -> serde_json::Value {
                 "type": "object",
                 "properties": {
                     "count": { "type": "integer" },
-                    "items": { "type": "array" }
+                    "items": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
                 }
             }),
         ),
@@ -69255,7 +70538,10 @@ fn response_schema_pack() -> serde_json::Value {
                     "redaction_applied": { "type": "boolean" },
                     "sensitive_output": { "type": "boolean" },
                     "skill_content_included": { "type": "boolean" },
-                    "redaction_counts": { "type": "object" }
+                    "redaction_counts": {
+                        "type": "object",
+                        "additionalProperties": { "type": "integer" }
+                    }
                 }
             }),
         ),
@@ -69290,6 +70576,7 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
                 "healthy": { "type": "boolean" },
                 "initialized": { "type": "boolean" },
                 "explanation": { "type": ["string", "null"] },
+                "data_dir": { "type": "string" },
                 "recommended_action": { "type": ["string", "null"] },
                 "recommended_commands": response_schema_recommended_commands(),
                 "index": response_schema_index_state(),
@@ -69327,6 +70614,7 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
                 "healthy": { "type": "boolean" },
                 "initialized": { "type": "boolean" },
                 "explanation": { "type": ["string", "null"] },
+                "data_dir": { "type": "string" },
                 "recommended_action": { "type": ["string", "null"] },
                 "recommended_commands": response_schema_recommended_commands(),
                 "next_command": { "type": ["string", "null"] },
@@ -69438,6 +70726,7 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
                 "healthy": { "type": "boolean" },
                 "initialized": { "type": "boolean" },
                 "explanation": { "type": ["string", "null"] },
+                "data_dir": { "type": "string" },
                 "recommended_action": { "type": ["string", "null"] },
                 "recommended_commands": response_schema_recommended_commands(),
                 "index": response_schema_index_state(),
@@ -69788,6 +71077,25 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
                         "newest": { "type": ["string", "null"] }
                     }
                 },
+                "raw_mirror": {
+                    "type": "object",
+                    "properties": {
+                        "initialized": { "type": "boolean" },
+                        "root_path": { "type": "string" },
+                        "total_storage_bytes": { "type": "integer" },
+                        "manifest_count": { "type": "integer" },
+                        "manifest_bytes": { "type": "integer" },
+                        "unique_blob_count": { "type": "integer" },
+                        "total_blob_bytes": { "type": "integer" },
+                        "largest_blob_bytes": { "type": "integer" },
+                        "missing_blob_count": { "type": "integer" },
+                        "invalid_manifest_count": { "type": "integer" },
+                        "oldest_capture_at_ms": { "type": ["integer", "null"] },
+                        "newest_capture_at_ms": { "type": ["integer", "null"] },
+                        "oldest_source_mtime_ms": { "type": ["integer", "null"] },
+                        "newest_source_mtime_ms": { "type": ["integer", "null"] }
+                    }
+                },
                 "db_path": { "type": "string" }
             }
         }),
@@ -69802,6 +71110,7 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
                 "healthy": { "type": "boolean" },
                 "initialized": { "type": "boolean" },
                 "explanation": { "type": ["string", "null"] },
+                "data_dir": { "type": "string" },
                 "recommended_action": { "type": ["string", "null"] },
                 "recommended_commands": response_schema_recommended_commands(),
                 "errors": {
@@ -69858,6 +71167,15 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
                     }
                 },
                 "state": response_schema_state_meta(),
+                "runtime_optimizations": {
+                    "type": "object",
+                    "properties": {
+                        "simd_dot": { "type": "boolean" },
+                        "parallel_search": { "type": "boolean" },
+                        "preconvert_f16": { "type": "boolean" },
+                        "config_source": { "type": "string" }
+                    }
+                },
                 "parallel_wal_shadow": {
                     "type": "object",
                     "description": "Parallel-WAL shadow observer (Card 1, shadow-only phase). Activates under CASS_INDEXER_PARALLEL_WAL=shadow. Records per-chunk wall-clock on begin-concurrent writes so operators can assess what an epoch-ordered group-commit coordinator would have decided. NEVER changes commit semantics.",
@@ -69936,123 +71254,131 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
     // goldens live under tests/golden/robot/. An agent reading
     // response_schemas to drive schema-aware parsing now finds a
     // pinned schema for every surface cass commits to.
-    schemas.insert(
-        "doctor".to_string(),
-        json!({
-            "type": "object",
-            "description": "cass doctor --json: diagnostic checks + optional auto-fix audit.",
-            "properties": {
-                "status": { "type": "string" },
-                "health_class": { "type": "string", "description": "Stable kebab-case DoctorHealth value such as healthy, degraded-derived-assets, degraded-archive-risk, repair-blocked, repair-previously-failed, or source-authority-unsafe." },
-                "risk_level": { "type": "string", "description": "none | low | medium | high archive/user-data risk summary for first-pass automation." },
-                "healthy": { "type": "boolean" },
-                "initialized": { "type": "boolean" },
-                "explanation": { "type": ["string", "null"] },
-                "recommended_action": { "type": ["string", "null"] },
-                "fallback_mode": { "type": "string", "description": "Realized fallback tier for default hybrid search, usually lexical when semantic assets are unavailable." },
-                "issues_found": { "type": "integer" },
-                "issues_fixed": { "type": "integer" },
-                "failures": { "type": "integer" },
-                "warnings": { "type": "integer" },
-                "needs_rebuild": { "type": "boolean" },
-                "auto_fix_applied": { "type": "boolean" },
-                "auto_fix_actions": { "type": "array", "items": { "type": "string" } },
-                "doctor_command": response_schema_opaque_object(),
-                "doctor_v2_contract": response_schema_doctor_v2_contract_summary(),
-                "check_scope": response_schema_opaque_object(),
-                "repair_previously_failed": { "type": "boolean" },
-                "failure_marker_path": { "type": ["string", "null"] },
-                "repeat_refusal_reason": { "type": ["string", "null"] },
-                "override_available": { "type": "boolean" },
-                "override_used": { "type": "boolean" },
-                "active_repair": response_schema_opaque_object(),
-                "post_repair_probes": response_schema_opaque_object(),
-                "repair_failure_marker": response_schema_doctor_repair_failure_marker(),
-                "failure_marker_write_error": { "type": ["string", "null"] },
-                "failure_context": response_schema_opaque_object(),
-                "operation_outcome": response_schema_doctor_operation_outcome(),
-                "operation_state": response_schema_doctor_operation_state(),
-                "locks": response_schema_doctor_locks(),
-                "slow_operations": response_schema_doctor_slow_operations(),
-                "timing_summary": response_schema_doctor_timing_summary(),
-                "retry_recommendation": response_schema_doctor_retry_recommendation(),
-                "safe_auto_eligibility": response_schema_opaque_object(),
-                "primary_incident_id": { "type": ["string", "null"], "description": "incident_id for the highest-priority root-cause incident, or null when no incident was found." },
-                "incidents": {
-                    "type": "array",
-                    "description": "Root-cause incident groups derived from checks, coverage, lock, and candidate state. Robots should use root_cause_kind and evidence_check_ids instead of scraping check prose.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "schema_version": { "type": "integer" },
-                            "incident_id": { "type": "string" },
-                            "root_cause_kind": { "type": "string" },
-                            "severity": { "type": "string" },
-                            "affected_asset_classes": { "type": "array", "items": { "type": "string" } },
-                            "archive_risk_level": { "type": "string" },
-                            "derived_risk_level": { "type": "string" },
-                            "confidence": { "type": "string" },
-                            "evidence_check_ids": { "type": "array", "items": { "type": "string" } },
-                            "blocked_actions": { "type": "array", "items": { "type": "string" } },
-                            "safe_next_actions": { "type": "array", "items": { "type": "string" } },
-                            "stale_or_unknown_fields": { "type": "array", "items": { "type": "string" } },
-                            "redacted_evidence_paths": { "type": "array", "items": { "type": "string" } },
-                            "summary": { "type": "string" }
-                        },
-                        "required": ["schema_version", "incident_id", "root_cause_kind", "severity", "affected_asset_classes", "archive_risk_level", "derived_risk_level", "confidence", "evidence_check_ids", "blocked_actions", "safe_next_actions", "stale_or_unknown_fields", "redacted_evidence_paths", "summary"]
-                    }
-                },
-                "event_log": response_schema_doctor_event_log_metadata(),
-                "lexical": response_schema_index_state(),
-                "semantic": response_schema_semantic_state(),
-                "derived_semantic_assets": response_schema_doctor_derived_semantic_assets(),
-                "storage_pressure": response_schema_opaque_object(),
-                "asset_taxonomy": response_schema_opaque_object_array(),
-                "anomaly_taxonomy": response_schema_opaque_object_array(),
-                "repair_contract": response_schema_opaque_object(),
-                "config_exclusion_risks": {
-                    "type": "array",
-                    "items": response_schema_doctor_config_exclusion_risk()
-                },
-                "source_inventory": response_schema_doctor_source_inventory(),
-                "remote_source_sync": response_schema_doctor_remote_source_sync(),
-                "raw_mirror": response_schema_doctor_raw_mirror(),
-                "raw_mirror_backfill": response_schema_doctor_raw_mirror_backfill(),
-                "coverage_summary": response_schema_doctor_coverage_summary(),
-                "sole_copy_warnings": { "type": "array", "items": response_schema_opaque_object() },
-                "coverage_risk": response_schema_doctor_coverage_risk(),
-                "source_authority": response_schema_doctor_source_authority(),
-                "candidate_staging": response_schema_doctor_candidate_staging(),
-                "quarantine": response_schema_opaque_object(),
-                "repair_plan": response_schema_doctor_repair_plan_preview(),
-                "cleanup_apply": response_schema_doctor_cleanup_apply(),
-                "_meta": response_schema_opaque_object(),
-                "checks": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": { "type": "string" },
-                            "status": { "type": "string", "description": "pass | warn | fail" },
-                            "message": { "type": "string" },
-                            "anomaly_class": { "type": "string", "description": "Stable kebab-case DoctorAnomaly value; robots should branch on this instead of message text." },
-                            "health_class": { "type": "string", "description": "Stable kebab-case DoctorHealth value derived from anomaly_class." },
-                            "severity": { "type": "string", "description": "info | warn | error" },
-                            "affected_asset_class": { "type": "string", "description": "Stable DoctorAssetClass value naming the asset class at risk." },
-                            "data_loss_risk": { "type": "string", "description": "none | low | medium | high | unknown" },
-                            "recommended_action": { "type": "string" },
-                            "safe_for_auto_repair": { "type": "boolean" },
-                            "default_outcome_kind": { "type": "string" },
-                            "fix_available": { "type": "boolean" },
-                            "fix_applied": { "type": "boolean" }
-                        },
-                        "required": ["name", "status", "message", "anomaly_class", "health_class", "severity", "affected_asset_class", "data_loss_risk", "recommended_action", "safe_for_auto_repair", "default_outcome_kind", "fix_available", "fix_applied"]
-                    }
+    let mut doctor_schema = json!({
+        "type": "object",
+        "description": "cass doctor --json: diagnostic checks + optional auto-fix audit.",
+        "properties": {
+            "status": { "type": "string" },
+            "health_class": { "type": "string", "description": "Stable kebab-case DoctorHealth value such as healthy, degraded-derived-assets, degraded-archive-risk, repair-blocked, repair-previously-failed, or source-authority-unsafe." },
+            "risk_level": { "type": "string", "description": "none | low | medium | high archive/user-data risk summary for first-pass automation." },
+            "healthy": { "type": "boolean" },
+            "initialized": { "type": "boolean" },
+            "explanation": { "type": ["string", "null"] },
+            "recommended_action": { "type": ["string", "null"] },
+            "fallback_mode": { "type": "string", "description": "Realized fallback tier for default hybrid search, usually lexical when semantic assets are unavailable." },
+            "issues_found": { "type": "integer" },
+            "issues_fixed": { "type": "integer" },
+            "failures": { "type": "integer" },
+            "warnings": { "type": "integer" },
+            "needs_rebuild": { "type": "boolean" },
+            "auto_fix_applied": { "type": "boolean" },
+            "auto_fix_actions": { "type": "array", "items": { "type": "string" } },
+            "doctor_command": response_schema_opaque_object(),
+            "doctor_v2_contract": response_schema_doctor_v2_contract_summary(),
+            "check_scope": response_schema_opaque_object(),
+            "repair_previously_failed": { "type": "boolean" },
+            "failure_marker_path": { "type": ["string", "null"] },
+            "repeat_refusal_reason": { "type": ["string", "null"] },
+            "override_available": { "type": "boolean" },
+            "override_used": { "type": "boolean" },
+            "active_repair": response_schema_opaque_object(),
+            "post_repair_probes": response_schema_opaque_object(),
+            "repair_failure_marker": response_schema_doctor_repair_failure_marker(),
+            "failure_marker_write_error": { "type": ["string", "null"] },
+            "failure_context": response_schema_opaque_object(),
+            "operation_outcome": response_schema_doctor_operation_outcome(),
+            "operation_state": response_schema_doctor_operation_state(),
+            "locks": response_schema_doctor_locks(),
+            "slow_operations": response_schema_doctor_slow_operations(),
+            "timing_summary": response_schema_doctor_timing_summary(),
+            "retry_recommendation": response_schema_doctor_retry_recommendation(),
+            "safe_auto_eligibility": response_schema_opaque_object(),
+            "primary_incident_id": { "type": ["string", "null"], "description": "incident_id for the highest-priority root-cause incident, or null when no incident was found." },
+            "incidents": {
+                "type": "array",
+                "description": "Root-cause incident groups derived from checks, coverage, lock, and candidate state. Robots should use root_cause_kind and evidence_check_ids instead of scraping check prose.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "schema_version": { "type": "integer" },
+                        "incident_id": { "type": "string" },
+                        "root_cause_kind": { "type": "string" },
+                        "severity": { "type": "string" },
+                        "affected_asset_classes": { "type": "array", "items": { "type": "string" } },
+                        "archive_risk_level": { "type": "string" },
+                        "derived_risk_level": { "type": "string" },
+                        "confidence": { "type": "string" },
+                        "evidence_check_ids": { "type": "array", "items": { "type": "string" } },
+                        "blocked_actions": { "type": "array", "items": { "type": "string" } },
+                        "safe_next_actions": { "type": "array", "items": { "type": "string" } },
+                        "stale_or_unknown_fields": { "type": "array", "items": { "type": "string" } },
+                        "redacted_evidence_paths": { "type": "array", "items": { "type": "string" } },
+                        "summary": { "type": "string" }
+                    },
+                    "required": ["schema_version", "incident_id", "root_cause_kind", "severity", "affected_asset_classes", "archive_risk_level", "derived_risk_level", "confidence", "evidence_check_ids", "blocked_actions", "safe_next_actions", "stale_or_unknown_fields", "redacted_evidence_paths", "summary"]
                 }
             },
-            "required": ["status", "health_class", "risk_level", "healthy", "initialized", "recommended_action", "fallback_mode", "doctor_command", "check_scope", "repair_previously_failed", "failure_marker_path", "repeat_refusal_reason", "override_available", "override_used", "active_repair", "post_repair_probes", "repair_failure_marker", "operation_outcome", "operation_state", "locks", "slow_operations", "timing_summary", "retry_recommendation", "safe_auto_eligibility", "primary_incident_id", "incidents", "event_log", "lexical", "semantic", "derived_semantic_assets", "storage_pressure", "config_exclusion_risks", "raw_mirror_backfill", "coverage_summary", "sole_copy_warnings", "coverage_risk", "source_authority", "candidate_staging", "checks"]
-        }),
+            "event_log": response_schema_doctor_event_log_metadata(),
+            "lexical": response_schema_index_state(),
+            "semantic": response_schema_semantic_state(),
+            "derived_semantic_assets": response_schema_doctor_derived_semantic_assets(),
+            "storage_pressure": response_schema_opaque_object(),
+            "asset_taxonomy": response_schema_opaque_object_array(),
+            "anomaly_taxonomy": response_schema_opaque_object_array(),
+            "repair_contract": response_schema_opaque_object(),
+            "config_exclusion_risks": {
+                "type": "array",
+                "items": response_schema_doctor_config_exclusion_risk()
+            },
+            "source_inventory": response_schema_doctor_source_inventory(),
+            "remote_source_sync": response_schema_doctor_remote_source_sync(),
+            "raw_mirror": response_schema_doctor_raw_mirror(),
+            "raw_mirror_backfill": response_schema_doctor_raw_mirror_backfill(),
+            "coverage_summary": response_schema_doctor_coverage_summary(),
+            "sole_copy_warnings": { "type": "array", "items": response_schema_opaque_object() },
+            "coverage_risk": response_schema_doctor_coverage_risk(),
+            "source_authority": response_schema_doctor_source_authority(),
+            "candidate_staging": response_schema_doctor_candidate_staging(),
+            "quarantine": response_schema_opaque_object(),
+            "repair_plan": response_schema_doctor_repair_plan_preview(),
+            "cleanup_apply": response_schema_doctor_cleanup_apply(),
+            "_meta": response_schema_opaque_object(),
+            "checks": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string" },
+                        "status": { "type": "string", "description": "pass | warn | fail" },
+                        "message": { "type": "string" },
+                        "anomaly_class": { "type": "string", "description": "Stable kebab-case DoctorAnomaly value; robots should branch on this instead of message text." },
+                        "health_class": { "type": "string", "description": "Stable kebab-case DoctorHealth value derived from anomaly_class." },
+                        "severity": { "type": "string", "description": "info | warn | error" },
+                        "affected_asset_class": { "type": "string", "description": "Stable DoctorAssetClass value naming the asset class at risk." },
+                        "data_loss_risk": { "type": "string", "description": "none | low | medium | high | unknown" },
+                        "recommended_action": { "type": "string" },
+                        "safe_for_auto_repair": { "type": "boolean" },
+                        "default_outcome_kind": { "type": "string" },
+                        "fix_available": { "type": "boolean" },
+                        "fix_applied": { "type": "boolean" }
+                    },
+                    "required": ["name", "status", "message", "anomaly_class", "health_class", "severity", "affected_asset_class", "data_loss_risk", "recommended_action", "safe_for_auto_repair", "default_outcome_kind", "fix_available", "fix_applied"]
+                }
+            }
+        },
+        "required": ["status", "health_class", "risk_level", "healthy", "initialized", "recommended_action", "fallback_mode", "doctor_command", "check_scope", "repair_previously_failed", "failure_marker_path", "repeat_refusal_reason", "override_available", "override_used", "active_repair", "post_repair_probes", "repair_failure_marker", "operation_outcome", "operation_state", "locks", "slow_operations", "timing_summary", "retry_recommendation", "safe_auto_eligibility", "primary_incident_id", "incidents", "event_log", "lexical", "semantic", "derived_semantic_assets", "storage_pressure", "config_exclusion_risks", "raw_mirror_backfill", "coverage_summary", "sole_copy_warnings", "coverage_risk", "source_authority", "candidate_staging", "checks"]
+    });
+    let doctor_properties = doctor_schema
+        .get_mut("properties")
+        .and_then(|value| value.as_object_mut())
+        .expect("doctor schema properties object");
+    doctor_properties.insert("schema_version".to_string(), json!({ "type": "integer" }));
+    doctor_properties.insert(
+        "doctor_contract_version".to_string(),
+        json!({ "type": "integer" }),
     );
+    doctor_properties.insert("capabilities_url".to_string(), json!({ "type": "string" }));
+    schemas.insert("doctor".to_string(), doctor_schema);
 
     schemas.insert(
         "doctor-archive-normalize".to_string(),
@@ -72185,6 +73511,7 @@ fn run_index_with_data(
     idempotency_key: Option<String>,
     progress_interval_ms: u64,
     no_progress_events: bool,
+    robot_trace_ingest: bool,
 ) -> CliResult<()> {
     use frankensqlite::compat::{ConnectionExt, RowExt};
     use std::time::Instant;
@@ -72211,6 +73538,7 @@ fn run_index_with_data(
         semantic.hash(&mut hasher);
         build_hnsw.hash(&mut hasher);
         embedder.hash(&mut hasher);
+        robot_trace_ingest.hash(&mut hasher);
         format!("{}", data_dir.display()).hash(&mut hasher);
         hasher.finish()
     };
@@ -72404,6 +73732,8 @@ fn run_index_with_data(
 
     // Run indexer in background thread so we can poll progress
     let opts_clone = opts.clone();
+    let previous_robot_trace_ingest =
+        robot_trace_ingest.then(|| indexer::set_robot_trace_ingest_enabled(true));
     let index_handle = std::thread::spawn(move || indexer::run_index(opts_clone, None));
 
     // Poll and display progress while indexer runs
@@ -72750,6 +74080,9 @@ fn run_index_with_data(
             retryable: true,
         }),
     };
+    if let Some(previous) = previous_robot_trace_ingest {
+        let _ = indexer::set_robot_trace_ingest_enabled(previous);
+    }
 
     if let Some((pb, conversations, agents)) = progress_completion {
         match &res {
@@ -81324,6 +82657,7 @@ fn run_sources_sync(
             None,  // idempotency_key
             2000,  // progress_interval_ms (default)
             false, // no_progress_events
+            false, // robot_trace_ingest
         )?;
     }
 
