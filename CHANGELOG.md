@@ -13,6 +13,22 @@ Repository: <https://github.com/Dicklesworthstone/coding_agent_session_search>
 
 ## Unreleased
 
+## [v0.4.5] -- 2026-05-13
+
+**Release-integrity fix for the v0.4.4 publication attempt.**
+
+The `v0.4.4` tag remains immutable, but `main` received one more doctor cleanup
+fix before the binary fallback build completed. This patch release keeps the
+macOS CoreML link fix from v0.4.4 and publishes artifacts from the matching
+post-tag commit instead of mixing untagged code into v0.4.4 assets.
+
+### Fixed
+
+- **Doctor cleanup journaling diagnostics**: cleanup-apply now logs structured
+  warnings when `RunStarted` or `RunEnded` journal appends fail, so operators can
+  see why crash recovery would otherwise classify a run as malformed or
+  indefinitely in-flight.
+
 ## [v0.4.4] -- 2026-05-13
 
 **Release-publication fix for the v0.4.3 stability work.**
