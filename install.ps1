@@ -143,6 +143,92 @@ function Test-AggregateChecksumResource {
   return $name -eq "SHA256SUMS.txt" -or $name -eq "SHA256SUMS"
 }
 
+function Normalize-ZipEntryName {
+  param([string]$Name)
+
+  if (-not $Name) { return "" }
+  $normalized = $Name -replace '\\', '/'
+  $segments = @($normalized.TrimStart('/') -split '/' | Where-Object { $_ -ne "" })
+  return ($segments -join '/')
+}
+
+function Test-ZipEntryHasSafePath {
+  param([System.IO.Compression.ZipArchiveEntry]$Entry)
+
+  $raw = $Entry.FullName
+  if (-not $raw) { return $false }
+  if ($raw.StartsWith('/') -or $raw.StartsWith('\')) { return $false }
+  if ($raw -match '^[A-Za-z]:') { return $false }
+
+  $segments = @(($raw -replace '\\', '/').TrimStart('/') -split '/' | Where-Object { $_ -ne "" })
+  if ($segments.Count -eq 0) { return $false }
+  return -not ($segments -contains '..')
+}
+
+function Test-ZipEntryInstallableBinary {
+  param(
+    [System.IO.Compression.ZipArchiveEntry]$Entry,
+    [string]$ZipName
+  )
+
+  $name = Normalize-ZipEntryName $Entry.FullName
+  $topLevelDir = [System.IO.Path]::GetFileNameWithoutExtension($ZipName)
+
+  return $name -eq "cass.exe" `
+    -or $name -eq "coding-agent-search.exe" `
+    -or $name -eq "$topLevelDir/cass.exe" `
+    -or $name -eq "$topLevelDir/coding-agent-search.exe"
+}
+
+function Test-ZipEntryAllowed {
+  param(
+    [System.IO.Compression.ZipArchiveEntry]$Entry,
+    [string]$ZipName
+  )
+
+  if (-not (Test-ZipEntryHasSafePath $Entry)) { return $false }
+  if (Test-ZipEntryInstallableBinary $Entry $ZipName) { return $true }
+
+  $name = Normalize-ZipEntryName $Entry.FullName
+  $topLevelDir = [System.IO.Path]::GetFileNameWithoutExtension($ZipName)
+  $isDirectory = $Entry.FullName.EndsWith('/') -or $Entry.FullName.EndsWith('\') -or [string]::IsNullOrEmpty($Entry.Name)
+
+  return $isDirectory -and $name -eq $topLevelDir
+}
+
+function Assert-ZipLayoutSafe {
+  param(
+    [string]$ZipPath,
+    [string]$ZipName
+  )
+
+  $archive = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
+  try {
+    if ($archive.Entries.Count -eq 0) {
+      Write-Error "Archive is empty."
+      exit 1
+    }
+
+    $sawBinary = $false
+    foreach ($entry in $archive.Entries) {
+      if (-not (Test-ZipEntryAllowed $entry $ZipName)) {
+        Write-Error "Unsafe archive member: $($entry.FullName)"
+        exit 1
+      }
+      if (Test-ZipEntryInstallableBinary $entry $ZipName) {
+        $sawBinary = $true
+      }
+    }
+
+    if (-not $sawBinary) {
+      Write-Error "Archive does not contain a cass.exe binary."
+      exit 1
+    }
+  } finally {
+    $archive.Dispose()
+  }
+}
+
 # Map architecture to the naming convention used by release.yml
 $arch = "amd64"
 $zip = "cass-windows-${arch}.zip"
@@ -222,6 +308,7 @@ try {
   if ($hash.Hash.ToLower() -ne $checksumToUse.ToLower()) { Write-Error "Checksum mismatch"; exit 1 }
 
   Add-Type -AssemblyName System.IO.Compression.FileSystem
+  Assert-ZipLayoutSafe -ZipPath $zipFile -ZipName $zip
   $extractDir = Join-Path $tmp "extract"
   [System.IO.Compression.ZipFile]::ExtractToDirectory($zipFile, $extractDir)
 
