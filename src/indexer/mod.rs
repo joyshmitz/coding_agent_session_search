@@ -8442,6 +8442,18 @@ pub fn streaming_index_enabled() -> bool {
         .unwrap_or(true)
 }
 
+fn scan_path_exclusions_value_active(value: Option<&str>) -> bool {
+    value.is_some_and(|raw| {
+        raw.split([',', '\n'])
+            .map(str::trim)
+            .any(|part| !part.is_empty())
+    })
+}
+
+fn scan_path_exclusions_active() -> bool {
+    scan_path_exclusions_value_active(dotenvy::var("CASS_EXCLUDE_PATHS").ok().as_deref())
+}
+
 fn panic_payload_message(payload: Box<dyn Any + Send>) -> String {
     match payload.downcast::<String>() {
         Ok(message) => *message,
@@ -8789,6 +8801,7 @@ fn run_streaming_consumer(
     // progress writes on the same policy so slow startup batches do not flip
     // the long-lived handle back to steady-state mid-ingest.
     let defer_streaming_checkpoints = true;
+    let preserve_scan_watermark = scan_path_exclusions_active();
 
     // Per-connector stats tracking (T7.4)
     let mut connector_stats: HashMap<String, ConnectorStats> = HashMap::new();
@@ -8963,7 +8976,8 @@ fn run_streaming_consumer(
                     // Persist scan_start_ts so that if the process is killed,
                     // the next run does a delta scan from this point instead of
                     // a full rescan that may OOM again (infinite-OOM-loop fix).
-                    if let Some(ts) = scan_start_ts
+                    if !preserve_scan_watermark
+                        && let Some(ts) = scan_start_ts
                         && let Err(e) = persist::with_ephemeral_writer(
                             storage,
                             defer_streaming_checkpoints,
@@ -8972,6 +8986,10 @@ fn run_streaming_consumer(
                         )
                     {
                         tracing::warn!("incremental last_scan_ts save failed: {}", e);
+                    } else if preserve_scan_watermark {
+                        tracing::debug!(
+                            "preserving streaming incremental last_scan_ts because CASS_EXCLUDE_PATHS is active"
+                        );
                     }
                     last_commit = std::time::Instant::now();
                 }
@@ -9517,6 +9535,7 @@ fn run_batch_index_with_connector_factories(
     let index_start = std::time::Instant::now();
     let mut last_scan_ts_save = std::time::Instant::now();
     let mut canonical_mutations = CanonicalMutationCounts::default();
+    let preserve_scan_watermark = scan_path_exclusions_active();
     for (name, convs, _discovered) in pending_batches {
         canonical_mutations = canonical_mutations.accumulate(ingest_batch(
             storage,
@@ -9529,7 +9548,7 @@ fn run_batch_index_with_connector_factories(
         )?);
         // Periodically persist scan_start_ts so that if the process is killed,
         // the next run does a delta scan instead of a full rescan (infinite-OOM-loop fix).
-        if last_scan_ts_save.elapsed() >= Duration::from_secs(10) {
+        if !preserve_scan_watermark && last_scan_ts_save.elapsed() >= Duration::from_secs(10) {
             if let Err(e) = persist::with_ephemeral_writer(
                 storage,
                 false,
@@ -9538,6 +9557,12 @@ fn run_batch_index_with_connector_factories(
             ) {
                 tracing::warn!("batch incremental last_scan_ts save failed: {}", e);
             }
+            last_scan_ts_save = std::time::Instant::now();
+        } else if preserve_scan_watermark && last_scan_ts_save.elapsed() >= Duration::from_secs(10)
+        {
+            tracing::debug!(
+                "preserving batch incremental last_scan_ts because CASS_EXCLUDE_PATHS is active"
+            );
             last_scan_ts_save = std::time::Instant::now();
         }
         tracing::info!(
@@ -10614,10 +10639,17 @@ pub fn run_index(
         );
     } else {
         let now_ms = FrankenStorage::now_millis();
+        let performed_scan_for_watermark = performed_scan && !scan_path_exclusions_active();
+        if performed_scan && !performed_scan_for_watermark {
+            tracing::info!(
+                db_path = %opts.db_path.display(),
+                "preserving final last_scan_ts because CASS_EXCLUDE_PATHS is active"
+            );
+        }
         persist_final_index_run_metadata(
             &storage,
             &opts.db_path,
-            performed_scan,
+            performed_scan_for_watermark,
             scan_start_ts,
             now_ms,
         )?;
@@ -16227,6 +16259,7 @@ fn reindex_paths_with_semantic_delta(
     let mut total_indexed = 0usize;
 
     let mut semantic_delta = semantic_delta;
+    let preserve_watch_watermark = scan_path_exclusions_active();
 
     for (kind, root, min_ts, max_ts) in triggers {
         let conn = kind.create_connector();
@@ -16428,9 +16461,16 @@ fn reindex_paths_with_semantic_delta(
                     |writer| writer.set_last_indexed_at(FrankenStorage::now_millis()),
                 )?;
 
-                if !explicit_watch_once && let Some(ts_val) = chunk_outcome.max_payload_watermark_ms
+                if !explicit_watch_once
+                    && !preserve_watch_watermark
+                    && let Some(ts_val) = chunk_outcome.max_payload_watermark_ms
                 {
                     save_watch_state_watermark(&opts.data_dir, state, kind, ts_val)?;
+                } else if preserve_watch_watermark {
+                    tracing::debug!(
+                        ?kind,
+                        "preserving partial watch watermark because CASS_EXCLUDE_PATHS is active"
+                    );
                 }
             }
         }
@@ -16482,6 +16522,7 @@ fn reindex_paths_with_semantic_delta(
         // watch_state high-water marks that steady-state watch mode consumes.
         if !explicit_watch_once
             && conv_count > 0
+            && !preserve_watch_watermark
             && let Some(ts_val) = max_ts
         {
             // Once every chunk for this trigger has either persisted or been
@@ -16490,6 +16531,11 @@ fn reindex_paths_with_semantic_delta(
             // use payload timestamps so an unexpected later failure cannot
             // hide unprocessed conversations that share the same source file.
             save_watch_state_watermark(&opts.data_dir, state, kind, ts_val)?;
+        } else if !explicit_watch_once && conv_count > 0 && preserve_watch_watermark {
+            tracing::info!(
+                ?kind,
+                "preserving final watch watermark because CASS_EXCLUDE_PATHS is active"
+            );
         }
     }
 
@@ -21538,6 +21584,15 @@ mod tests {
     use fsqlite_types::value::SqliteValue;
     use serial_test::serial;
     use tempfile::TempDir;
+
+    #[test]
+    fn scan_path_exclusions_value_active_handles_commas_and_newlines() {
+        assert!(!scan_path_exclusions_value_active(None));
+        assert!(!scan_path_exclusions_value_active(Some("   \n , ")));
+        assert!(scan_path_exclusions_value_active(Some(
+            " /tmp/active.jsonl ,\n/var/log/cass "
+        )));
+    }
 
     #[test]
     fn raw_mirror_capture_attaches_conversation_metadata_before_persist() {

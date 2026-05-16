@@ -2838,6 +2838,8 @@ Update check state is stored in the data directory:
 
 - **Cache debug**: set `CASS_DEBUG_CACHE_METRICS=1` to emit cache hit/miss/shortfall/reload stats via tracing (debug level).
 
+- **Temporary scan exclusions**: `CASS_EXCLUDE_PATHS` accepts comma- or newline-delimited file paths or directory prefixes to skip during source discovery and parsing. While exclusions are active, CASS preserves scan/watch watermarks so excluded active session files are picked up after the exclusion is removed.
+
 - **Watch testing (dev only)**: `cass index --watch --watch-once path1,path2` triggers a single reindex without filesystem notify (also respects `CASS_TEST_WATCH_PATHS` for backward compatibility); useful for deterministic tests/smoke runs.
 
 ### Complete Environment Variable Reference
@@ -2847,6 +2849,7 @@ Update check state is stored in the data directory:
 | **Core** | | |
 | `CASS_DATA_DIR` | Platform default | Override data directory |
 | `CASS_DB_PATH` | `$CASS_DATA_DIR/agent_search.db` | Override database path |
+| `CASS_EXCLUDE_PATHS` | unset | Comma/newline-delimited files or directory prefixes to skip without advancing scan/watch watermarks |
 | `CASS_NO_COLOR` | unset | Force monochrome TUI output |
 | `NO_COLOR` | unset | Honored by TUI only when `CASS_RESPECT_NO_COLOR=1` |
 | `CASS_RESPECT_NO_COLOR` | unset | Make TUI inherit global `NO_COLOR` |
@@ -2884,7 +2887,7 @@ Update check state is stored in the data directory:
 | Dependency | Pinned revision |
 |------------|-----------------|
 | `frankensqlite` / `fsqlite-types` | `c8ce64fd` |
-| `franken-agent-detection` | `5115da8e` |
+| `franken-agent-detection` | `a0ce134b` |
 | `asupersync` | `0.3.1` |
 | `frankensearch` | `831b3b13` |
 | `frankentui` | `5f78cfa0` |
