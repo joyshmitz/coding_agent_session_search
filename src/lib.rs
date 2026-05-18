@@ -5918,9 +5918,13 @@ async fn execute_cli(
                         tier_mode,
                     };
 
-                    let effective_format = cli
-                        .robot_format
-                        .unwrap_or_else(|| robot_format_from_env().unwrap_or(RobotFormat::Json));
+                    // Only pass through robot_format when it was explicitly
+                    // requested (CLI flag or env var). Returning `None` here
+                    // lets `run_cli_search` apply its full precedence chain
+                    // (robot_format > --json > env > robot_auto > display),
+                    // so `--display table|lines|markdown` actually wins when
+                    // no structured format was asked for.
+                    let effective_format = cli.robot_format.or_else(robot_format_from_env);
 
                     run_cli_search(
                         &query,
@@ -5929,7 +5933,7 @@ async fn execute_cli(
                         &limit,
                         &offset,
                         &json,
-                        Some(effective_format),
+                        effective_format,
                         robot_meta,
                         fields,
                         max_content_length,

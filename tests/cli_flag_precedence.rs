@@ -136,6 +136,46 @@ fn missing_required_arg_emits_actionable_error() {
     }
 }
 
+/// Regression test for #245: `cass search ... --display table|lines|markdown`
+/// must honor the requested human-readable display format and not be
+/// silently overridden by the dispatcher's default JSON envelope.
+///
+/// Prior to the fix the dispatcher built
+/// `Some(cli.robot_format.unwrap_or_else(|| env.unwrap_or(RobotFormat::Json)))`
+/// and unconditionally forced JSON output, masking the `--display` flag.
+#[test]
+#[serial]
+fn search_display_flag_overrides_default_json_when_no_robot_format() {
+    tracing::info!(target: "d4r65_test", scenario = "search_display_overrides_json");
+    let data_dir = temp_data_dir("display_over_json");
+    for mode in ["table", "lines", "markdown"] {
+        let mut cmd = Command::cargo_bin("cass").expect("cass binary built");
+        // Explicitly scrub any robot-format env vars that could otherwise win.
+        cmd.env_remove("CASS_OUTPUT_FORMAT")
+            .env_remove("TOON_DEFAULT_FORMAT")
+            .env_remove("CASS_ROBOT_MODE")
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .arg("search")
+            .arg("regression-needle-for-issue-245")
+            .arg("--limit")
+            .arg("1")
+            .arg("--display")
+            .arg(mode);
+        let output = cmd.output().expect("cass search runs");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let combined = format!("stdout={stdout}\nstderr={stderr}");
+        // The bug: stdout starts with `{` because the dispatcher forced
+        // RobotFormat::Json. The fix: dispatcher passes None when no
+        // robot-format was explicitly requested, so --display wins.
+        assert!(
+            !stdout.trim_start().starts_with('{'),
+            "--display {mode} must not produce a JSON envelope; got: {combined}"
+        );
+    }
+}
+
 #[test]
 #[serial]
 fn invalid_data_dir_path_handled_without_panic() {
