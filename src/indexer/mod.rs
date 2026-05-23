@@ -5826,6 +5826,17 @@ fn lexical_rebuild_controller_loadavg_low_watermark_1m_milli_from_high(
 
 pub(crate) fn lexical_rebuild_pipeline_settings_snapshot() -> LexicalRebuildPipelineSettingsSnapshot
 {
+    lexical_rebuild_pipeline_settings_snapshot_inner(true)
+}
+
+pub(crate) fn lexical_rebuild_pipeline_settings_snapshot_passive()
+-> LexicalRebuildPipelineSettingsSnapshot {
+    lexical_rebuild_pipeline_settings_snapshot_inner(false)
+}
+
+fn lexical_rebuild_pipeline_settings_snapshot_inner(
+    apply_responsiveness_governor: bool,
+) -> LexicalRebuildPipelineSettingsSnapshot {
     let steady_batch_fetch_conversations =
         lexical_rebuild_batch_fetch_conversation_limit(LEXICAL_REBUILD_PAGE_SIZE);
     let startup_batch_fetch_conversations =
@@ -5848,10 +5859,15 @@ pub(crate) fn lexical_rebuild_pipeline_settings_snapshot() -> LexicalRebuildPipe
     );
     let available_parallelism = lexical_rebuild_available_parallelism();
     let reserved_cores = lexical_rebuild_reserved_cores_for_available(available_parallelism);
-    let tantivy_writer_threads =
-        crate::search::tantivy::tantivy_writer_parallelism_hint_for_available_governed(
+    let tantivy_writer_threads_raw =
+        crate::search::tantivy::tantivy_writer_parallelism_hint_for_available(
             available_parallelism,
         );
+    let tantivy_writer_threads = if apply_responsiveness_governor {
+        responsiveness::effective_worker_count(tantivy_writer_threads_raw).max(1)
+    } else {
+        tantivy_writer_threads_raw
+    };
     let controller_restore_hold = lexical_rebuild_controller_restore_hold();
     let controller_loadavg_high_watermark_1m_milli =
         lexical_rebuild_controller_loadavg_high_watermark_1m_milli_for_available_and_reserved(
@@ -5868,8 +5884,16 @@ pub(crate) fn lexical_rebuild_pipeline_settings_snapshot() -> LexicalRebuildPipe
         available_parallelism,
         reserved_cores,
         tantivy_writer_threads,
-        staged_shard_builders: lexical_rebuild_staged_shard_builder_parallelism(),
-        staged_merge_workers: lexical_rebuild_staged_merge_worker_parallelism(),
+        staged_shard_builders: if apply_responsiveness_governor {
+            lexical_rebuild_staged_shard_builder_parallelism()
+        } else {
+            lexical_rebuild_staged_shard_builder_parallelism_configured()
+        },
+        staged_merge_workers: if apply_responsiveness_governor {
+            lexical_rebuild_staged_merge_worker_parallelism()
+        } else {
+            lexical_rebuild_staged_merge_worker_parallelism_configured()
+        },
         controller_mode: lexical_rebuild_responsiveness_policy().as_str().to_string(),
         controller_restore_clear_samples: lexical_rebuild_controller_restore_clear_samples(),
         controller_restore_hold_ms: controller_restore_hold.as_millis() as u64,
@@ -5885,7 +5909,11 @@ pub(crate) fn lexical_rebuild_pipeline_settings_snapshot() -> LexicalRebuildPipe
         steady_commit_every_message_bytes,
         startup_commit_every_message_bytes,
         pipeline_channel_size,
-        page_prep_workers: lexical_rebuild_page_prep_worker_parallelism(),
+        page_prep_workers: if apply_responsiveness_governor {
+            lexical_rebuild_page_prep_worker_parallelism()
+        } else {
+            lexical_rebuild_page_prep_worker_parallelism_configured()
+        },
         pipeline_max_message_bytes_in_flight,
     }
 }
@@ -6503,7 +6531,16 @@ fn lexical_rebuild_default_page_prep_worker_parallelism_for_workers(
 }
 
 fn lexical_rebuild_page_prep_worker_parallelism() -> usize {
-    let desired = dotenvy::var("CASS_TANTIVY_REBUILD_PAGE_PREP_WORKERS")
+    let desired = lexical_rebuild_page_prep_worker_parallelism_configured();
+    // Let the machine-responsiveness governor scale this down when the host
+    // is under pressure. `effective_worker_count` returns the caller-requested
+    // value when the governor is idle or disabled, so behaviour on an idle
+    // box is unchanged.
+    responsiveness::effective_worker_count(desired).max(1)
+}
+
+fn lexical_rebuild_page_prep_worker_parallelism_configured() -> usize {
+    dotenvy::var("CASS_TANTIVY_REBUILD_PAGE_PREP_WORKERS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
@@ -6517,12 +6554,7 @@ fn lexical_rebuild_page_prep_worker_parallelism() -> usize {
                 lexical_rebuild_worker_parallelism(),
             )
         })
-        .max(1);
-    // Let the machine-responsiveness governor scale this down when the host
-    // is under pressure. `effective_worker_count` returns the caller-requested
-    // value when the governor is idle or disabled, so behaviour on an idle
-    // box is unchanged.
-    responsiveness::effective_worker_count(desired).max(1)
+        .max(1)
 }
 
 fn lexical_rebuild_first_budget_promotion_wait() -> Duration {
@@ -8543,7 +8575,15 @@ fn lexical_rebuild_staged_shard_build_emergency_memory_reserve_bytes() -> usize 
 }
 
 fn lexical_rebuild_staged_shard_builder_parallelism() -> usize {
-    let raw = dotenvy::var("CASS_TANTIVY_REBUILD_STAGED_SHARD_BUILDERS")
+    let raw = lexical_rebuild_staged_shard_builder_parallelism_configured();
+    // Apply the responsiveness governor so shard-builder fanout shrinks
+    // together with page-prep when the host is under pressure. On an idle
+    // box this is a no-op; under pressure it preserves interactive headroom.
+    responsiveness::effective_worker_count(raw).max(1)
+}
+
+fn lexical_rebuild_staged_shard_builder_parallelism_configured() -> usize {
+    dotenvy::var("CASS_TANTIVY_REBUILD_STAGED_SHARD_BUILDERS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
@@ -8551,11 +8591,7 @@ fn lexical_rebuild_staged_shard_builder_parallelism() -> usize {
             lexical_rebuild_default_staged_shard_builder_parallelism_for_workers(
                 lexical_rebuild_worker_parallelism(),
             )
-        });
-    // Apply the responsiveness governor so shard-builder fanout shrinks
-    // together with page-prep when the host is under pressure. On an idle
-    // box this is a no-op; under pressure it preserves interactive headroom.
-    responsiveness::effective_worker_count(raw).max(1)
+        })
 }
 
 fn lexical_rebuild_default_staged_merge_worker_parallelism_for_workers(workers: usize) -> usize {
@@ -8565,7 +8601,14 @@ fn lexical_rebuild_default_staged_merge_worker_parallelism_for_workers(workers: 
 }
 
 fn lexical_rebuild_staged_merge_worker_parallelism() -> usize {
-    let raw = dotenvy::var("CASS_TANTIVY_REBUILD_STAGED_MERGE_WORKERS")
+    let raw = lexical_rebuild_staged_merge_worker_parallelism_configured();
+    // Same governor wire-up as shard builders above: keep at most 1 merger on
+    // tiny hosts, scale with measured machine responsiveness.
+    responsiveness::effective_worker_count(raw).max(1)
+}
+
+fn lexical_rebuild_staged_merge_worker_parallelism_configured() -> usize {
+    dotenvy::var("CASS_TANTIVY_REBUILD_STAGED_MERGE_WORKERS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
@@ -8573,10 +8616,7 @@ fn lexical_rebuild_staged_merge_worker_parallelism() -> usize {
             lexical_rebuild_default_staged_merge_worker_parallelism_for_workers(
                 lexical_rebuild_worker_parallelism(),
             )
-        });
-    // Same governor wire-up as shard builders above: keep at most 1 merger on
-    // tiny hosts, scale with measured machine responsiveness.
-    responsiveness::effective_worker_count(raw).max(1)
+        })
 }
 
 fn lexical_rebuild_staged_shard_builder_settings(

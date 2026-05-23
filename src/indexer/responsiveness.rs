@@ -624,6 +624,7 @@ impl CalibrationStream {
         }
     }
 
+    #[cfg(test)]
     fn len(&self) -> usize {
         self.samples.len()
     }
@@ -926,6 +927,7 @@ impl GovernorCalibration {
         })
     }
 
+    #[cfg(test)]
     fn telemetry(&self, cfg: &GovernorConfig) -> CalibrationTelemetry {
         CalibrationTelemetry {
             mode: cfg.calibration_mode,
@@ -1213,6 +1215,7 @@ impl Governor {
         }
     }
 
+    #[cfg(test)]
     fn telemetry(&self) -> GovernorTelemetry {
         // Same poison-safe acquisition pattern as `step_once`: the runtime
         // state is tick-local, so reading the most-recent-committed history
@@ -1304,15 +1307,44 @@ pub(crate) fn effective_inflight_byte_limit(desired_bytes: usize) -> usize {
     scale_inflight_byte_limit(desired_bytes, current_capacity_pct(), &g.cfg)
 }
 
-/// Return a full telemetry snapshot of the process-wide governor. Starts
-/// the background sampler on first call (same as [`current_capacity_pct`]).
-/// Cheap enough to call repeatedly from status commands and diagnostic
-/// loops. The returned value derives `serde::Serialize`, so robot callers
-/// can render it with `serde_json::to_string_pretty` directly.
-pub(crate) fn telemetry_snapshot() -> GovernorTelemetry {
-    let g = GOVERNOR.clone();
-    g.ensure_started();
-    g.telemetry()
+/// Return the configured governor policy without starting the background
+/// sampler. This is for startup-sensitive read-only surfaces such as
+/// `cass health --json`, where merely observing telemetry must not spawn a
+/// thread or pay the live sampler's first-tick cost.
+pub(crate) fn telemetry_snapshot_passive() -> GovernorTelemetry {
+    let cfg = GovernorConfig::from_env();
+    let calibration = match cfg.calibration_mode {
+        CalibrationMode::Conformal => Some(CalibrationTelemetry {
+            mode: cfg.calibration_mode,
+            load_window_len: 0,
+            psi_window_len: 0,
+            conformal_k: cfg.conformal_k,
+            conformal_k_min: cfg.conformal_k_min,
+            conformal_alpha_pressured: cfg.conformal_alpha_pressured,
+            conformal_alpha_severe: cfg.conformal_alpha_severe,
+            drift_reset_count: 0,
+            outliers_rejected: 0,
+            observations_total: 0,
+            load_pressured_q: None,
+            load_severe_q: None,
+            psi_pressured_q: None,
+            psi_severe_q: None,
+        }),
+        CalibrationMode::Static => None,
+    };
+    GovernorTelemetry {
+        current_capacity_pct: 100,
+        resource_policy: ResourcePolicyTelemetry::from_config(&cfg),
+        healthy_streak: 0,
+        shrink_count: 0,
+        grow_count: 0,
+        ticks_total: 0,
+        disabled_via_env: cfg.disabled,
+        last_snapshot: None,
+        last_reason: None,
+        recent_decisions: Vec::new(),
+        calibration,
+    }
 }
 
 fn env_u32(key: &str) -> Option<u32> {
