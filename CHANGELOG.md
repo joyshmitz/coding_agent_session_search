@@ -17,6 +17,13 @@ Repository: <https://github.com/Dicklesworthstone/coding_agent_session_search>
 
 ## Unreleased
 
+## [v0.6.2] -- 2026-05-24
+
+**Critical regression fixes: multi-GB allocation on every SQL query (#252) and silent-exit on `cass mirror prune` (#253).**
+
+- **`cass mirror prune` is no longer a silent no-op (#253).** The CLI dispatcher routed `Commands::Mirror(..)` into the wrong outer branch in `execute_cli` (`src/lib.rs`). The outer arm pattern listed `Mirror(..)` alongside `Index | Search | Pack | ...`, but the inner `match command { ... }` inside that branch had no `Commands::Mirror(..)` arm; the actual dispatch lived in the sibling `_ =>` branch and was therefore unreachable for every mirror invocation. The user-visible symptom was `cass mirror prune` (and every flag combination, including `--dry-run`, `--apply`, `--json`) exiting 0 with empty stdout and empty stderr. Same root cause for `cass import` — `Import(..)` was also wrongly listed in the early arm. Removing both from the early arm pattern lets them fall through to the `_ =>` branch where the dispatch already exists. A new `tests/cli_mirror_prune.rs` integration suite pins the contract that the success path emits a plan/summary and the no-args path errors out with the documented usage message.
+- **Multi-GB RSS allocation on every SQL-touching query is gone (#252).** Bumped `frankensqlite` from `c8ce64fd` to [`b3c841ba`](https://github.com/Dicklesworthstone/frankensqlite/commit/b3c841ba), which adds an opt-in `FSQLITE_READ_WITNESS_CAP` env-var cap on the per-cursor `read_witnesses: Vec<WitnessKey>`. On the v0.5.1-bisected `cass stats --json` case, a `SELECT COUNT(*)` over a 3.3 GB index allocated ~5.5 GB RSS because the cursor's witness vec grew one entry per page touched during the B-tree descent (~42-49k `btree_descent` prefetch hints in 5 s, no responsiveness backpressure). cass's `main.rs` now sets `FSQLITE_READ_WITNESS_CAP=16384` by default at process startup (via `std::env::var_os` so any user override wins). cass is a read-mostly analytical workload that does not consume the per-cursor witness cache — the canonical SSI provenance still flows into the pager regardless of this cap, so the cap is safe and does not weaken isolation. Operators who need the historical unbounded behavior can export `FSQLITE_READ_WITNESS_CAP=0` before launching cass.
+
 ## [v0.5.2] -- 2026-05-21
 
 **Data-loss fix: stop v0.5.1's quarantine system from permanently dropping active sessions and small JSONLs.**
