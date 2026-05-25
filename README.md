@@ -100,7 +100,7 @@ cass sources agents include openclaw
 - Lexical generation cleanup uses a dispositions + inspection-required-first policy. Operators running `cass doctor --fix` never have a generation reclaimed silently — every quarantine stays on disk until an explicit derived-asset rebuild (`cass models backfill` or an index refresh recommended by `cass health --json`) supersedes it.
 
 **Schema stability guarantees**
-- The JSON contract surfaces (`triage`, `capabilities`, `health`, `status`, `diag`, `models status`, `models verify`, `models check-update`, `introspect`, `doctor`, `api-version`, `stats`, `sessions`, `search`, `pack`) are pinned by golden-file regression tests under `tests/golden/robot/`. A change to any field name, type, or nullability fails the golden test suite and requires a deliberate regeneration pass (`UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-golden-target cargo test --test golden_robot_json --test golden_robot_docs`).
+- The JSON contract surfaces (`triage`, `capabilities`, `health`, `status`, `diag`, `models status`, `models verify`, `models check-update`, `introspect`, `doctor`, `api-version`, `stats`, `sessions`, `search`, `pack`, `swarm status`, `swarm work-packet`, `swarm lint`) are pinned by golden-file regression tests under `tests/golden/robot/`. A change to any field name, type, or nullability fails the golden test suite and requires a deliberate regeneration pass (`UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-golden-target cargo test --test golden_robot_json --test golden_robot_docs`).
 - `cass introspect --json`'s `response_schemas` block enumerates every schema in a stable alphabetical order (`BTreeMap`-backed — see bead coding_agent_session_search-8sl73).
 - Error envelopes (`{error: {code, kind, message, hint, retryable}}`) have a fixed shape. `kind` values are kebab-case; branch on `err.kind`, not on the numeric code, for codes ≥ 10 (see the Error Handling section below).
 
@@ -879,6 +879,33 @@ Warnings such as `privacy_redactions_applied`, `semantic_fallback_lexical`,
 or `no_evidence_found` are data, not prose; branch on the JSON fields before
 copying the pack into another tool. Stale selected evidence is structural:
 inspect `freshness.stale_evidence_count`.
+
+### Swarm Operations Workflow
+
+Use the swarm surfaces when multiple agents are sharing one repo and you need a
+single read-only view before claiming work:
+
+```bash
+# Current shared-work snapshot; does not claim, reopen, release, or run builds
+cass swarm status --json
+
+# Advisory packet for one bead; still create real reservations and Beads updates yourself
+cass swarm work-packet --json --bead coding_agent_session_search-example
+
+# Coordination hygiene check before closeout or takeover review
+cass swarm lint --json --bead coding_agent_session_search-example
+```
+
+`swarm status` composes Beads, Agent Mail metadata, git state, rch/build
+pressure, cass health/status, and proof references. Stale candidates are
+advisory only: coordinate through Beads and Agent Mail before reopening,
+force-releasing, or taking over work. Suggested commands are robot-safe
+templates, not automatic actions.
+
+When status points at prior evidence, use `cass pack "query" --robot` to create
+a bounded cited handoff for another agent. Packs complement the cockpit; they do
+not replace Beads for ownership, Agent Mail for coordination, or rch for proof
+commands.
 
 ### Token Budget Management
 
@@ -2502,6 +2529,9 @@ cass status --json                    # Quick health snapshot
 cass health                           # Minimal pre-flight check (<50ms)
 cass capabilities --json              # First-stop agent self-description
 cass introspect --json                # Full API schema
+cass swarm status --json              # Read-only Beads/Agent Mail/git/rch swarm snapshot
+cass swarm work-packet --json         # Advisory claim packet; no mutations
+cass swarm lint --json                # Coordination and proof-gap lint
 cass context /path/to/session --json  # Find related sessions
 cass view /path/to/file -n 42 --json  # View source at line
 
@@ -2536,6 +2566,9 @@ cass completions bash > ~/.bash_completion.d/cass
 | `health` | Minimal health check (<50ms), exit 0=healthy, 1=unhealthy |
 | `capabilities` | First-stop agent self-description: workflow recipes, mistake recoveries, commands, global flags, exit codes, env vars, and limits |
 | `introspect` | Full API schema: commands, arguments, response shapes |
+| `swarm status --json` | Read-only shared-repo operations snapshot across Beads, Agent Mail metadata, git, build pressure, cass readiness, and proof refs |
+| `swarm work-packet --json` | Advisory one-agent packet with readiness, suggested reservations, verification commands, and closeout checklist; it does not claim or reserve |
+| `swarm lint --json` | Read-only coordination protocol lint for missing mail, stale reservations, status mismatches, and proof gaps |
 | `sessions [--workspace DIR] [--current]` | Discover recent session files for follow-up actions |
 | `context <path>` | Find related sessions by workspace, day, or agent |
 | `view <path> -n N` | View source file at specific line (follow-up on search) |

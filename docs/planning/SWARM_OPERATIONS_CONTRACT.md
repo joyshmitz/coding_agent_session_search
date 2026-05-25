@@ -27,6 +27,66 @@ processes, run builds, repair indexes, mutate git state, or scrape raw private
 session content. It reports what it can prove, names the source of each section,
 and marks unavailable providers as partial data.
 
+## Operator Workflow
+
+Use the swarm surface as a cockpit, not as an ownership system. Beads remains
+the source of truth for issue status, Agent Mail remains the coordination
+channel, rch remains the required build/test execution path, and cass
+search/pack remains the evidence lookup and handoff path.
+
+1. Start with a read-only snapshot:
+
+   ```bash
+   cass swarm status --json
+   ```
+
+   Read `summary.recommended_action`, `providers[]`, `beads.ready[]`,
+   `reservations[]`, `build_pressure`, and `evidence.proof_gaps[]`. Partial
+   provider status is a warning to inspect, not permission to override another
+   agent.
+
+2. If a bead looks safe, ask for a scoped packet before editing:
+
+   ```bash
+   cass swarm work-packet --json --bead coding_agent_session_search-example
+   ```
+
+   The packet may suggest file reservations, Agent Mail copy, and rch proof
+   commands. It does not create those reservations, send the mail, update Beads,
+   or run the commands. Agents still use the real tools:
+   `br update ... --status in_progress --json`, Agent Mail reservations and
+   messages, and `rch exec -- env CARGO_TARGET_DIR=... cargo ...`.
+
+3. If `stale_candidate_count` is non-zero, treat it as a review queue:
+
+   ```bash
+   cass swarm status --json --stale-threshold-seconds 3600
+   br show coding_agent_session_search-example --json
+   ```
+
+   Stale detection is advisory only. Do not reopen, force-release, or take over
+   work until Beads, Agent Mail, reservations, dirty paths, and recent commits
+   all agree that the holder is inactive or explicit coordination has happened.
+
+4. If status points at prior proof or discussion, build a bounded cited handoff:
+
+   ```bash
+   cass pack "coding_agent_session_search-example closeout proof" --robot --max-tokens 8000
+   ```
+
+   Packs are token-budgeted evidence bundles. They are useful for handoff and
+   review, but they do not replace Beads close reasons, Agent Mail closeout, or
+   command transcripts.
+
+5. Before closeout or takeover review, lint coordination hygiene:
+
+   ```bash
+   cass swarm lint --json --bead coding_agent_session_search-example
+   ```
+
+   Findings are suggestions. The lint surface never acknowledges messages,
+   sends mail, edits files, releases reservations, updates beads, or runs git.
+
 ## Goals
 
 - Show one robot-safe view of active swarm work in the current repository.
