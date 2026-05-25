@@ -1,6 +1,6 @@
 [package]
 name = "coding-agent-search"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 authors = ["Jeffrey Emanuel"]
 description = "Unified TUI search over local coding agent histories"
@@ -42,7 +42,7 @@ which = "8.0.2"
 shell-words = "1.1.1"
 dotenvy = "0.15.7"
 notify = "8.2.0"
-frankensqlite = { version = "0.1.3", git = "https://github.com/Dicklesworthstone/frankensqlite", rev = "c8ce64fdce4cd2e3657d56d72719c7a3d99f39c3", package = "fsqlite", features = ["fts5"] }
+frankensqlite = { version = "0.1.3", git = "https://github.com/Dicklesworthstone/frankensqlite", rev = "b3c841ba2655e2ee1834b6d9c8572fa3dc8f1ed6", package = "fsqlite", features = ["fts5"] }
 rayon = "1.12.0"
 crossbeam-channel = "0.5.15"
 parking_lot = "0.12.5"
@@ -160,7 +160,7 @@ rand_chacha = "0.10"
 rusqlite = { version = "0.39.0", features = ["bundled", "modern_sqlite"] }
 # frankensqlite compat gate tests (bead 3vvqa) — fsqlite-types needed for SqliteValue
 # enum variants in test assertions. The main fsqlite dep is available as `frankensqlite`.
-fsqlite-types = { version = "0.1.3", git = "https://github.com/Dicklesworthstone/frankensqlite", rev = "c8ce64fdce4cd2e3657d56d72719c7a3d99f39c3", package = "fsqlite-types" }
+fsqlite-types = { version = "0.1.3", git = "https://github.com/Dicklesworthstone/frankensqlite", rev = "b3c841ba2655e2ee1834b6d9c8572fa3dc8f1ed6", package = "fsqlite-types" }
 
 [[bin]]
 name = "cass"
