@@ -80,8 +80,17 @@ urlencoding = "2.1.3"
 half = { version = "2.7.1", features = ["bytemuck"] }
 memmap2 = "0.9.10"
 bytemuck = "1.25.0"
-fastembed = { version = "5.13.4", default-features = false, features = ["ort-download-binaries-rustls-tls"] }
-frankensearch = { version = "0.3.2", git = "https://github.com/Dicklesworthstone/frankensearch", rev = "2cad158f4468ece7076e3fe529c8e5c20b2e020e", default-features = false, features = ["hash", "lexical", "ann", "fastembed-reranker"] }
+# `fastembed` ships prebuilt Microsoft ONNX Runtime binaries via
+# `ort-download-binaries-rustls-tls` that contain AVX/AVX2 instructions
+# compiled in. RUSTFLAGS cannot reach that already-linked vendor code, so
+# pre-AVX2 CPUs (Sandy/Ivy Bridge, pre-Excavator AMD) crash at static init
+# with STATUS_ILLEGAL_INSTRUCTION (#256). The `semantic` feature gate
+# below carries this dep so we can ship a `-baseline` artifact without it.
+fastembed = { version = "5.13.4", default-features = false, features = ["ort-download-binaries-rustls-tls"], optional = true }
+# `frankensearch/fastembed-reranker` pulls in the same `fastembed` crate
+# transitively (via `frankensearch-rerank`), so it must be gated by the
+# same `semantic` feature for the baseline build to be ORT-free.
+frankensearch = { version = "0.3.2", git = "https://github.com/Dicklesworthstone/frankensearch", rev = "2cad158f4468ece7076e3fe529c8e5c20b2e020e", default-features = false, features = ["hash", "lexical", "ann"] }
 franken-agent-detection = { version = "0.1.8", git = "https://github.com/Dicklesworthstone/franken_agent_detection", rev = "b62d859709aa6f8e772759efa2c13da9e3c088c9", features = ["connectors", "cursor", "chatgpt", "opencode", "crush", "hermes"] }
 wide = "1.4.0"  # Portable SIMD for P0 Opt 2: SIMD dot product
 arrayvec = "0.7.6"  # Stack-based arrays for P1 Opt 1.4: Edge N-gram optimization
@@ -131,10 +140,18 @@ security-framework = "3.7.0"
 openssl = { version = "0.10.79", features = ["vendored"] }
 
 [features]
-default = ["qr", "encryption"]
+default = ["qr", "encryption", "semantic"]
 qr = ["dep:qrcode", "dep:image"]
 encryption = []  # Enables HTML export encryption (deps already included for ChatGPT)
 backtrace = []
+# `semantic` enables ONNX-runtime-backed embedding/reranking via fastembed +
+# frankensearch/fastembed-reranker. Disabling it (e.g. via `--no-default-features
+# --features qr,encryption`) builds the `-baseline` artifact that does not pull
+# in the prebuilt Microsoft ONNX Runtime binary, so pre-AVX2 CPUs no longer
+# crash with STATUS_ILLEGAL_INSTRUCTION at static init (cass#256). Semantic
+# search modes return a clear error in baseline builds; lexical search and
+# all other functionality remain fully available.
+semantic = ["dep:fastembed", "frankensearch/fastembed-reranker"]
 # Opt-in: upgrade sibling repo rev/worktree drift from warning to hard error and
 # validate the optional /data/projects path checkouts before enabling local overrides.
 strict-path-dep-validation = []

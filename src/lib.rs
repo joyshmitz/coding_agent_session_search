@@ -16114,6 +16114,12 @@ fn state_meta_json_inner(
             "hnsw_path": semantic.hnsw_path.as_ref().map(|path| path.display().to_string()),
             "hnsw_ready": semantic.hnsw_ready,
             "progressive_ready": semantic.progressive_ready,
+            // cass#256: surface whether this binary was built with the
+            // `semantic` Cargo feature. `false` means the prebuilt
+            // Microsoft ONNX Runtime is NOT linked (the baseline build
+            // for pre-AVX2 CPUs); semantic search modes will return an
+            // explicit error and hybrid degrades to lexical.
+            "feature_compiled_in": cfg!(feature = "semantic"),
             // Sub-fix 3 for cass#257 — additive fields that report
             // quality-tier readiness independently of the
             // progressive/hybrid stack so `--mode semantic` consumers
@@ -19934,60 +19940,98 @@ fn run_cli_search(
                 retryable: true,
             })?,
         SearchMode::Semantic => {
-            let (hits, ann_stats) = client
-                .search_semantic_with_tier(
+            // cass#256: in the `-baseline` build (the `semantic` Cargo
+            // feature is disabled), `--mode semantic` returns a clear
+            // CLI envelope rather than reaching code that would expect a
+            // working ORT runtime. Hybrid degrades to lexical via the
+            // existing fail-open path; lexical-only mode is unaffected.
+            #[cfg(not(feature = "semantic"))]
+            {
+                // Suppress unused-binding warnings in the baseline arm:
+                // every input is consumed by the documented error envelope.
+                let _ = (
+                    approximate,
+                    &semantic_opts,
+                    &filters,
+                    &field_mask,
                     query,
-                    filters.clone(),
                     search_limit,
                     search_offset,
-                    field_mask,
-                    approximate,
-                    semantic_opts.tier_mode,
-                )
-                .map_err(|e| {
-                    let err_str = e.to_string();
-                    if err_str.contains("HNSW index") {
-                        CliError {
-                            code: 15,
-                            kind: CliErrorKind::SemanticUnavailable.kind_str(),
-                            message: "Approximate search unavailable (HNSW index missing)".to_string(),
-                            hint: Some(
-                                "Run 'cass index --semantic --build-hnsw' to build the ANN index, or omit --approximate"
+                );
+                let _ = client;
+                Err::<crate::search::query::SearchResult, CliError>(CliError {
+                    code: 15,
+                    kind: CliErrorKind::SemanticUnavailable.kind_str(),
+                    message:
+                        "semantic search is not available in this build (cass was built without the `semantic` Cargo feature; this is the `-baseline` artifact for pre-AVX2 CPUs; cass#256)"
+                            .to_string(),
+                    hint: Some(
+                        "Re-run with `--mode lexical` (or omit `--mode` and accept the default hybrid-preferred mode, which fails open to lexical), or install the full release artifact (e.g. `cass-windows-amd64.zip` / `cass-linux-amd64.tar.gz`) on a host with AVX2 support."
+                            .to_string(),
+                    ),
+                    retryable: false,
+                })?
+            }
+            #[cfg(feature = "semantic")]
+            {
+                let (hits, ann_stats) = client
+                    .search_semantic_with_tier(
+                        query,
+                        filters.clone(),
+                        search_limit,
+                        search_offset,
+                        field_mask,
+                        approximate,
+                        semantic_opts.tier_mode,
+                    )
+                    .map_err(|e| {
+                        let err_str = e.to_string();
+                        if err_str.contains("HNSW index") {
+                            CliError {
+                                code: 15,
+                                kind: CliErrorKind::SemanticUnavailable.kind_str(),
+                                message: "Approximate search unavailable (HNSW index missing)"
                                     .to_string(),
-                            ),
-                            retryable: false,
+                                hint: Some(
+                                    "Run 'cass index --semantic --build-hnsw' to build the ANN index, or omit --approximate"
+                                        .to_string(),
+                                ),
+                                retryable: false,
+                            }
+                        } else if err_str.contains("unavailable")
+                            || err_str.contains("no embedder")
+                        {
+                            CliError {
+                                code: 15,
+                                kind: CliErrorKind::SemanticUnavailable.kind_str(),
+                                message: "Semantic search not available".to_string(),
+                                hint: Some(
+                                    "Run 'cass tui' and press Alt+S to set up semantic search, or omit --mode semantic when lexical evidence is acceptable"
+                                        .to_string(),
+                                ),
+                                retryable: false,
+                            }
+                        } else {
+                            CliError {
+                                code: 9,
+                                kind: CliErrorKind::Search.kind_str(),
+                                message: format!("semantic search failed: {e}"),
+                                hint: Some(
+                                    "Retry with the default hybrid-preferred mode when lexical evidence is acceptable"
+                                        .to_string(),
+                                ),
+                                retryable: true,
+                            }
                         }
-                    } else if err_str.contains("unavailable") || err_str.contains("no embedder") {
-                        CliError {
-                            code: 15,
-                            kind: CliErrorKind::SemanticUnavailable.kind_str(),
-                            message: "Semantic search not available".to_string(),
-                            hint: Some(
-                                "Run 'cass tui' and press Alt+S to set up semantic search, or omit --mode semantic when lexical evidence is acceptable"
-                                    .to_string(),
-                            ),
-                            retryable: false,
-                        }
-                    } else {
-                        CliError {
-                            code: 9,
-                            kind: CliErrorKind::Search.kind_str(),
-                            message: format!("semantic search failed: {e}"),
-                            hint: Some(
-                                "Retry with the default hybrid-preferred mode when lexical evidence is acceptable"
-                                    .to_string(),
-                            ),
-                            retryable: true,
-                        }
-                    }
-                })?;
-            crate::search::query::SearchResult {
-                hits,
-                wildcard_fallback: false,
-                cache_stats: crate::search::query::CacheStats::default(),
-                suggestions: Vec::new(),
-                ann_stats,
-                total_count: None,
+                    })?;
+                crate::search::query::SearchResult {
+                    hits,
+                    wildcard_fallback: false,
+                    cache_stats: crate::search::query::CacheStats::default(),
+                    suggestions: Vec::new(),
+                    ann_stats,
+                    total_count: None,
+                }
             }
         }
         SearchMode::Hybrid => match client.search_hybrid(
@@ -72646,6 +72690,7 @@ fn response_schema_semantic_state() -> serde_json::Value {
             "hnsw_path": { "type": ["string", "null"] },
             "hnsw_ready": { "type": "boolean" },
             "progressive_ready": { "type": "boolean" },
+            "feature_compiled_in": { "type": "boolean" },
             "hint": { "type": ["string", "null"] },
             "fast_tier": {
                 "type": "object",

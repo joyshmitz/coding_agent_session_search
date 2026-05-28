@@ -136,7 +136,14 @@ const CONTRACTS: &[DependencyContract] = &[
         // indexing plus the self-contained Git dependency packaging fix.
         expected_rev: "2cad158f4468ece7076e3fe529c8e5c20b2e020e",
         expected_version: "0.3.2",
-        expected_features: &["ann", "fastembed-reranker", "hash", "lexical"],
+        // cass#256: `fastembed-reranker` no longer appears in the static
+        // `[dependencies]` table; it is enabled by the cass `semantic`
+        // feature so the baseline build (`--no-default-features --features
+        // qr,encryption`) can drop the prebuilt Microsoft ONNX Runtime
+        // binary that crashes pre-AVX2 CPUs. The contract therefore only
+        // pins the always-on features here; the conditional one is
+        // validated by Cargo's own feature graph.
+        expected_features: &["ann", "hash", "lexical"],
         expected_default_features: Some(false),
         repo_rel: "../frankensearch",
         manifest_rel: "frankensearch/Cargo.toml",
@@ -470,7 +477,7 @@ fn validate_local_contract(
     let local_manifest_text = match fs::read_to_string(&manifest_path) {
         Ok(text) => text,
         Err(err) if contract.mode == ValidationMode::StrictOptIn => {
-            // Optional sibling repo not checked out — skip validation.
+            // Optional sibling repo not checked out; skip validation.
             // Only ActivePathOverride repos are required on disk.
             println!(
                 "cargo:warning=skipping {} contract validation: sibling manifest `{}` not found: {err}",
@@ -583,7 +590,7 @@ fn validate_local_contract(
 
 fn validate_strict_git_state(contract: &DependencyContract, repo_root: &Path, state: &GitState) {
     // Crates.io-only contracts (empty `expected_rev`) intentionally
-    // have nothing to enforce at the sibling repo level — the actual
+    // have nothing to enforce at the sibling repo level; the actual
     // pin lives in the crates.io version. A local sibling checkout
     // may be on any branch and may be dirty; that's fine because
     // we're not building against it. Skip both sub-checks.
