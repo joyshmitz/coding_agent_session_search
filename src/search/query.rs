@@ -6950,6 +6950,8 @@ impl SearchClient {
         if !has_fts {
             return Ok(Vec::new());
         }
+        crate::storage::sqlite::validate_fts_messages_integrity_for_connection(conn)
+            .with_context(|| "validating sqlite fts_messages fallback integrity before search")?;
 
         let query_match_type = dominant_match_type(raw_query);
         let scan_request = SqliteMessageScanRequest {

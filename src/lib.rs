@@ -14217,6 +14217,40 @@ fn close_franken_cli_read_db(
     Ok(())
 }
 
+fn fts_messages_integrity_cli_error(surface: &str, err: anyhow::Error) -> CliError {
+    CliError {
+        code: 5,
+        kind: CliErrorKind::Storage.kind_str(),
+        message: format!("{surface} cannot continue: {err:#}"),
+        hint: Some(crate::storage::sqlite::FTS_MESSAGES_CORRUPTION_RECOVERY_HINT.to_string()),
+        retryable: false,
+    }
+}
+
+fn validate_fts_messages_integrity_for_cli(
+    conn: &frankensqlite::Connection,
+    surface: &str,
+) -> CliResult<()> {
+    crate::storage::sqlite::validate_fts_messages_integrity_for_connection(conn)
+        .map_err(|err| fts_messages_integrity_cli_error(surface, err))
+}
+
+fn validate_fts_messages_integrity_at_path_for_cli(
+    path: &Path,
+    surface: &str,
+    timeout: Duration,
+) -> CliResult<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let conn = open_franken_cli_read_db(path.to_path_buf(), surface, timeout)?;
+    let validation = validate_fts_messages_integrity_for_cli(&conn, surface);
+    let close = close_franken_cli_read_db(conn, path, surface);
+    validation?;
+    close
+}
+
 fn franken_query_row_map_retry<T, F>(
     conn: &frankensqlite::Connection,
     sql: &str,
@@ -15071,6 +15105,15 @@ fn probe_state_db(
     use frankensqlite::params;
 
     snapshot.opened = true;
+    if let Err(err) = crate::storage::sqlite::validate_fts_messages_integrity_for_connection(&conn)
+    {
+        snapshot.opened = false;
+        snapshot.open_error = Some(err.to_string());
+        snapshot.open_retryable = false;
+        snapshot.counts_skipped = true;
+        let _ = close_franken_cli_read_db(conn, db_path, reason);
+        return snapshot;
+    }
     snapshot.last_indexed_at = franken_query_row_map_retry(
         &conn,
         "SELECT value FROM meta WHERE key = 'last_indexed_at'",
@@ -19527,6 +19570,8 @@ fn run_cli_search(
         return Ok(());
     }
 
+    validate_fts_messages_integrity_at_path_for_cli(&db_path, "search", Duration::from_secs(5))?;
+
     let search_self_heal = ensure_lexical_assets_for_search(
         &data_dir,
         &db_path,
@@ -23339,6 +23384,7 @@ fn run_stats(
     let data_dir = data_dir_override.clone().unwrap_or_else(default_data_dir);
     let db_path = db_override.unwrap_or_else(|| data_dir.join("agent_search.db"));
     let conn = open_franken_cli_read_db(db_path.clone(), "stats", Duration::from_secs(30))?;
+    validate_fts_messages_integrity_for_cli(&conn, "stats")?;
     let conversation_columns = doctor_table_columns(&conn, "conversations");
     let source_id_sql = if conversation_columns.contains("source_id") {
         "c.source_id"

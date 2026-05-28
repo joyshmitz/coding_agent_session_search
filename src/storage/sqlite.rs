@@ -1101,6 +1101,131 @@ const DAILY_STATS_HEALTH_GENERATION: i64 = 1;
 pub const FTS5_DELETE_ALL_SQL: &str =
     "INSERT INTO fts_messages(fts_messages) VALUES('delete-all');";
 
+pub const FTS_MESSAGES_REQUIRED_SHADOW_TABLES: [&str; 5] = [
+    "fts_messages_config",
+    "fts_messages_content",
+    "fts_messages_data",
+    "fts_messages_docsize",
+    "fts_messages_idx",
+];
+
+pub const FTS_MESSAGES_INTEGRITY_PROBE_SQL: &str = "SELECT * FROM fts_messages LIMIT 0";
+
+pub const FTS_MESSAGES_CORRUPTION_RECOVERY_HINT: &str = "Stop all cass index/watch processes, back up the current database, then run \
+     'cass doctor check --json' for a read-only diagnosis before using a supported \
+     repair/rebuild path.";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FtsMessagesIntegrityError {
+    missing_shadow_tables: Vec<&'static str>,
+    failed_sql: Option<&'static str>,
+    source_error: Option<String>,
+}
+
+impl FtsMessagesIntegrityError {
+    fn new(
+        missing_shadow_tables: Vec<&'static str>,
+        failed_sql: Option<&'static str>,
+        source_error: Option<String>,
+    ) -> Self {
+        Self {
+            missing_shadow_tables,
+            failed_sql,
+            source_error,
+        }
+    }
+
+    pub fn missing_shadow_tables(&self) -> &[&'static str] {
+        &self.missing_shadow_tables
+    }
+}
+
+impl std::fmt::Display for FtsMessagesIntegrityError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "CASS database FTS5 index is corrupt: fts_messages exists, but required FTS5 shadow tables are missing or unreadable"
+        )?;
+        if !self.missing_shadow_tables.is_empty() {
+            write!(
+                f,
+                "; missing shadow tables: {}",
+                self.missing_shadow_tables.join(", ")
+            )?;
+        }
+        if let Some(sql) = self.failed_sql {
+            write!(f, "; failed SQL: {sql}")?;
+        }
+        if let Some(source_error) = &self.source_error {
+            write!(f, "; error: {source_error}")?;
+        }
+        write!(
+            f,
+            ". Suggested recovery: {FTS_MESSAGES_CORRUPTION_RECOVERY_HINT}"
+        )
+    }
+}
+
+impl std::error::Error for FtsMessagesIntegrityError {}
+
+pub fn validate_fts_messages_integrity_for_connection(conn: &FrankenConnection) -> Result<()> {
+    let fts_schema_rows: i64 = conn
+        .query_row_map(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'fts_messages'",
+            fparams![],
+            |row| row.get_typed(0),
+        )
+        .with_context(|| "checking for fts_messages in sqlite_master")?;
+    if fts_schema_rows == 0 {
+        return Ok(());
+    }
+
+    let probe_error = conn.query(FTS_MESSAGES_INTEGRITY_PROBE_SQL).err();
+    if probe_error.is_none() {
+        return Ok(());
+    }
+
+    let present_shadow_tables: HashSet<String> = conn
+        .query_map_collect(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'table'
+               AND name IN (
+                 'fts_messages_config',
+                 'fts_messages_content',
+                 'fts_messages_data',
+                 'fts_messages_docsize',
+                 'fts_messages_idx'
+               )",
+            fparams![],
+            |row: &FrankenRow| row.get_typed::<String>(0),
+        )
+        .map(|rows| rows.into_iter().collect())
+        .map_err(|err| {
+            FtsMessagesIntegrityError::new(
+                Vec::new(),
+                Some(
+                    "SELECT name FROM sqlite_master WHERE name IN \
+                     ('fts_messages_config','fts_messages_content','fts_messages_data','fts_messages_docsize','fts_messages_idx')",
+                ),
+                Some(err.to_string()),
+            )
+        })?;
+    let missing_shadow_tables = FTS_MESSAGES_REQUIRED_SHADOW_TABLES
+        .iter()
+        .copied()
+        .filter(|table| !present_shadow_tables.contains(*table))
+        .collect::<Vec<_>>();
+
+    Err(FtsMessagesIntegrityError::new(
+        missing_shadow_tables,
+        probe_error
+            .as_ref()
+            .map(|_| FTS_MESSAGES_INTEGRITY_PROBE_SQL),
+        probe_error.map(|err| err.to_string()),
+    )
+    .into())
+}
+
 #[cfg(test)]
 pub(crate) fn materialize_fresh_fts_schema_via_rusqlite(db_path: &Path) -> Result<()> {
     // Delegate to FrankenStorage: DROP TABLE IF EXISTS + CREATE VIRTUAL TABLE
@@ -9465,6 +9590,10 @@ impl FrankenStorage {
     /// should invoke this from maintenance paths rather than ordinary opens.
     pub(crate) fn ensure_search_fallback_fts_consistency(&self) -> Result<FtsConsistencyRepair> {
         self.ensure_fts_consistency_via_frankensqlite()
+    }
+
+    pub(crate) fn validate_fts_messages_integrity(&self) -> Result<()> {
+        validate_fts_messages_integrity_for_connection(&self.conn)
     }
 
     pub(crate) fn fallback_fts_is_known_healthy_for_archive_fingerprint(
@@ -24653,6 +24782,57 @@ mod tests {
             })
             .unwrap();
         assert_eq!(total_fts_rows, total_messages);
+    }
+
+    #[test]
+    fn fts_messages_integrity_reports_missing_shadow_tables() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("test_corrupt_fts_missing_shadows.db");
+
+        {
+            let storage = FrankenStorage::open(&db_path).unwrap();
+            storage.ensure_search_fallback_fts_consistency().unwrap();
+            storage
+                .validate_fts_messages_integrity()
+                .expect("freshly materialized fts_messages should pass integrity validation");
+        }
+
+        {
+            let conn = rusqlite_test_fixture_conn(&db_path);
+            conn.execute_batch("PRAGMA writable_schema = ON;").unwrap();
+            conn.execute(
+                "DELETE FROM sqlite_master
+                 WHERE name IN (
+                   'fts_messages_config',
+                   'fts_messages_content',
+                   'fts_messages_data',
+                   'fts_messages_docsize',
+                   'fts_messages_idx'
+                 )",
+                [],
+            )
+            .unwrap();
+            conn.execute_batch("PRAGMA writable_schema = OFF;").unwrap();
+        }
+
+        let storage = FrankenStorage::open(&db_path).unwrap();
+        let err = storage
+            .validate_fts_messages_integrity()
+            .expect_err("missing FTS5 shadow tables must be reported as corruption");
+        let integrity = err
+            .downcast_ref::<FtsMessagesIntegrityError>()
+            .expect("error should preserve the typed FTS integrity kind");
+        assert_eq!(
+            integrity.missing_shadow_tables(),
+            &FTS_MESSAGES_REQUIRED_SHADOW_TABLES[..]
+        );
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("fts_messages")
+                && rendered.contains("required FTS5 shadow tables")
+                && rendered.contains("fts_messages_content"),
+            "error should be an operator-facing FTS corruption diagnosis: {rendered}"
+        );
     }
 
     #[test]

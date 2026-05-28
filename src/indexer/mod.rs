@@ -11195,6 +11195,19 @@ pub fn run_index(
     persist::apply_index_writer_busy_timeout(&storage);
     persist::apply_index_writer_checkpoint_policy(&storage, defer_checkpoints);
 
+    if let Err(err) = storage.validate_fts_messages_integrity() {
+        tracing::error!(
+            db_path = %opts.db_path.display(),
+            error = %err,
+            "canonical archive has corrupt fts_messages metadata; refusing to enter index pipeline"
+        );
+        storage.close_best_effort_in_place();
+        return Err(canonical_archive_unhealthy_for_index_error(
+            &opts.db_path,
+            &err.to_string(),
+        ));
+    }
+
     if opts.full
         && !opened_fresh_for_full
         && let Some(reason) = full_rebuild_existing_storage_integrity_problem(&storage)?
