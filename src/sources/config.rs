@@ -1248,7 +1248,7 @@ fn replace_file_from_temp(temp_path: &Path, final_path: &Path) -> Result<(), std
         match std::fs::rename(temp_path, final_path) {
             Ok(()) => sync_parent_directory(final_path),
             Err(first_err)
-                if final_path.exists()
+                if path_entry_exists(final_path)
                     && matches!(
                         first_err.kind(),
                         std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
@@ -1256,7 +1256,6 @@ fn replace_file_from_temp(temp_path: &Path, final_path: &Path) -> Result<(), std
             {
                 let backup_path = unique_replace_backup_path(final_path);
                 std::fs::rename(final_path, &backup_path).map_err(|backup_err| {
-                    let _ = std::fs::remove_file(temp_path);
                     std::io::Error::other(format!(
                         "failed preparing backup {} before replacing {}: first error: {}; backup error: {}",
                         backup_path.display(),
@@ -1266,15 +1265,11 @@ fn replace_file_from_temp(temp_path: &Path, final_path: &Path) -> Result<(), std
                     ))
                 })?;
                 match std::fs::rename(temp_path, final_path) {
-                    Ok(()) => {
-                        let _ = std::fs::remove_file(&backup_path);
-                        sync_parent_directory(final_path)
-                    }
+                    Ok(()) => sync_parent_directory(final_path),
                     Err(second_err) => {
                         let restore_result = std::fs::rename(&backup_path, final_path);
                         match restore_result {
                             Ok(()) => {
-                                let _ = std::fs::remove_file(temp_path);
                                 sync_parent_directory(final_path).map_err(|sync_err| {
                                     std::io::Error::other(format!(
                                         "failed replacing {} with {}: first error: {}; second error: {}; restored original file but failed syncing parent directory: {}",
@@ -1317,6 +1312,15 @@ fn replace_file_from_temp(temp_path: &Path, final_path: &Path) -> Result<(), std
     {
         std::fs::rename(temp_path, final_path)?;
         sync_parent_directory(final_path)
+    }
+}
+
+#[cfg(any(windows, test))]
+fn path_entry_exists(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => true,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => true,
     }
 }
 
@@ -1495,6 +1499,57 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(first.parent(), final_path.parent());
         assert_eq!(second.parent(), final_path.parent());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_replace_file_from_temp_replaces_symlink_without_following() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let final_path = temp.path().join("sources.toml");
+        let protected = temp.path().join("protected.toml");
+        let temp_path = temp.path().join("sources.tmp");
+
+        std::fs::write(&protected, b"protected = true\n").expect("write protected target");
+        symlink(&protected, &final_path).expect("create final symlink");
+        std::fs::write(&temp_path, b"new_config = true\n").expect("write replacement temp");
+
+        replace_file_from_temp(&temp_path, &final_path).expect("replace symlink path");
+
+        assert_eq!(
+            std::fs::read(&protected).expect("read protected target"),
+            b"protected = true\n"
+        );
+        assert!(
+            !std::fs::symlink_metadata(&final_path)
+                .expect("final path metadata")
+                .file_type()
+                .is_symlink(),
+            "replace should publish at the symlink path instead of following it"
+        );
+        assert_eq!(
+            std::fs::read(&final_path).expect("read replacement config"),
+            b"new_config = true\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_path_entry_exists_detects_dangling_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("sources.toml");
+        let missing_target = temp.path().join("missing.toml");
+
+        symlink(&missing_target, &path).expect("create dangling symlink");
+
+        assert!(!path.exists(), "Path::exists follows the missing target");
+        assert!(
+            path_entry_exists(&path),
+            "replacement fallback must detect the symlink path entry itself"
+        );
     }
 
     #[test]
