@@ -934,72 +934,82 @@ fn materialize_safe_required_file_symlinks(archive_dir: &Path) -> Result<()> {
     })?;
 
     for rel_path in REQUIRED_SITE_FILES {
-        let path = archive_dir.join(rel_path);
-        let metadata = match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => {
-                return Err(err).with_context(|| {
-                    format!(
-                        "Failed to inspect required site file {} before key mutation",
-                        path.display()
-                    )
-                });
-            }
-        };
-        if !metadata.file_type().is_symlink() {
-            continue;
-        }
+        materialize_safe_required_file_symlink(archive_dir, &canonical_archive_dir, rel_path)?;
+    }
 
-        let canonical_target = path.canonicalize().with_context(|| {
-            format!(
-                "Failed to resolve symlinked required site file {} before key mutation",
-                path.display()
-            )
-        })?;
-        if !canonical_target.starts_with(&canonical_archive_dir) {
-            bail!(
-                "Refusing to materialize required site file symlink outside archive root: {}",
-                path.display()
-            );
-        }
+    Ok(())
+}
 
-        let target_metadata = std::fs::metadata(&canonical_target).with_context(|| {
-            format!(
-                "Failed to inspect symlink target {} before key mutation",
-                canonical_target.display()
-            )
-        })?;
-        if !target_metadata.file_type().is_file() {
-            bail!(
-                "Refusing to materialize required site file symlink that does not point to a regular file: {}",
-                path.display()
-            );
+fn materialize_safe_required_file_symlink(
+    archive_dir: &Path,
+    canonical_archive_dir: &Path,
+    rel_path: &str,
+) -> Result<()> {
+    let path = archive_dir.join(rel_path);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!(
+                    "Failed to inspect required site file {} before key mutation",
+                    path.display()
+                )
+            });
         }
+    };
+    if !metadata.file_type().is_symlink() {
+        return Ok(());
+    }
 
-        let temp_path = unique_atomic_sidecar_path(&path, "materialize", "site-file");
-        std::fs::copy(&canonical_target, &temp_path).with_context(|| {
+    let canonical_target = path.canonicalize().with_context(|| {
+        format!(
+            "Failed to resolve symlinked required site file {} before key mutation",
+            path.display()
+        )
+    })?;
+    if !canonical_target.starts_with(canonical_archive_dir) {
+        bail!(
+            "Refusing to materialize required site file symlink outside archive root: {}",
+            path.display()
+        );
+    }
+
+    let target_metadata = std::fs::metadata(&canonical_target).with_context(|| {
+        format!(
+            "Failed to inspect symlink target {} before key mutation",
+            canonical_target.display()
+        )
+    })?;
+    if !target_metadata.file_type().is_file() {
+        bail!(
+            "Refusing to materialize required site file symlink that does not point to a regular file: {}",
+            path.display()
+        );
+    }
+
+    let temp_path = unique_atomic_sidecar_path(&path, "materialize", "site-file");
+    std::fs::copy(&canonical_target, &temp_path).with_context(|| {
+        format!(
+            "Failed copying symlink target {} into staged required site file {}",
+            canonical_target.display(),
+            temp_path.display()
+        )
+    })?;
+    File::open(&temp_path)
+        .and_then(|file| file.sync_all())
+        .with_context(|| {
             format!(
-                "Failed copying symlink target {} into staged required site file {}",
-                canonical_target.display(),
+                "Failed syncing materialized required site file {}",
                 temp_path.display()
             )
         })?;
-        File::open(&temp_path)
-            .and_then(|file| file.sync_all())
-            .with_context(|| {
-                format!(
-                    "Failed syncing materialized required site file {}",
-                    temp_path.display()
-                )
-            })?;
-        replace_file_from_temp(&temp_path, &path).with_context(|| {
-            format!(
-                "Failed materializing required site file symlink {} before key mutation",
-                path.display()
-            )
-        })?;
-    }
+    replace_file_from_temp(&temp_path, &path).with_context(|| {
+        format!(
+            "Failed materializing required site file symlink {} before key mutation",
+            path.display()
+        )
+    })?;
 
     Ok(())
 }
@@ -1886,34 +1896,40 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn test_key_add_password_materializes_in_tree_symlinked_required_asset() {
+    fn test_key_add_password_materializes_in_tree_symlinked_required_asset() -> Result<()> {
         let (_temp_dir, archive_dir) = setup_test_archive();
-        let site_dir = super::super::resolve_site_dir(&archive_dir).unwrap();
+        let site_dir = super::super::resolve_site_dir(&archive_dir)?;
         replace_viewer_with_in_tree_symlink(&site_dir);
 
-        key_add_password(&archive_dir, "test-password", "new-password").unwrap();
+        key_add_password(&archive_dir, "test-password", "new-password")?;
 
-        assert_eq!(verify_bundle(&archive_dir, false).unwrap().status, "valid");
-        let viewer_metadata = std::fs::symlink_metadata(site_dir.join("viewer.js")).unwrap();
-        assert!(viewer_metadata.file_type().is_file());
-        assert!(!viewer_metadata.file_type().is_symlink());
+        anyhow::ensure!(verify_bundle(&archive_dir, false)?.status == "valid");
+        let viewer_metadata = std::fs::symlink_metadata(site_dir.join("viewer.js"))?;
+        anyhow::ensure!(viewer_metadata.file_type().is_file());
+        anyhow::ensure!(!viewer_metadata.file_type().is_symlink());
+        Ok(())
     }
 
     #[test]
     #[cfg(unix)]
-    fn test_key_add_password_wrong_password_preserves_in_tree_symlinked_required_asset() {
+    fn test_key_add_password_wrong_password_preserves_in_tree_symlinked_required_asset()
+    -> Result<()> {
         let (_temp_dir, archive_dir) = setup_test_archive();
-        let site_dir = super::super::resolve_site_dir(&archive_dir).unwrap();
+        let site_dir = super::super::resolve_site_dir(&archive_dir)?;
         replace_viewer_with_in_tree_symlink(&site_dir);
 
-        let err = key_add_password(&archive_dir, "wrong-password", "new-password").unwrap_err();
+        let err = match key_add_password(&archive_dir, "wrong-password", "new-password") {
+            Ok(_) => bail!("wrong password unexpectedly added a key slot"),
+            Err(err) => err,
+        };
 
-        assert!(
+        anyhow::ensure!(
             err.to_string().contains("Invalid password"),
             "unexpected error: {err:#}"
         );
-        let viewer_metadata = std::fs::symlink_metadata(site_dir.join("viewer.js")).unwrap();
-        assert!(viewer_metadata.file_type().is_symlink());
+        let viewer_metadata = std::fs::symlink_metadata(site_dir.join("viewer.js"))?;
+        anyhow::ensure!(viewer_metadata.file_type().is_symlink());
+        Ok(())
     }
 
     #[test]
