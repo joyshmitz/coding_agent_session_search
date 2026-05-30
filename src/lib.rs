@@ -27975,6 +27975,28 @@ fn doctor_forensic_relative_path_is_safe(relative_path: &Path) -> bool {
         })
 }
 
+fn doctor_forensic_portable_child_path(prefix: &str, child: &Path) -> Option<PathBuf> {
+    if prefix.is_empty() || prefix.contains('\\') || prefix.contains(':') {
+        return None;
+    }
+    let mut relative = String::with_capacity(prefix.len() + 64);
+    relative.push_str(prefix);
+    for component in child.components() {
+        match component {
+            std::path::Component::Normal(name)
+                if doctor_portable_relative_component_is_safe(name) =>
+            {
+                relative.push('/');
+                relative.push_str(name.to_str()?);
+            }
+            std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    let relative = PathBuf::from(relative);
+    doctor_forensic_relative_path_is_safe(&relative).then_some(relative)
+}
+
 fn doctor_portable_relative_component_is_safe(name: &std::ffi::OsStr) -> bool {
     let text = name.to_string_lossy();
     if text.is_empty()
@@ -28561,7 +28583,11 @@ fn capture_doctor_forensic_bundle(
             let Ok(relative_to_root) = path.strip_prefix(&raw_manifest_root) else {
                 continue;
             };
-            let relative = Path::new("raw-mirror-manifests").join(relative_to_root);
+            let Some(relative) =
+                doctor_forensic_portable_child_path("raw-mirror-manifests", relative_to_root)
+            else {
+                continue;
+            };
             copy_artifact!("raw_mirror_manifest", path, &relative, false, None);
         }
     } else {
@@ -28594,7 +28620,11 @@ fn capture_doctor_forensic_bundle(
             let Ok(relative_to_root) = path.strip_prefix(&lexical_manifest_root) else {
                 continue;
             };
-            let relative = Path::new("index-manifests").join(relative_to_root);
+            let Some(relative) =
+                doctor_forensic_portable_child_path("index-manifests", relative_to_root)
+            else {
+                continue;
+            };
             copy_artifact!("lexical_generation_manifest", path, &relative, false, None);
         }
     } else {
@@ -55626,7 +55656,7 @@ mod doctor_asset_taxonomy_tests {
     }
 
     #[test]
-    fn doctor_relative_path_guard_rejects_cross_platform_escape_forms() {
+    fn doctor_relative_path_guard_rejects_cross_platform_escape_forms() -> Result<(), String> {
         for safe in [
             "doctor/receipts/repair.json",
             "raw-mirror/v1/manifests/session.json",
@@ -55661,6 +55691,33 @@ mod doctor_asset_taxonomy_tests {
                 "cross-platform unsafe relative path should be rejected: {unsafe_path:?}"
             );
         }
+
+        let Some(portable) = doctor_forensic_portable_child_path(
+            "raw-mirror-manifests",
+            Path::new("nested/manifest.json"),
+        ) else {
+            return Err("portable child path should be accepted".to_string());
+        };
+        if !portable
+            .to_string_lossy()
+            .as_ref()
+            .eq("raw-mirror-manifests/nested/manifest.json")
+        {
+            return Err("portable child path should use slash-separated archive form".to_string());
+        }
+        if doctor_forensic_portable_child_path(
+            "raw-mirror-manifests",
+            Path::new("../manifest.json"),
+        )
+        .is_some()
+        {
+            return Err("portable child paths must not admit traversal".to_string());
+        }
+        if doctor_forensic_portable_child_path("raw\\mirror", Path::new("manifest.json")).is_some()
+        {
+            return Err("portable child path prefixes must stay cross-platform safe".to_string());
+        }
+        Ok(())
     }
 
     #[test]
@@ -72551,6 +72608,7 @@ fn response_schema_index_state() -> serde_json::Value {
             "stale": { "type": "boolean" },
             "stale_threshold_seconds": { "type": "integer" },
             "rebuilding": { "type": "boolean" },
+            "stalled": { "type": "boolean" },
             "activity_at": { "type": ["string", "null"] },
             "documents": { "type": ["integer", "null"] },
             "empty_with_messages": { "type": "boolean" },
@@ -72692,6 +72750,9 @@ fn response_schema_rebuild_state() -> serde_json::Value {
             "job_id": { "type": ["string", "null"] },
             "job_kind": { "type": ["string", "null"] },
             "phase": { "type": ["string", "null"] },
+            "stalled": { "type": "boolean" },
+            "last_progress_at": { "type": ["string", "null"] },
+            "last_progress_age_ms": { "type": ["integer", "null"] },
             "started_at": { "type": ["string", "null"] },
             "updated_at": { "type": ["string", "null"] },
             "processed_conversations": { "type": ["integer", "null"] },
@@ -72763,6 +72824,8 @@ fn response_schema_semantic_state() -> serde_json::Value {
             "hnsw_ready": { "type": "boolean" },
             "progressive_ready": { "type": "boolean" },
             "feature_compiled_in": { "type": "boolean" },
+            "quality_tier_published": { "type": "boolean" },
+            "semantic_only_search_available": { "type": "boolean" },
             "hint": { "type": ["string", "null"] },
             "fast_tier": {
                 "type": "object",

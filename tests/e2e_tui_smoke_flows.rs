@@ -2423,7 +2423,7 @@ fn tui_pty_record_macro_creates_file() {
 }
 
 #[test]
-fn tui_typing_writes_latency_trace() {
+fn tui_typing_writes_latency_trace() -> Result<(), String> {
     let _guard_lock = tui_flow_guard();
     let trace = trace_id();
     let tracker = tracker_for("tui_typing_writes_latency_trace");
@@ -2483,10 +2483,19 @@ fn tui_typing_writes_latency_trace() {
         wait_for_output_growth(&captured, before_submit_len, 24, Duration::from_secs(6)),
         "Did not observe output growth after explicit query submission in latency PTY"
     );
-    // macOS runners can report the search completion before the next frame is
-    // rendered. Give the latency recorder a bounded chance to observe that
-    // frame before the ESC-driven shutdown flushes the trace.
-    thread::sleep(Duration::from_millis(1500));
+    if !wait_for_rendered_output(
+        &captured,
+        Duration::from_secs(8),
+        rendered_contains_hello_fixture_content,
+    ) {
+        return Err(
+            "Did not observe fixture search result before latency trace shutdown".to_string(),
+        );
+    }
+    // The trace is flushed on shutdown; make sure the frame containing the
+    // result has had a chance to reach the latency recorder before ESC closes
+    // the TUI on slower macOS runners.
+    thread::sleep(Duration::from_millis(300));
 
     let (status, esc_presses) =
         quit_tui_with_escape(&mut *writer, &mut *tui_child, 8, Duration::from_millis(180));
@@ -2548,4 +2557,5 @@ fn tui_typing_writes_latency_trace() {
     );
 
     tracker.complete();
+    Ok(())
 }
