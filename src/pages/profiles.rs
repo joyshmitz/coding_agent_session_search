@@ -247,47 +247,8 @@ fn replace_file_from_temp(temp_path: &std::path::Path, final_path: &std::path::P
                 sync_parent_directory(final_path)?;
                 Ok(())
             }
-            Err(first_err) if final_path.exists() => {
-                let backup_path = unique_atomic_backup_path(final_path);
-                std::fs::rename(final_path, &backup_path).with_context(|| {
-                    let _ = std::fs::remove_file(temp_path);
-                    format!(
-                        "Failed preparing backup {} before replacing {} after {}",
-                        backup_path.display(),
-                        final_path.display(),
-                        first_err
-                    )
-                })?;
-
-                match std::fs::rename(temp_path, final_path) {
-                    Ok(()) => {
-                        let _ = std::fs::remove_file(&backup_path);
-                        sync_parent_directory(final_path)?;
-                        Ok(())
-                    }
-                    Err(second_err) => match std::fs::rename(&backup_path, final_path) {
-                        Ok(()) => {
-                            let _ = std::fs::remove_file(temp_path);
-                            sync_parent_directory(final_path)?;
-                            anyhow::bail!(
-                                "Failed replacing {} with {}: {}; restored original preferences",
-                                final_path.display(),
-                                temp_path.display(),
-                                second_err
-                            );
-                        }
-                        Err(restore_err) => {
-                            anyhow::bail!(
-                                "Failed replacing {} with {}: {}; restore error: {}; temp file retained at {}",
-                                final_path.display(),
-                                temp_path.display(),
-                                second_err,
-                                restore_err,
-                                temp_path.display()
-                            );
-                        }
-                    },
-                }
+            Err(first_err) if replacement_path_entry_exists(final_path)? => {
+                replace_file_from_temp_via_backup(temp_path, final_path, &first_err)
             }
             Err(err) => Err(err).with_context(|| {
                 format!(
@@ -306,6 +267,61 @@ fn replace_file_from_temp(temp_path: &std::path::Path, final_path: &std::path::P
             )
         })?;
         sync_parent_directory(final_path)
+    }
+}
+
+fn replacement_path_entry_exists(path: &std::path::Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(err) if matches!(err.kind(), std::io::ErrorKind::NotFound) => Ok(false),
+        Err(err) => Err(err).with_context(|| format!("Failed to inspect {}", path.display())),
+    }
+}
+
+fn replace_file_from_temp_via_backup(
+    temp_path: &std::path::Path,
+    final_path: &std::path::Path,
+    first_err: &std::io::Error,
+) -> Result<()> {
+    let backup_path = unique_atomic_backup_path(final_path);
+    std::fs::rename(final_path, &backup_path).with_context(|| {
+        let _ = std::fs::remove_file(temp_path);
+        format!(
+            "Failed preparing backup {} before replacing {} after {}",
+            backup_path.display(),
+            final_path.display(),
+            first_err
+        )
+    })?;
+
+    match std::fs::rename(temp_path, final_path) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&backup_path);
+            sync_parent_directory(final_path)?;
+            Ok(())
+        }
+        Err(second_err) => match std::fs::rename(&backup_path, final_path) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(temp_path);
+                sync_parent_directory(final_path)?;
+                anyhow::bail!(
+                    "Failed replacing {} with {}: {}; restored original preferences",
+                    final_path.display(),
+                    temp_path.display(),
+                    second_err
+                );
+            }
+            Err(restore_err) => {
+                anyhow::bail!(
+                    "Failed replacing {} with {}: {}; restore error: {}; temp file retained at {}",
+                    final_path.display(),
+                    temp_path.display(),
+                    second_err,
+                    restore_err,
+                    temp_path.display()
+                );
+            }
+        },
     }
 }
 
@@ -638,6 +654,75 @@ mod tests {
         let first = unique_atomic_temp_path(final_path);
         let second = unique_atomic_temp_path(final_path);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn test_unique_atomic_backup_path_changes_each_call() -> Result<()> {
+        let final_path = std::path::Path::new("/tmp/profile_prefs.toml");
+        let first = unique_atomic_backup_path(final_path);
+        let second = unique_atomic_backup_path(final_path);
+
+        if first == second {
+            return Err(anyhow::anyhow!(
+                "profile replacement backup path was reused: {}",
+                first.display()
+            ));
+        }
+
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_replacement_path_entry_exists_detects_dangling_symlink() -> Result<()> {
+        use std::os::unix::fs::symlink;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new()?;
+        let link_path = temp_dir.path().join("profile_prefs.toml");
+        let missing_target = temp_dir.path().join("missing-profile-prefs.toml");
+
+        symlink(&missing_target, &link_path)?;
+
+        if link_path.exists() {
+            return Err(anyhow::anyhow!(
+                "Path::exists stopped following the missing target"
+            ));
+        }
+        if !replacement_path_entry_exists(&link_path)? {
+            return Err(anyhow::anyhow!(
+                "replacement path helper missed a dangling symlink entry"
+            ));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_replace_file_from_temp_via_backup_overwrites_existing_file() -> Result<()> {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new()?;
+        let final_path = temp_dir.path().join("profile_prefs.toml");
+        let temp_path = temp_dir.path().join("profile_prefs.tmp");
+        let first_err = std::io::Error::from(std::io::ErrorKind::AlreadyExists);
+
+        std::fs::write(&final_path, "default_profile = \"team\"\n")?;
+        std::fs::write(&temp_path, "default_profile = \"public\"\n")?;
+
+        replace_file_from_temp_via_backup(&temp_path, &final_path, &first_err)?;
+
+        let content = std::fs::read_to_string(&final_path)?;
+        if !content.contains("public") {
+            return Err(anyhow::anyhow!(
+                "backup replacement did not publish temp preferences"
+            ));
+        }
+        if temp_path.exists() {
+            return Err(anyhow::anyhow!("preferences temp path was not consumed"));
+        }
+
+        Ok(())
     }
 
     #[test]
