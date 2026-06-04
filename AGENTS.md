@@ -137,8 +137,8 @@ The `.env` file exists and **MUST NEVER be overwritten**.
 
 | Dependency | Pinned source |
 |------------|-----------------|
-| `frankensqlite` / `fsqlite-types` | `0.1.4` (crates.io; #93 + #94 fixes) |
-| `franken-agent-detection` | `b62d8597` |
+| `frankensqlite` / `fsqlite-types` | `0.1.5` (crates.io; #95 fix) |
+| `franken-agent-detection` | `a4923d4` |
 | `asupersync` | `0.3.2` |
 | `frankensearch` | `2cad158f` |
 | `frankentui` | `5f78cfa0` |

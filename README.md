@@ -360,7 +360,9 @@ Ingests history from 20 local agents, normalizing them into a unified `Conversat
 - **Codex**: `~/.codex/sessions` (Rollout JSONL)
 - **Cline**: VS Code global storage (Task directories)
 - **Gemini CLI**: `~/.gemini/tmp` (Chat JSON)
-- **Claude Code**: `~/.claude/projects` (Session JSONL)
+- **Claude Code**: `~/.claude/projects` (Session JSONL), plus macOS Desktop metadata sidecars under
+  `~/Library/Application Support/Claude/claude-code-sessions` and
+  `~/Library/Application Support/Claude/local-agent-mode-sessions`
 - **Clawdbot**: `~/.clawdbot/sessions` (Session JSONL)
 - **Vibe (Mistral)**: `~/.vibe/logs/session/*/messages.jsonl` (Session JSONL)
 - **OpenCode**: `.opencode` directories (SQLite)
@@ -377,6 +379,11 @@ Ingests history from 20 local agents, normalizing them into a unified `Conversat
 - **Kimi Code**: `~/.kimi/sessions/*/*/wire.jsonl` (Session JSONL)
 - **Qwen Code**: `~/.qwen/tmp/*/chats/session-*.json` (Chat JSON)
 - **Factory (Droid)**: `~/.factory/sessions` (JSONL files organized by workspace slug)
+
+Claude Code Desktop sidecars preserve title, workspace, model, and session IDs,
+but not necessarily the full conversation body. If Claude Code has culled an old
+CLI JSONL body, cass can still index searchable sidecar metadata while reporting
+that the conversation body is unavailable.
 
 #### Connector Details
 
@@ -2933,8 +2940,8 @@ Update check state is stored in the data directory:
 
 | Dependency | Pinned source |
 |------------|-----------------|
-| `frankensqlite` / `fsqlite-types` | `0.1.4` (crates.io; #93 + #94 fixes) |
-| `franken-agent-detection` | `b62d8597` |
+| `frankensqlite` / `fsqlite-types` | `0.1.5` (crates.io; #95 fix) |
+| `franken-agent-detection` | `a4923d4` |
 | `asupersync` | `0.3.2` |
 | `frankensearch` | `2cad158f` |
 | `frankentui` | `5f78cfa0` |
