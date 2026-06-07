@@ -48,7 +48,7 @@ fn install_sh_source_fallback_preserves_baseline_feature_flags() {
         "baseline target selection must set ONNX-free source-build flags"
     );
     assert!(
-        script.contains("cargo build --release \"${SOURCE_CARGO_ARGS[@]}\""),
+        script.contains("cargo build --locked --release \"${SOURCE_CARGO_ARGS[@]}\""),
         "source fallback must pass baseline cargo flags through to cargo build"
     );
 }

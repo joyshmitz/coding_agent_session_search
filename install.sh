@@ -476,7 +476,7 @@ if [ "$FROM_SOURCE" -eq 1 ]; then
   if [ "${#SOURCE_CARGO_ARGS[@]}" -gt 0 ]; then
     info "Using baseline cargo flags for source build: ${SOURCE_CARGO_ARGS[*]}"
   fi
-  (cd "$TMP/src" && cargo build --release "${SOURCE_CARGO_ARGS[@]}")
+  (cd "$TMP/src" && cargo build --locked --release "${SOURCE_CARGO_ARGS[@]}")
   BIN="$TMP/src/target/release/$INSTALL_BASENAME"
   if [ ! -x "$BIN" ]; then
     BIN="$TMP/src/target/release/cass"

@@ -287,10 +287,26 @@ fn manifest_pin(manifest: &toml::Value, spec: &DependencySpec) -> ManifestPin {
         };
     };
 
-    if let Some(version) = value.as_str() {
+    if let Some(version) = value.as_str().map(str::trim) {
+        if spec.source_kind == "git" {
+            return ManifestPin {
+                status: "invalid-spec".to_string(),
+                ..ManifestPin::default()
+            };
+        }
+
         return ManifestPin {
-            status: "version-pinned".to_string(),
-            version: Some(version.to_string()),
+            status: if version.is_empty() {
+                "missing-version"
+            } else {
+                "version-pinned"
+            }
+            .to_string(),
+            version: if version.is_empty() {
+                None
+            } else {
+                Some(version.to_string())
+            },
             ..ManifestPin::default()
         };
     }
@@ -302,29 +318,12 @@ fn manifest_pin(manifest: &toml::Value, spec: &DependencySpec) -> ManifestPin {
         };
     };
 
-    let git = spec_table
-        .get("git")
-        .and_then(toml::Value::as_str)
-        .map(str::to_string);
-    let rev = spec_table
-        .get("rev")
-        .and_then(toml::Value::as_str)
-        .map(str::to_string);
-    let version = spec_table
-        .get("version")
-        .and_then(toml::Value::as_str)
-        .map(str::to_string);
-    let package = spec_table
-        .get("package")
-        .and_then(toml::Value::as_str)
-        .map(str::to_string);
+    let git = non_empty_toml_string(spec_table, "git");
+    let rev = non_empty_toml_string(spec_table, "rev");
+    let version = non_empty_toml_string(spec_table, "version");
+    let package = non_empty_toml_string(spec_table, "package");
     let status = if spec.source_kind == "git" {
-        match (&git, &rev) {
-            (Some(_), Some(_)) => "pinned",
-            (Some(_), None) => "missing-rev",
-            (None, Some(_)) => "missing-git",
-            (None, None) => "missing-git-rev",
-        }
+        git_pin_status(git.is_some(), rev.is_some())
     } else if version.is_some() {
         "version-pinned"
     } else {
@@ -338,6 +337,24 @@ fn manifest_pin(manifest: &toml::Value, spec: &DependencySpec) -> ManifestPin {
         version,
         package,
     }
+}
+
+fn git_pin_status(has_git: bool, has_rev: bool) -> &'static str {
+    match (has_git, has_rev) {
+        (true, true) => "pinned",
+        (true, false) => "missing-rev",
+        (false, true) => "missing-git",
+        (false, false) => "missing-git-rev",
+    }
+}
+
+fn non_empty_toml_string(table: &toml::Table, key: &str) -> Option<String> {
+    table
+        .get(key)
+        .and_then(toml::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn sibling_state(repo_path: &Path) -> (String, Option<String>, bool) {
@@ -395,19 +412,20 @@ fn fixture_observation(value: &Value, inherited_upstream_status: &str) -> Depend
     let upstream_status = nested_string_field(value, &[&["upstream", "status"]])
         .or_else(|| string_field_optional(value, &["upstream_status"]))
         .unwrap_or_else(|| inherited_upstream_status.to_string());
-    let manifest_status = string_field(
-        value,
-        &["manifest_status"],
-        if source_kind == "git" && pinned_rev.is_none() {
-            "missing-rev"
-        } else if source_kind == "registry" && version.is_none() {
-            "missing-version"
-        } else if source_kind == "registry" {
-            "version-pinned"
-        } else {
-            "pinned"
-        },
+    let inferred_manifest_status = inferred_fixture_manifest_status(
+        &source_kind,
+        git.as_deref(),
+        pinned_rev.as_deref(),
+        version.as_deref(),
     );
+    let supplied_manifest_status = string_field_optional(value, &["manifest_status"]);
+    let manifest_status = match supplied_manifest_status.as_deref() {
+        Some(status @ ("pinned" | "version-pinned")) if status != inferred_manifest_status => {
+            inferred_manifest_status.to_string()
+        }
+        Some(status) => status.to_string(),
+        None => inferred_manifest_status.to_string(),
+    };
     let package = string_field(value, &["package"], &manifest_key);
     let manifest_table = string_field(value, &["manifest_table"], "dependencies");
     let sibling_path = string_field_optional(value, &["sibling_path", "path"]);
@@ -446,6 +464,20 @@ fn fixture_observation(value: &Value, inherited_upstream_status: &str) -> Depend
         dirty,
         upstream_status,
         required_tests,
+    }
+}
+
+fn inferred_fixture_manifest_status(
+    source_kind: &str,
+    git: Option<&str>,
+    pinned_rev: Option<&str>,
+    version: Option<&str>,
+) -> &'static str {
+    match source_kind {
+        "git" => git_pin_status(git.is_some(), pinned_rev.is_some()),
+        "registry" if version.is_some() => "version-pinned",
+        "registry" => "missing-version",
+        _ => "invalid-spec",
     }
 }
 
@@ -700,13 +732,13 @@ fn revision_matches_pin(observation: &DependencyObservation) -> Option<bool> {
     if observation.source_kind != "git" {
         return None;
     }
-    let local_head = observation.local_head.as_deref()?;
-    let pinned_rev = observation.pinned_rev.as_deref()?;
-    Some(
-        local_head == pinned_rev
-            || local_head.starts_with(pinned_rev)
-            || pinned_rev.starts_with(local_head),
-    )
+    let local_head = observation.local_head.as_deref()?.trim();
+    let pinned_rev = observation.pinned_rev.as_deref()?.trim();
+    if local_head.is_empty() || pinned_rev.is_empty() {
+        return Some(false);
+    }
+
+    Some(local_head == pinned_rev || local_head.starts_with(pinned_rev))
 }
 
 fn recommendations(
@@ -767,7 +799,7 @@ fn string_field(value: &Value, keys: &[&str], fallback: &str) -> String {
 fn string_field_optional(value: &Value, keys: &[&str]) -> Option<String> {
     keys.iter()
         .find_map(|key| value.get(*key).and_then(Value::as_str))
-        .map(str::to_string)
+        .and_then(clean_string)
 }
 
 fn nested_string_field(value: &Value, paths: &[&[&str]]) -> Option<String> {
@@ -780,7 +812,16 @@ fn nested_string_field(value: &Value, paths: &[&[&str]]) -> Option<String> {
             }
             current.as_str()
         })
-        .map(str::to_string)
+        .and_then(clean_string)
+}
+
+fn clean_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 fn bool_field(value: &Value, keys: &[&str], fallback: bool) -> bool {
@@ -798,7 +839,11 @@ fn display_path(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEPENDENCY_SPECS, DependencySpec, manifest_pin, read_manifest};
+    use super::{
+        DEPENDENCY_SPECS, DependencyObservation, DependencySpec, classify, fixture_observation,
+        manifest_pin, read_manifest, revision_matches_pin,
+    };
+    use serde_json::json;
     use std::error::Error;
     use std::path::Path;
 
@@ -822,6 +867,29 @@ mod tests {
                 path.display()
             ))
         })
+    }
+
+    fn minimal_git_observation(
+        local_head: Option<&str>,
+        pinned_rev: Option<&str>,
+    ) -> DependencyObservation {
+        DependencyObservation {
+            name: "fixture".to_string(),
+            package: "fixture".to_string(),
+            manifest_table: "dependencies".to_string(),
+            manifest_key: "fixture".to_string(),
+            source_kind: "git".to_string(),
+            git: Some("https://example.invalid/fixture".to_string()),
+            version: None,
+            pinned_rev: pinned_rev.map(str::to_string),
+            manifest_status: "pinned".to_string(),
+            sibling_path: None,
+            sibling_status: "clean".to_string(),
+            local_head: local_head.map(str::to_string),
+            dirty: false,
+            upstream_status: "not_checked".to_string(),
+            required_tests: Vec::new(),
+        }
     }
 
     fn dependency_spec(name: &str) -> Result<&'static DependencySpec, Box<dyn Error>> {
@@ -866,7 +934,7 @@ mod tests {
             "frankensqlite package should match the dependency spec",
         )?;
         ensure(
-            frankensqlite.version.as_deref() == Some("0.1.5"),
+            frankensqlite.version.as_deref() == Some("=0.1.9"),
             "frankensqlite registry version pin should match Cargo.toml",
         )?;
 
@@ -879,8 +947,258 @@ mod tests {
             ),
         )?;
         ensure(
-            asupersync.version.as_deref() == Some("0.3.2"),
+            asupersync.version.as_deref() == Some("=0.3.2"),
             "asupersync version pin should match Cargo.toml",
+        )
+    }
+
+    #[test]
+    fn manifest_pin_treats_blank_pin_fields_as_missing() -> Result<(), Box<dyn Error>> {
+        let manifest = r#"
+            [dependencies]
+            fixture = { git = "https://example.invalid/fixture", rev = "" }
+            missing-git-fixture = { git = "   ", rev = "abc123" }
+            registry-fixture = { version = "   " }
+            string-fixture = ""
+        "#
+        .parse::<toml::Table>()
+        .map(toml::Value::Table)?;
+
+        let git_spec = DependencySpec {
+            name: "fixture",
+            package: "fixture",
+            manifest_table: "dependencies",
+            manifest_key: "fixture",
+            source_kind: "git",
+            repo_rel: "../fixture",
+            required_tests: &[],
+        };
+        let registry_spec = DependencySpec {
+            name: "registry-fixture",
+            package: "registry-fixture",
+            manifest_table: "dependencies",
+            manifest_key: "registry-fixture",
+            source_kind: "registry",
+            repo_rel: "../registry-fixture",
+            required_tests: &[],
+        };
+        let missing_git_spec = DependencySpec {
+            name: "missing-git-fixture",
+            package: "missing-git-fixture",
+            manifest_table: "dependencies",
+            manifest_key: "missing-git-fixture",
+            source_kind: "git",
+            repo_rel: "../missing-git-fixture",
+            required_tests: &[],
+        };
+        let string_spec = DependencySpec {
+            name: "string-fixture",
+            package: "string-fixture",
+            manifest_table: "dependencies",
+            manifest_key: "string-fixture",
+            source_kind: "registry",
+            repo_rel: "../string-fixture",
+            required_tests: &[],
+        };
+
+        let git_pin = manifest_pin(&manifest, &git_spec);
+        ensure(
+            git_pin.status == "missing-rev",
+            format!(
+                "blank git rev should be missing-rev, got {}",
+                git_pin.status
+            ),
+        )?;
+        let missing_git_pin = manifest_pin(&manifest, &missing_git_spec);
+        ensure(
+            missing_git_pin.status == "missing-git",
+            format!(
+                "blank git URL should be missing-git, got {}",
+                missing_git_pin.status
+            ),
+        )?;
+        let registry_pin = manifest_pin(&manifest, &registry_spec);
+        ensure(
+            registry_pin.status == "missing-version",
+            format!(
+                "blank registry version should be missing-version, got {}",
+                registry_pin.status
+            ),
+        )?;
+        let string_pin = manifest_pin(&manifest, &string_spec);
+        ensure(
+            string_pin.status == "missing-version",
+            format!(
+                "blank string dependency version should be missing-version, got {}",
+                string_pin.status
+            ),
+        )
+    }
+
+    #[test]
+    fn manifest_pin_rejects_bare_string_specs_for_git_dependencies() -> Result<(), Box<dyn Error>> {
+        let manifest = r#"
+            [dependencies]
+            git-fixture = "1.2.3"
+        "#
+        .parse::<toml::Table>()
+        .map(toml::Value::Table)?;
+        let git_spec = DependencySpec {
+            name: "git-fixture",
+            package: "git-fixture",
+            manifest_table: "dependencies",
+            manifest_key: "git-fixture",
+            source_kind: "git",
+            repo_rel: "../git-fixture",
+            required_tests: &[],
+        };
+
+        let pin = manifest_pin(&manifest, &git_spec);
+        ensure(
+            pin.status == "invalid-spec",
+            format!(
+                "git dependencies must use table specs with git+rev pins, got {}",
+                pin.status
+            ),
+        )
+    }
+
+    #[test]
+    fn fixture_observation_requires_git_url_for_git_pin() -> Result<(), Box<dyn Error>> {
+        let source = json!({
+            "name": "fixture",
+            "source_kind": "git",
+            "git": "   ",
+            "pinned_rev": "abc123",
+            "manifest_status": "pinned",
+            "sibling_status": "clean",
+            "local_head": "abc123456789"
+        });
+
+        let observation = fixture_observation(&source, "not_checked");
+
+        ensure(
+            observation.git.is_none(),
+            "blank fixture git URL should not be treated as a manifest git source",
+        )?;
+        ensure(
+            observation.manifest_status == "missing-git",
+            format!(
+                "blank fixture git URL should override stale pinned status, got {}",
+                observation.manifest_status
+            ),
+        )?;
+        ensure(
+            classify(&observation).kind == "manifest-pin-missing",
+            "missing fixture git URLs should block release readiness",
+        )
+    }
+
+    #[test]
+    fn fixture_observation_treats_blank_revision_as_missing_pin() -> Result<(), Box<dyn Error>> {
+        let source = json!({
+            "name": "fixture",
+            "source_kind": "git",
+            "git": "https://example.invalid/fixture",
+            "pinned_rev": "   ",
+            "sibling_status": "clean",
+            "local_head": "abc123456789"
+        });
+
+        let observation = fixture_observation(&source, "not_checked");
+        ensure(
+            observation.pinned_rev.is_none(),
+            "blank fixture pinned_rev should not be treated as a revision",
+        )?;
+        ensure(
+            observation.manifest_status == "missing-rev",
+            format!(
+                "blank fixture revisions should force missing-rev, got {}",
+                observation.manifest_status
+            ),
+        )?;
+        ensure(
+            classify(&observation).kind == "manifest-pin-missing",
+            "blank fixture revisions should block release readiness",
+        )
+    }
+
+    #[test]
+    fn fixture_observation_does_not_trust_stale_pinned_status() -> Result<(), Box<dyn Error>> {
+        let source = json!({
+            "name": "fixture",
+            "source_kind": "git",
+            "git": "https://example.invalid/fixture",
+            "pinned_rev": "   ",
+            "manifest_status": "pinned",
+            "sibling_status": "clean",
+            "local_head": "abc123456789"
+        });
+
+        let observation = fixture_observation(&source, "not_checked");
+
+        ensure(
+            observation.manifest_status == "missing-rev",
+            format!(
+                "blank fixture revisions should override stale pinned status, got {}",
+                observation.manifest_status
+            ),
+        )?;
+        ensure(
+            classify(&observation).kind == "manifest-pin-missing",
+            "stale fixture status must not make blank revisions release-ready",
+        )
+    }
+
+    #[test]
+    fn fixture_observation_does_not_trust_stale_version_pinned_status() -> Result<(), Box<dyn Error>>
+    {
+        let source = json!({
+            "name": "registry-fixture",
+            "source_kind": "registry",
+            "version": "   ",
+            "manifest_status": "version-pinned",
+            "sibling_status": "clean"
+        });
+
+        let observation = fixture_observation(&source, "not_checked");
+
+        ensure(
+            observation.manifest_status == "missing-version",
+            format!(
+                "blank fixture versions should override stale version-pinned status, got {}",
+                observation.manifest_status
+            ),
+        )?;
+        ensure(
+            classify(&observation).kind == "manifest-pin-missing",
+            "stale fixture status must not make blank registry versions release-ready",
+        )
+    }
+
+    #[test]
+    fn revision_match_requires_local_head_to_extend_pinned_rev() -> Result<(), Box<dyn Error>> {
+        ensure(
+            revision_matches_pin(&minimal_git_observation(
+                Some("abc123456789"),
+                Some("abc123"),
+            )) == Some(true),
+            "a checked-out full HEAD should match a shorter pinned rev prefix",
+        )?;
+        ensure(
+            revision_matches_pin(&minimal_git_observation(
+                Some("abc123"),
+                Some("abc123456789"),
+            )) == Some(false),
+            "a truncated local HEAD must not satisfy a longer pinned rev",
+        )?;
+        ensure(
+            revision_matches_pin(&minimal_git_observation(Some("abc123"), Some(""))) == Some(false),
+            "empty pinned revs are invalid pins, not wildcard matches",
+        )?;
+        ensure(
+            revision_matches_pin(&minimal_git_observation(Some(""), Some("abc123"))) == Some(false),
+            "empty local HEADs cannot prove a pin match",
         )
     }
 }
