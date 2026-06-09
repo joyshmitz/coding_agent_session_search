@@ -9,6 +9,7 @@ pub mod crash_replay;
 pub mod daemon;
 pub mod context_pack;
 pub mod dependency_drift;
+pub mod dependency_pin_correlation;
 pub mod doctor;
 pub(crate) mod doctor_chokepoint;
 pub(crate) mod doctor_robot_docs;
