@@ -23,6 +23,7 @@
 
 pub mod ann_index;
 pub mod asset_state;
+pub(crate) mod bounded_discovery;
 pub mod canonicalize;
 pub(crate) mod command_envelope;
 pub mod daemon_client;
