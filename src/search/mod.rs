@@ -24,6 +24,7 @@
 pub mod ann_index;
 pub mod asset_state;
 pub mod canonicalize;
+pub(crate) mod command_envelope;
 pub mod daemon_client;
 pub(crate) mod drill_down;
 pub(crate) mod e2e_scenarios;
