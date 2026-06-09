@@ -79469,47 +79469,67 @@ fn run_view(
     let allow_direct_file = followup_source_is_local(source_id) || source_id.is_none();
 
     let prefer_direct_file = prefers_direct_view_file(path, source_id);
+    let source_exists = path.exists();
 
-    let lines: Vec<String> = if prefer_direct_file {
+    // Archive-only resolution (uojcg.2.3): when the source file is stale, moved,
+    // vanished, or belongs to a remote/mapped workspace, fall back to the
+    // canonical DB/archive row rather than failing. File reads are a fast path,
+    // not the only path. `archive_used` records whether the content came from the
+    // archive so the output can advertise source_exists / archive_only.
+    let (lines, archive_used): (Vec<String>, bool) = if prefer_direct_file {
         match read_followup_file_lines(path) {
-            Ok(lines) => lines,
+            Ok(lines) => (lines, false),
             Err(err) => {
                 if let Some(view) = indexed_view.as_ref() {
-                    serialize_indexed_view_lines(view)?
+                    (serialize_indexed_view_lines(view)?, true)
                 } else {
                     return Err(err);
                 }
             }
         }
     } else if let Some(view) = indexed_view.as_ref() {
-        serialize_indexed_view_lines(view)?
-    } else if allow_direct_file && path.exists() {
-        read_followup_file_lines(path)?
+        (serialize_indexed_view_lines(view)?, true)
+    } else if allow_direct_file && source_exists {
+        (read_followup_file_lines(path)?, false)
     } else {
-        return Err(CliError {
-            code: 3,
-            kind: CliErrorKind::FileNotFound.kind_str(),
-            message: match source_id {
-                Some(source_id) => format!(
-                    "No indexed session found for source '{}' at {}",
-                    source_id,
+        // No archive row was found. Distinguish a missing ARCHIVE ROW from a
+        // missing SOURCE FILE so an agent knows whether to reindex vs. fix the
+        // path (uojcg.2.3).
+        let (kind, message, hint) = match source_id {
+            Some(source_id) => (
+                CliErrorKind::IndexedSessionRequired.kind_str(),
+                format!(
+                    "No archived row for source '{source_id}' at {} (archive row missing)",
                     path.display()
                 ),
-                None => format!("File not found: {}", path.display()),
-            },
-            hint: Some(match source_id {
-                Some(_) => {
-                    "Use the exact source_id from search output or omit --source to prefer the local file/path."
-                        .to_string()
-                }
-                None => {
-                    "Path may be virtual (e.g. Cursor composer). Re-run index, then use the exact source_path from search output."
-                        .to_string()
-                }
-            }),
+                "Use the exact source_id from search output, or re-run index to archive this session."
+                    .to_string(),
+            ),
+            None if !source_exists => (
+                CliErrorKind::FileNotFound.kind_str(),
+                format!(
+                    "Source file missing and no archived row found: {}",
+                    path.display()
+                ),
+                "The source file moved or was pruned and is not archived; re-run index, then use the source_path from search output."
+                    .to_string(),
+            ),
+            None => (
+                CliErrorKind::FileNotFound.kind_str(),
+                format!("File not found: {}", path.display()),
+                "Path may be virtual (e.g. Cursor composer). Re-run index, then use the exact source_path from search output."
+                    .to_string(),
+            ),
+        };
+        return Err(CliError {
+            code: 3,
+            kind,
+            message,
+            hint: Some(hint),
             retryable: false,
         });
     };
+    let archive_only = archive_used && !source_exists;
 
     if lines.is_empty() {
         return Err(CliError {
@@ -79580,6 +79600,11 @@ fn run_view(
             "context": context,
             "lines": content_lines,
             "total_lines": lines.len(),
+            // Provenance so agents can tell a live-file read from an archive-only
+            // resolution (uojcg.2.3): archive_only=true means the source file is
+            // gone/stale and this content came from the canonical DB/archive row.
+            "source_exists": source_exists,
+            "archive_only": archive_only,
         });
         return output_structured_value(payload, fmt);
     }
