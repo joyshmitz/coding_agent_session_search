@@ -42,6 +42,7 @@ pub mod pack_planner;
 pub mod policy;
 pub(crate) mod progress_contract;
 pub(crate) mod proof_log;
+pub(crate) mod quarantine_status;
 pub mod query;
 pub(crate) mod readiness;
 pub(crate) mod readiness_fixtures;
