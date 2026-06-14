@@ -60,6 +60,7 @@ pub(crate) mod semantic_publish_safety;
 pub(crate) mod semantic_readiness;
 pub(crate) mod source_provenance;
 pub(crate) mod storage_integrity;
+pub(crate) mod storage_salvage;
 pub mod tantivy;
 pub mod two_tier_search;
 pub mod vector_index;
