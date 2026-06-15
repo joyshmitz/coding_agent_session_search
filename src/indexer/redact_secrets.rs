@@ -241,7 +241,20 @@ impl MemoizingRedactor {
     }
 
     pub(crate) fn new() -> Self {
-        Self::with_capacity(Self::DEFAULT_CAPACITY)
+        Self::with_capacity(Self::configured_capacity())
+    }
+
+    /// Resolve the memo-cache capacity, honoring the optional
+    /// `CASS_REDACT_MEMO_CAPACITY` override (#291). On a very large,
+    /// subagent-heavy corpus the 4096 default thrashes ~one eviction per
+    /// insert; operators can raise the ceiling to cut that churn. A `0`,
+    /// empty, or unparseable value falls back to the default.
+    pub(crate) fn configured_capacity() -> usize {
+        dotenvy::var("CASS_REDACT_MEMO_CAPACITY")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(Self::DEFAULT_CAPACITY)
     }
 
     pub(crate) fn algorithm_fingerprint(&self) -> &str {
@@ -348,9 +361,10 @@ impl MemoizingRedactor {
     fn trace_audit(audit: &crate::indexer::memoization::MemoCacheAuditRecord) {
         // Severity tiers match operator expectations: hits are noise
         // (trace), misses + inserts are routine (debug), evictions
-        // are noteworthy (info), invalidations and quarantines are
-        // alarming enough to warn so they show up in default-level
-        // logs without dredging.
+        // are routine churn on large corpora (debug — #291: at info they
+        // pegged a core with 30k+ lines in minutes), invalidations and
+        // quarantines are alarming enough to warn so they show up in
+        // default-level logs without dredging.
         use crate::indexer::memoization::MemoCacheEvent;
         match audit.event {
             MemoCacheEvent::Hit => tracing::trace!(
@@ -371,7 +385,7 @@ impl MemoizingRedactor {
                 live_entries = audit.stats.live_entries,
                 "redact memo insert"
             ),
-            MemoCacheEvent::Evict { ref reason } => tracing::info!(
+            MemoCacheEvent::Evict { ref reason } => tracing::debug!(
                 target: "cass::redact::memo",
                 evict_reason = ?reason,
                 live_entries = audit.stats.live_entries,

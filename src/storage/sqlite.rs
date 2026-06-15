@@ -13249,7 +13249,11 @@ fn franken_collect_batched_existing_new_messages<'a>(
 }
 
 /// Batch insert FTS5 entries within a frankensqlite transaction.
-fn franken_batch_insert_fts(tx: &FrankenTransaction<'_>, entries: &[FtsEntry]) -> Result<usize> {
+fn franken_batch_insert_fts(
+    storage: &FrankenStorage,
+    tx: &FrankenTransaction<'_>,
+    entries: &[FtsEntry],
+) -> Result<usize> {
     if entries.is_empty() {
         return Ok(0);
     }
@@ -13296,11 +13300,25 @@ fn franken_batch_insert_fts(tx: &FrankenTransaction<'_>, entries: &[FtsEntry]) -
                 inserted += chunk.len();
             }
             Err(err) => {
-                tracing::warn!(
-                    error = %err,
-                    chunk_docs = chunk.len(),
-                    "frankensqlite FTS batch insert failed; skipping db-resident FTS maintenance because Tantivy is authoritative"
-                );
+                if err.to_string().contains("no such table") {
+                    // Fresh DB / Tantivy-authoritative path (#295): the FTS5
+                    // shadow tables are not materialized yet. db-resident FTS
+                    // is best-effort here, so stop probing/inserting for the
+                    // rest of this process instead of emitting a warning on
+                    // every batch (which pegged a core on large corpora).
+                    storage.set_fts_messages_present_cache(false);
+                    tracing::debug!(
+                        error = %err,
+                        chunk_docs = chunk.len(),
+                        "fts_messages not materialized yet; skipping db-resident FTS maintenance (Tantivy is authoritative)"
+                    );
+                } else {
+                    tracing::warn!(
+                        error = %err,
+                        chunk_docs = chunk.len(),
+                        "frankensqlite FTS batch insert failed; skipping db-resident FTS maintenance because Tantivy is authoritative"
+                    );
+                }
                 return Ok(inserted);
             }
         }
@@ -15797,7 +15815,7 @@ fn flush_pending_fts_entries(
     }
 
     if storage.fts_messages_present_cached(tx) {
-        *inserted_total += franken_batch_insert_fts(tx, entries)?;
+        *inserted_total += franken_batch_insert_fts(storage, tx, entries)?;
     }
     entries.clear();
     *pending_chars = 0;

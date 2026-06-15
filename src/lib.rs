@@ -81502,8 +81502,23 @@ impl IndexStallWatchdog {
         }
 
         let abort_threshold = self.abort_threshold?;
+        // The post-publish / post-rebuild finalize runs under the
+        // "preparing" phase (phase 0) with `current == total`. Issue #297:
+        // a wedge there (workers parked after the lexical publish, never
+        // woken to checkpoint/clean up) used to keep the process alive
+        // indefinitely, because the abort was historically gated on
+        // `phase == 2` only. Extend the abort to fire in any phase once the
+        // work is nominally complete (`current >= total > 0`) AND the
+        // rebuild pipeline is fully quiescent — so a legitimately
+        // slow-but-active sort/rebuild (#294) is never killed. The
+        // `abort_threshold` (default 300 s of zero forward progress) remains
+        // the outer safety margin on top of that.
+        let total = index_progress.total.load(std::sync::atomic::Ordering::Relaxed);
+        let finalize_wedge =
+            total > 0 && current >= total && index_progress.rebuild_pipeline_is_quiescent();
+        let abort_eligible = phase_code == 2 || finalize_wedge;
         if self.abort_policy != IndexStallAbortPolicy::AbortPhaseTwo
-            || phase_code != 2
+            || !abort_eligible
             || self.stall_abort_reported_for_phase == Some(phase_code)
             || stall_elapsed < abort_threshold
         {
@@ -81772,6 +81787,102 @@ mod stall_diagnostics_tests {
         assert!(
             repeat.is_none(),
             "watchdog must not spam repeated abort events for the same stalled phase",
+        );
+        Ok(())
+    }
+
+    /// Regression for #297: the post-publish / post-rebuild finalize runs
+    /// under the "preparing" phase (phase 0) with `current == total`. A
+    /// wedge there used to hang forever because the abort was gated on
+    /// `phase == 2`. The abort now fires for a quiescent finalize wedge in
+    /// any phase.
+    #[test]
+    fn watchdog_aborts_on_quiescent_finalize_wedge() -> anyhow::Result<()> {
+        use super::{IndexStallAbortPolicy, IndexStallWatchdog};
+        use crate::indexer::IndexingProgress;
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let tmp = TempDir::new()?;
+        let mut watchdog = IndexStallWatchdog::with_abort_policy(
+            tmp.path().to_path_buf(),
+            Duration::from_millis(50),
+            IndexStallAbortPolicy::AbortPhaseTwo,
+        );
+        watchdog.threshold = Some(Duration::from_millis(1));
+        watchdog.abort_threshold = Some(Duration::from_millis(2));
+        watchdog.last_phase = 0;
+        watchdog.last_current = 100;
+        watchdog.last_progress_advance = std::time::Instant::now() - Duration::from_millis(100);
+
+        let progress = Arc::new(IndexingProgress::default());
+        // Post-publish finalize: phase back to "preparing" (0), all work
+        // accounted for (current == total), pipeline fully idle.
+        progress.phase.store(0, Ordering::Relaxed);
+        progress.total.store(100, Ordering::Relaxed);
+        progress.current.store(100, Ordering::Relaxed);
+        assert!(progress.rebuild_pipeline_is_quiescent());
+
+        let report = watchdog
+            .observe(&progress, 100)
+            .ok_or_else(|| anyhow::anyhow!("finalize stall did not report"))?;
+        assert_eq!(report["event"], serde_json::json!("stall_detected"));
+        assert_ne!(report["abort_process"], serde_json::json!(true));
+
+        let abort = watchdog.observe(&progress, 200).ok_or_else(|| {
+            anyhow::anyhow!("quiescent finalize wedge did not request abort (#297)")
+        })?;
+        assert_eq!(abort["event"], serde_json::json!("stall_aborting"));
+        assert_eq!(abort["abort_process"], serde_json::json!(true));
+        assert_eq!(abort["exit_code"], serde_json::json!(70));
+        Ok(())
+    }
+
+    /// A legitimately slow but *active* rebuild (#294) must never be
+    /// aborted outside phase 2, even when `current == total` and the stall
+    /// threshold has elapsed: as long as the pipeline reports in-flight
+    /// work, the watchdog only reports, never aborts.
+    #[test]
+    fn watchdog_does_not_abort_active_rebuild_outside_phase_two() -> anyhow::Result<()> {
+        use super::{IndexStallAbortPolicy, IndexStallWatchdog};
+        use crate::indexer::IndexingProgress;
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let tmp = TempDir::new()?;
+        let mut watchdog = IndexStallWatchdog::with_abort_policy(
+            tmp.path().to_path_buf(),
+            Duration::from_millis(50),
+            IndexStallAbortPolicy::AbortPhaseTwo,
+        );
+        watchdog.threshold = Some(Duration::from_millis(1));
+        watchdog.abort_threshold = Some(Duration::from_millis(2));
+        watchdog.last_phase = 0;
+        watchdog.last_current = 100;
+        watchdog.last_progress_advance = std::time::Instant::now() - Duration::from_millis(100);
+
+        let progress = Arc::new(IndexingProgress::default());
+        progress.phase.store(0, Ordering::Relaxed);
+        progress.total.store(100, Ordering::Relaxed);
+        progress.current.store(100, Ordering::Relaxed);
+        // Still one staged shard build in flight: the rebuild is slow, not
+        // wedged.
+        progress
+            .rebuild_pipeline_staged_shard_build_active_jobs
+            .store(1, Ordering::Relaxed);
+        assert!(!progress.rebuild_pipeline_is_quiescent());
+
+        let report = watchdog
+            .observe(&progress, 100)
+            .ok_or_else(|| anyhow::anyhow!("finalize stall did not report"))?;
+        assert_eq!(report["event"], serde_json::json!("stall_detected"));
+
+        let again = watchdog.observe(&progress, 200);
+        assert!(
+            again.is_none(),
+            "an active (non-quiescent) rebuild must not be aborted outside phase 2 (#294)",
         );
         Ok(())
     }

@@ -1002,6 +1002,72 @@ impl IndexingProgress {
         Self::phase_label_for(self.phase.load(Ordering::Relaxed))
     }
 
+    /// True when the authoritative lexical rebuild pipeline holds no
+    /// in-flight, pending, buffered, or parked work — i.e. nothing is left
+    /// to do and nothing is actively trying to make progress. The stall
+    /// watchdog uses this to distinguish a genuinely wedged post-publish
+    /// finalize (#297: everything idle, yet the process never exits) from a
+    /// legitimately slow-but-active sort/rebuild (#294), which must never be
+    /// aborted.
+    pub fn rebuild_pipeline_is_quiescent(&self) -> bool {
+        let no_active_work = self.rebuild_pipeline_queue_depth.load(Ordering::Relaxed) == 0
+            && self
+                .rebuild_pipeline_inflight_message_bytes
+                .load(Ordering::Relaxed)
+                == 0
+            && self
+                .rebuild_pipeline_pending_batch_conversations
+                .load(Ordering::Relaxed)
+                == 0
+            && self
+                .rebuild_pipeline_pending_batch_message_bytes
+                .load(Ordering::Relaxed)
+                == 0
+            && self
+                .rebuild_pipeline_active_page_prep_jobs
+                .load(Ordering::Relaxed)
+                == 0
+            && self
+                .rebuild_pipeline_ordered_buffered_pages
+                .load(Ordering::Relaxed)
+                == 0
+            && self
+                .rebuild_pipeline_producer_budget_active_waiters
+                .load(Ordering::Relaxed)
+                == 0
+            && self
+                .rebuild_pipeline_staged_merge_active_jobs
+                .load(Ordering::Relaxed)
+                == 0
+            && self
+                .rebuild_pipeline_staged_merge_ready_artifacts
+                .load(Ordering::Relaxed)
+                == 0
+            && self
+                .rebuild_pipeline_staged_merge_ready_groups
+                .load(Ordering::Relaxed)
+                == 0
+            && self
+                .rebuild_pipeline_staged_shard_build_active_jobs
+                .load(Ordering::Relaxed)
+                == 0
+            && self
+                .rebuild_pipeline_staged_shard_build_pending_jobs
+                .load(Ordering::Relaxed)
+                == 0;
+        if !no_active_work {
+            return false;
+        }
+        // An empty producer state means no rebuild is active; "idle" means
+        // the producer parked with nothing queued. Any other park site
+        // (listing_db / waiting_result / waiting_turn / waiting_budget /
+        // handoff_send) means it is still trying to make progress.
+        self.rebuild_pipeline_producer_state
+            .lock()
+            .map(|state| state.is_empty() || state.as_str() == "idle")
+            .unwrap_or(false)
+    }
+
     /// Capture a JSON snapshot of the current progress state, suitable for
     /// NDJSON event streaming. `elapsed_ms` is the wall-clock elapsed since
     /// the index command started (caller's responsibility to track).
