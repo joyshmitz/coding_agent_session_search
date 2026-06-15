@@ -25,6 +25,7 @@ pub mod fleet_archive_coverage;
 pub mod fleet_doctor_schema;
 pub mod fleet_platform_compat;
 pub mod fleet_probe;
+pub mod fleet_upgrade_rehearsal;
 pub mod fleet_version_skew;
 pub mod ftui_harness;
 pub mod html_export;
