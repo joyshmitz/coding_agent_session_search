@@ -3,6 +3,7 @@
 pub mod analytics;
 pub mod bakeoff;
 pub mod bookmarks;
+pub mod connector_ingest_diagnostics;
 pub mod connectors;
 pub mod context_pack;
 pub mod crash_replay;
