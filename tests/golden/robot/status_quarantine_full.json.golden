@@ -830,6 +830,20 @@
     "summary": "no evidence signals pointed at any root-cause family",
     "recommended_next_probe": "cass diag --json && cass doctor check --json"
   },
+  "storage_integrity": {
+    "storage_state": "ok",
+    "source_of_truth_risk": "none",
+    "archive_readability": "not_checked",
+    "checks_attempted": [
+      {
+        "name": "db_open",
+        "elapsed_ms": "[ELAPSED_MS]",
+        "timed_out": false,
+        "skipped_reason": "database not initialized",
+        "read_only": true
+      }
+    ]
+  },
   "recommended_action": "Run 'cass index --full' once to discover local sessions and build the initial archive.",
   "recommended_commands": [
     {

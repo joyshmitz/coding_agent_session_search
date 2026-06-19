@@ -16752,6 +16752,57 @@ fn state_meta_json_for_status(
     )
 }
 
+/// Project the `.14.1` storage-integrity block onto a lightweight readiness
+/// surface (`cass status --json`, `cass search --robot-meta`) from the
+/// `state_meta` JSON it already built plus a cheap `db_path.exists()` check, so
+/// every truth surface speaks the same `StorageState` vocabulary the doctor
+/// does (bead qfswx, follow-on to vl1cj's doctor wiring). Returns the report as
+/// a JSON value (`null` only if serialization somehow fails).
+///
+/// Derivable here WITHOUT the deep PRAGMA integrity probe the doctor owns:
+/// `ok` / `openread_failed` / `derived_only_drift` / `unknown_deferred`. A DB
+/// file that exists but did not open is treated as an openread fault regardless
+/// of the open error's retry hint — over-coarsening a transient busy lock to
+/// the same high-risk state is the conservative direction. Refining
+/// busy/locked, schema-drift, legacy-interop and WAL-sidecar into their precise
+/// states needs dedicated probes (the part-2 follow-on of qfswx).
+fn storage_integrity_value_from_state(
+    db_path: &Path,
+    state: &serde_json::Value,
+    not_initialized: bool,
+) -> serde_json::Value {
+    use crate::search::storage_integrity::{
+        DoctorStorageSignals, build_readiness_storage_integrity,
+    };
+    let db_file_present = db_path.exists();
+    let db_opened = state
+        .pointer("/database/opened")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let open_skipped = state
+        .pointer("/database/open_skipped")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let lexical_index_drifted = state
+        .pointer("/index/empty_with_messages")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let signals = DoctorStorageSignals {
+        db_file_present,
+        not_initialized,
+        // A present-but-unopened archive is an openread fault. status/search
+        // open the DB for real (skip_db_open=false), so only claim the fault
+        // when the open was attempted (never deliberately elided).
+        db_open_failed: db_file_present && !db_opened && !open_skipped,
+        probe_timed_out: false,
+        integrity_failed: false,
+        integrity_unverified: false,
+        lexical_index_drifted,
+    };
+    serde_json::to_value(build_readiness_storage_integrity(signals))
+        .unwrap_or(serde_json::Value::Null)
+}
+
 /// `coding_agent_session_search-d0rmo`: variant of `state_meta_json`
 /// that lets the caller force-skip the COUNT(*) queries on the
 /// canonical DB. Pre-fix the size-based heuristic (≤256 MB → run
@@ -22044,6 +22095,18 @@ fn run_cli_search(
         None
     };
     let index_freshness = state_meta.as_ref().and_then(state_index_freshness);
+    // qfswx: project the `.14.1` storage-integrity verdict for --robot-meta
+    // (Some only when state_meta is, i.e. with --robot-meta) so search agrees
+    // with doctor/status on the canonical StorageState vocabulary. Computed
+    // before state_meta is consumed into state_meta_with_warning below.
+    let storage_integrity_meta = state_meta.as_ref().map(|state| {
+        let not_initialized = cass_not_initialized(
+            db_path.exists(),
+            cass_lexical_index_initialized(&data_dir),
+            false,
+        );
+        storage_integrity_value_from_state(&db_path, state, not_initialized)
+    });
     // [coding_agent_session_search #301] A PARTIAL (aborted/interrupted)
     // index is a stronger, distinct signal than age-staleness: search
     // results silently omit conversations indexed after the abort. Prefer
@@ -22146,6 +22209,7 @@ fn run_cli_search(
             state_meta_with_warning,
             search_completeness,
             index_freshness,
+            storage_integrity_meta,
             warning,
             &aggregations,
             total_matches,
@@ -24093,6 +24157,10 @@ fn output_robot_results(
     // complete-coverage case stays byte-for-byte unchanged).
     search_completeness: Option<serde_json::Value>,
     index_freshness: Option<serde_json::Value>,
+    // qfswx: `.14.1` storage-integrity block, present only with --robot-meta
+    // (Some mirrors state_meta), so search agrees with doctor/status on the
+    // canonical StorageState vocabulary.
+    storage_integrity: Option<serde_json::Value>,
     warning: Option<String>,
     aggregations: &Aggregations,
     total_matches: usize,
@@ -24650,6 +24718,13 @@ fn output_robot_results(
                 {
                     m.insert("search_completeness".to_string(), sc.clone());
                 }
+                // qfswx: surface the storage-integrity verdict in --robot-meta so
+                // search agrees with doctor/status on the canonical StorageState.
+                if let Some(si) = storage_integrity.as_ref()
+                    && let serde_json::Value::Object(ref mut m) = meta
+                {
+                    m.insert("storage_integrity".to_string(), si.clone());
+                }
                 // Add timeout info to _meta if timeout was configured
                 if let Some(timeout) = timeout_ms
                     && let serde_json::Value::Object(ref mut m) = meta
@@ -24779,6 +24854,13 @@ fn output_robot_results(
                     && let Some(serde_json::Value::Object(m)) = outer.get_mut("_meta")
                 {
                     m.insert("search_completeness".to_string(), sc.clone());
+                }
+                // qfswx: surface the storage-integrity verdict in --robot-meta so
+                // search agrees with doctor/status on the canonical StorageState.
+                if let Some(si) = storage_integrity.as_ref()
+                    && let serde_json::Value::Object(ref mut m) = meta
+                {
+                    m.insert("storage_integrity".to_string(), si.clone());
                 }
                 // Add suggestions to meta line
                 if !result.suggestions.is_empty()
@@ -24947,6 +25029,13 @@ fn output_robot_results(
                 {
                     m.insert("search_completeness".to_string(), sc.clone());
                 }
+                // qfswx: surface the storage-integrity verdict in --robot-meta so
+                // search agrees with doctor/status on the canonical StorageState.
+                if let Some(si) = storage_integrity.as_ref()
+                    && let serde_json::Value::Object(ref mut m) = meta
+                {
+                    m.insert("storage_integrity".to_string(), si.clone());
+                }
                 // Add timeout info to _meta if timeout was configured
                 if let Some(timeout) = timeout_ms
                     && let serde_json::Value::Object(ref mut m) = meta
@@ -25073,6 +25162,13 @@ fn output_robot_results(
                     && let serde_json::Value::Object(ref mut m) = meta
                 {
                     m.insert("search_completeness".to_string(), sc.clone());
+                }
+                // qfswx: surface the storage-integrity verdict in --robot-meta so
+                // search agrees with doctor/status on the canonical StorageState.
+                if let Some(si) = storage_integrity.as_ref()
+                    && let serde_json::Value::Object(ref mut m) = meta
+                {
+                    m.insert("storage_integrity".to_string(), si.clone());
                 }
                 if let Some(timeout) = timeout_ms
                     && let serde_json::Value::Object(ref mut m) = meta
@@ -67651,6 +67747,11 @@ fn run_status(
                 ),
             )
             .unwrap_or(serde_json::Value::Null),
+            // qfswx: project the `.14.1` storage-integrity vocabulary doctor
+            // emits onto status too, so every truth surface agrees. Probe-free:
+            // derives ok / openread_failed / derived_only_drift /
+            // unknown_deferred from the db-open + index-drift signals above.
+            "storage_integrity": storage_integrity_value_from_state(&db_path, &state, not_initialized),
             "recommended_action": recommended_action,
             "recommended_commands": recommended_commands,
             "budget": serde_json::json!({
@@ -76769,12 +76870,14 @@ fn response_schema_opaque_object() -> serde_json::Value {
     })
 }
 
-/// Schema for the `.14.1` storage-integrity block projected by
-/// `cass doctor --check --json` (bead vl1cj): the canonical `StorageState` /
-/// `SourceOfTruthRisk` / `ArchiveReadability` vocabulary plus the read-only
-/// checks attempted. Built in its own `json!` so the giant `doctor_schema`
-/// literal does not deepen past the macro recursion limit.
-fn response_schema_doctor_storage_integrity() -> serde_json::Value {
+/// Schema for the `.14.1` storage-integrity block projected by every truth
+/// surface that speaks the canonical storage vocabulary: `cass doctor --check
+/// --json` (bead vl1cj), `cass status --json`, and `cass search --robot-meta`
+/// (bead qfswx). Describes the `StorageState` / `SourceOfTruthRisk` /
+/// `ArchiveReadability` vocabulary plus the read-only checks attempted. Built
+/// in its own `json!` so the giant `doctor_schema` literal does not deepen past
+/// the macro recursion limit.
+fn response_schema_storage_integrity() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
         "description": "Storage-integrity taxonomy (.14.1): canonical archive state derived from the read-only db-open / integrity / fts / index signals.",
@@ -79299,6 +79402,9 @@ fn response_schema_search_meta() -> serde_json::Value {
         ("state", response_schema_state_meta()),
         ("search_completeness", response_schema_search_completeness()),
         ("index_freshness", response_schema_index_freshness()),
+        // qfswx: same storage-integrity vocabulary doctor/status project,
+        // present in --robot-meta so every truth surface agrees.
+        ("storage_integrity", response_schema_storage_integrity()),
         (
             "timeout_ms",
             serde_json::json!({ "type": ["integer", "null"] }),
@@ -79637,6 +79743,7 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
                 "quarantine": response_schema_opaque_object(),
                 "search_completeness": response_schema_search_completeness(),
                 "root_cause": response_schema_root_cause_attribution(),
+                "storage_integrity": response_schema_storage_integrity(),
                 "_meta": {
                     "type": "object",
                     "properties": {
@@ -80444,7 +80551,7 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
     // under the serde_json recursion limit.
     doctor_properties.insert(
         "storage_integrity".to_string(),
-        response_schema_doctor_storage_integrity(),
+        response_schema_storage_integrity(),
     );
     schemas.insert("doctor".to_string(), doctor_schema);
 

@@ -307,6 +307,43 @@ pub(crate) fn build_doctor_storage_integrity(
     StorageIntegrityReport::derive(state, readability, checks_attempted)
 }
 
+/// Build the storage-integrity report a *lightweight readiness surface* —
+/// `cass status --json` and `cass search --robot-meta` — projects from the
+/// db-open + index-drift signals it already gathered while serving the request
+/// (bead `…-qfswx`, follow-on to `vl1cj`'s doctor wiring).
+///
+/// Unlike [`build_doctor_storage_integrity`], these surfaces do NOT run the
+/// deep PRAGMA integrity probe the doctor owns, so the recorded checks honestly
+/// say only `db_open` ran (never `archive_integrity`), and the classifier can
+/// reach `ok` / `openread_failed` / `derived_only_drift` / `unknown_deferred`
+/// — but never `integrity_failed`, which requires that probe. Both surfaces
+/// call this one function and feed it the same [`DoctorStorageSignals`] shape,
+/// so they project the SAME [`StorageState`] vocabulary by construction (the
+/// "all truth surfaces agree" invariant). The `source_of_truth_risk` stays
+/// derived from the state, never hand-set.
+pub(crate) fn build_readiness_storage_integrity(
+    signals: DoctorStorageSignals,
+) -> StorageIntegrityReport {
+    let mut checks: Vec<StorageCheck> = Vec::new();
+    if signals.db_file_present {
+        // The readiness surface opened (or attempted to open) the canonical DB
+        // while serving the request; that open is the only check it ran — it
+        // never runs the deep integrity PRAGMA the doctor owns. Recorded with
+        // `elapsed_ms = 0` because the open was timed inside the shared
+        // state-meta probe, not separately here.
+        checks.push(StorageCheck::ran("db_open", 0));
+    } else {
+        let reason = if signals.not_initialized {
+            "database not initialized"
+        } else {
+            "no archive present to probe"
+        };
+        checks.push(StorageCheck::skipped("db_open", reason));
+    }
+    let (state, readability) = signals.classify();
+    StorageIntegrityReport::derive(state, readability, checks)
+}
+
 /// Render an enum's snake_case wire label for human summaries (shared
 /// vocabulary). Falls back to `unknown` if serialization is somehow not a
 /// bare string (never expected for these unit enums).
@@ -657,6 +694,89 @@ mod tests {
         );
         assert_eq!(report.source_of_truth_risk, SourceOfTruthRisk::High);
         assert!(report.all_checks_read_only());
+    }
+
+    #[test]
+    fn readiness_builder_records_db_open_not_archive_integrity() {
+        // A healthy open projects `ok`, and the ONLY recorded check is
+        // `db_open` — never `archive_integrity`, which the lightweight
+        // status/search surfaces do not run. The absent integrity check is the
+        // honest provenance that keeps these surfaces from over-claiming.
+        let ok = build_readiness_storage_integrity(DoctorStorageSignals {
+            db_file_present: true,
+            ..Default::default()
+        });
+        assert_eq!(ok.storage_state, StorageState::Ok);
+        assert_eq!(ok.archive_readability, ArchiveReadability::Readable);
+        assert_eq!(ok.checks_attempted.len(), 1);
+        assert_eq!(ok.checks_attempted[0].name, "db_open");
+        assert!(ok.checks_attempted[0].read_only);
+        assert!(
+            ok.checks_attempted
+                .iter()
+                .all(|c| c.name != "archive_integrity"),
+            "readiness surfaces never claim a deep integrity probe ran"
+        );
+    }
+
+    #[test]
+    fn readiness_builder_skips_open_when_no_archive_present() {
+        // No DB file but never initialized → vacuously ok, the db_open check is
+        // recorded as skipped with the initialization reason.
+        let fresh = build_readiness_storage_integrity(DoctorStorageSignals {
+            db_file_present: false,
+            not_initialized: true,
+            ..Default::default()
+        });
+        assert_eq!(fresh.storage_state, StorageState::Ok);
+        assert_eq!(fresh.archive_readability, ArchiveReadability::NotChecked);
+        assert_eq!(fresh.checks_attempted[0].name, "db_open");
+        assert!(fresh.checks_attempted[0].skipped_reason.is_some());
+    }
+
+    #[test]
+    fn readiness_builder_agrees_with_doctor_classification_on_shared_signals() {
+        // For every signal BOTH surfaces can observe (clean open, open failure,
+        // derived-only drift, missing/uninitialized, expected-but-missing), the
+        // readiness builder yields the SAME storage state the shared
+        // classifier does — the "all truth surfaces agree" invariant. The
+        // readiness builder never produces `integrity_failed` because it never
+        // sets the integrity signals.
+        let cases = [
+            DoctorStorageSignals {
+                db_file_present: true,
+                ..Default::default()
+            },
+            DoctorStorageSignals {
+                db_file_present: true,
+                db_open_failed: true,
+                ..Default::default()
+            },
+            DoctorStorageSignals {
+                db_file_present: true,
+                lexical_index_drifted: true,
+                ..Default::default()
+            },
+            DoctorStorageSignals {
+                db_file_present: false,
+                not_initialized: true,
+                ..Default::default()
+            },
+            DoctorStorageSignals {
+                db_file_present: false,
+                ..Default::default()
+            },
+        ];
+        for signals in cases {
+            // DoctorStorageSignals is Copy, so classify() after the move is fine.
+            let report = build_readiness_storage_integrity(signals);
+            let (state, _) = signals.classify();
+            assert_eq!(report.storage_state, state, "{signals:?}");
+            // Risk is always derived from the state, never hand-set.
+            assert_eq!(report.source_of_truth_risk, state.default_risk());
+            assert!(report.all_checks_read_only());
+            assert_ne!(report.storage_state, StorageState::IntegrityFailed);
+        }
     }
 
     #[test]
