@@ -66,6 +66,7 @@ pub(crate) mod source_provenance;
 pub(crate) mod storage_integrity;
 pub(crate) mod storage_salvage;
 pub mod tantivy;
+pub mod trust_scoring;
 pub mod two_tier_search;
 pub mod vector_index;
 pub(crate) mod watch_exit_envelope;
