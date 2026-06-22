@@ -1398,10 +1398,15 @@ fn rendered_answer_pack(
     plan: &PlannedAnswerPack,
     request: &PackRenderRequest,
 ) -> RenderedAnswerPack {
+    // q4pau: build the commit/bead/release correlation index once per pack render
+    // (fail-open empty index off-repo); its repo root anchors cwd-relative
+    // workspace matching for each evidence item.
+    let correlation = crate::search::trust_correlation::build_for_cwd();
+    let query_workspace = correlation.project_workspace();
     let evidence = plan
         .evidence
         .iter()
-        .map(|item| rendered_evidence(item, request))
+        .map(|item| rendered_evidence(item, request, &correlation, query_workspace.as_deref()))
         .collect::<Vec<_>>();
     let mut envelope_redactions = Vec::new();
     let query_text = redact_pack_output_text(&request.query_text, &mut envelope_redactions);
@@ -1820,20 +1825,30 @@ fn pack_trust_realized_mode(
     }
 }
 
-/// Build the metadata-only trust verdict for one pack evidence item (bead
-/// 5u82n.3). Advisory only; the same scoring core that powers the per-hit
-/// `cass search` verdict. Commit/bead/release correlation is not yet derivable
-/// per-evidence, so this surfaces the live recency/source/mode portion.
+/// Build the metadata-only trust verdict for one pack evidence item (beads
+/// 5u82n.3 + q4pau). Advisory only; the same scoring core that powers the
+/// per-hit `cass search` verdict. Recency/source/mode always contribute;
+/// `query_workspace` drives a cwd-relative workspace match, and for on-project
+/// evidence `correlation` links the excerpt to a closed bead / commit / proof /
+/// release when it references a known identifier.
 fn pack_trust_assessment(
     candidate: &PackCandidate,
     request: &PackRenderRequest,
+    correlation: &crate::search::trust_correlation::CorrelationIndex,
+    query_workspace: Option<&str>,
 ) -> crate::search::trust_scoring::TrustAssessment {
+    use crate::search::trust_correlation::{correlate, proof_for, scan_text, workspace_matches};
     use crate::search::trust_scoring::{HitTrustContext, assess_trust, derive_trust_signals};
     let workspace = {
         let ws = candidate.workspace.trim();
         (!ws.is_empty()).then(|| ws.to_string())
     };
-    let ctx = HitTrustContext {
+    let on_project = match (query_workspace, workspace.as_deref()) {
+        (None, _) => None,
+        (Some(q), Some(w)) => Some(workspace_matches(q, w)),
+        (Some(_), None) => Some(false),
+    };
+    let mut ctx = HitTrustContext {
         created_at_ms: candidate.created_at_ms,
         now_ms: request.generated_at_ms,
         workspace,
@@ -1845,10 +1860,34 @@ fn pack_trust_assessment(
         ),
         ..HitTrustContext::default()
     };
-    assess_trust(&derive_trust_signals(&ctx))
+    if matches!(on_project, Some(true)) {
+        let scan = scan_text(&[&candidate.excerpt]);
+        let link = correlate(correlation, &scan);
+        if !link.is_empty() {
+            ctx.outcome = link.outcome;
+            ctx.linked_closed_bead = link.linked_closed_bead;
+            if let Some(commit) = link.linked_commit {
+                ctx.release_tag = correlation.release_tag_for_commit(&commit);
+                ctx.linked_commit = Some(commit);
+            }
+            ctx.proof = proof_for(
+                ctx.outcome,
+                ctx.linked_commit.is_some(),
+                ctx.release_tag.is_some(),
+            );
+        }
+    }
+    let mut signals = derive_trust_signals(&ctx);
+    signals.workspace_match = on_project.unwrap_or(true);
+    assess_trust(&signals)
 }
 
-fn rendered_evidence(item: &PlannedPackEvidence, request: &PackRenderRequest) -> RenderedEvidence {
+fn rendered_evidence(
+    item: &PlannedPackEvidence,
+    request: &PackRenderRequest,
+    correlation: &crate::search::trust_correlation::CorrelationIndex,
+    query_workspace: Option<&str>,
+) -> RenderedEvidence {
     let candidate = &item.candidate;
     let mut redactions = Vec::new();
     let excerpt = redact_pack_output_text(&item.excerpt, &mut redactions);
@@ -1887,7 +1926,7 @@ fn rendered_evidence(item: &PlannedPackEvidence, request: &PackRenderRequest) ->
         match_type: candidate.match_type.clone(),
         verified: candidate.line_start.is_some() && !candidate.source_path.trim().is_empty(),
     };
-    let trust = pack_trust_assessment(candidate, request);
+    let trust = pack_trust_assessment(candidate, request, correlation, query_workspace);
     RenderedEvidence {
         id: item.id.clone(),
         rank: item.rank,

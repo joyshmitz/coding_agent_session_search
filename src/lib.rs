@@ -25123,52 +25123,89 @@ fn trust_realized_mode(
     }
 }
 
-/// Map a hit's origin to the trust source-kind. Cheap and probe-free: a live
-/// filesystem/archive check (the `LocalMissing` / `ArchiveOnlyPruned` story) is
-/// a provenance follow-on, so local hits report `LocalPresent` and remote hits
-/// `RemoteMirror` for now (both source-healthy).
+/// Map a hit's origin to the trust source-kind with a cheap fs/archive probe
+/// (q4pau). A remote hit is backed by a reachable mirror copy. A local hit whose
+/// recorded `source_path` no longer exists on disk is archive-only — the source
+/// file was deleted, moved, or pruned and only the DB row survives — so it scores
+/// `ArchiveOnly` (source-unhealthy) instead of overtrusting a dead path.
 fn trust_source_kind_for_hit(
     hit: &crate::search::query::SearchHit,
 ) -> crate::search::trust_scoring::SourceTrustKind {
     use crate::search::trust_scoring::SourceTrustKind;
-    if normalized_robot_hit_origin_kind(hit)
+    if !normalized_robot_hit_origin_kind(hit)
         .eq_ignore_ascii_case(crate::sources::provenance::LOCAL_SOURCE_ID)
     {
+        return SourceTrustKind::RemoteMirror;
+    }
+    let path = hit.source_path.trim();
+    if !path.is_empty() && std::path::Path::new(path).exists() {
         SourceTrustKind::LocalPresent
     } else {
-        SourceTrustKind::RemoteMirror
+        SourceTrustKind::ArchiveOnly
     }
 }
 
-/// Build the metadata-only trust verdict JSON for one search hit (bead
-/// 5u82n.3). Advisory only — it never affects result ordering. The richer
-/// commit/bead/release correlation signals are not derivable per-hit yet, so
-/// this surfaces the live recency, source, and realized-mode portion of the
-/// verdict; the verdict lights up automatically once correlation lands.
+/// Build the metadata-only trust verdict JSON for one search hit (beads
+/// 5u82n.3 + q4pau). Advisory only — it never affects result ordering.
+///
+/// Recency, source health (fs probe), and realized mode always contribute.
+/// `query_workspace` (the project the agent is in now) drives a cwd-relative
+/// workspace match. For on-project hits, `correlation` links the result to a
+/// closed bead / commit / proof / release when the hit's own indexed text
+/// references a known identifier — so the verdict reaches trusted/likely/failed
+/// instead of only unverified/stale. Off-project hits are never correlated, so a
+/// cross-project conversation cannot inherit this project's trust.
 fn trust_value_for_hit(
     hit: &crate::search::query::SearchHit,
     now_ms: i64,
     realized_mode: crate::search::trust_scoring::RealizedMode,
+    correlation: &crate::search::trust_correlation::CorrelationIndex,
+    query_workspace: Option<&str>,
 ) -> serde_json::Value {
+    use crate::search::trust_correlation::{correlate, proof_for, scan_text, workspace_matches};
     use crate::search::trust_scoring::{HitTrustContext, assess_trust, derive_trust_signals};
     let workspace = {
         let ws = hit.workspace.trim();
         (!ws.is_empty()).then(|| ws.to_string())
     };
-    let ctx = HitTrustContext {
+    // cwd-relative workspace match: None (no cwd anchor) => no penalty and no
+    // correlation; Some(false) => off-project; Some(true) => on-project.
+    let on_project = match (query_workspace, workspace.as_deref()) {
+        (None, _) => None,
+        (Some(q), Some(w)) => Some(workspace_matches(q, w)),
+        (Some(_), None) => Some(false),
+    };
+    let mut ctx = HitTrustContext {
         created_at_ms: hit.created_at,
         now_ms,
         workspace,
-        // Hits are already constrained by any `--workspace` filter, so a
-        // filter-relative match is vacuous; cwd-relative workspace trust is a
-        // follow-on. No active comparison => no workspace penalty.
+        // Workspace match is applied below via the cwd-relative policy, so the
+        // pure derivation is left without a filter to avoid double-penalizing.
         query_workspace: None,
         source_kind: trust_source_kind_for_hit(hit),
         realized_mode,
         ..HitTrustContext::default()
     };
-    serde_json::to_value(assess_trust(&derive_trust_signals(&ctx)))
-        .unwrap_or(serde_json::Value::Null)
+    if matches!(on_project, Some(true)) {
+        let scan = scan_text(&[&hit.title, &hit.snippet, &hit.content]);
+        let link = correlate(correlation, &scan);
+        if !link.is_empty() {
+            ctx.outcome = link.outcome;
+            ctx.linked_closed_bead = link.linked_closed_bead;
+            if let Some(commit) = link.linked_commit {
+                ctx.release_tag = correlation.release_tag_for_commit(&commit);
+                ctx.linked_commit = Some(commit);
+            }
+            ctx.proof = proof_for(
+                ctx.outcome,
+                ctx.linked_commit.is_some(),
+                ctx.release_tag.is_some(),
+            );
+        }
+    }
+    let mut signals = derive_trust_signals(&ctx);
+    signals.workspace_match = on_project.unwrap_or(true);
+    serde_json::to_value(assess_trust(&signals)).unwrap_or(serde_json::Value::Null)
 }
 
 /// Output search results in robot-friendly format
@@ -25568,14 +25605,25 @@ fn output_robot_results(
     // Advisory metadata — result ordering is untouched. `filtered_hits` is a
     // prefix projection of `result.hits` (same order; clamp only drops the
     // tail), so zip aligns each verdict with its hit.
-    if include_meta && !minimal_projection {
+    if include_meta && !minimal_projection && !result.hits.is_empty() {
         let now_ms = crate::storage::sqlite::FrankenStorage::now_millis();
         let realized = trust_realized_mode(search_mode_meta.realized);
+        // q4pau: build the commit/bead/release correlation index once per query
+        // (fail-open: an empty index when cwd is not a git repo) and use its repo
+        // root as the cwd workspace anchor for cwd-relative workspace matching.
+        let correlation = crate::search::trust_correlation::build_for_cwd();
+        let query_workspace = correlation.project_workspace();
         for (hit, value) in result.hits.iter().zip(filtered_hits.iter_mut()) {
             if let serde_json::Value::Object(map) = value {
                 map.insert(
                     "trust".to_string(),
-                    trust_value_for_hit(hit, now_ms, realized),
+                    trust_value_for_hit(
+                        hit,
+                        now_ms,
+                        realized,
+                        &correlation,
+                        query_workspace.as_deref(),
+                    ),
                 );
             }
         }

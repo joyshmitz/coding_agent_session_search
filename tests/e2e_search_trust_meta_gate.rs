@@ -227,14 +227,17 @@ fn check_trust_shape(hit: &Value, label: &str) -> TestResult {
         matches!(confidence, "low" | "medium" | "high"),
         || format!("{label}: unexpected confidence `{confidence}`"),
     )?;
-    // No commit/bead/release correlation exists per-hit yet, so refs stay empty
-    // and no verdict can reach `trusted`/`likely` in the live layer.
+    // Commit/bead/release correlation (q4pau) is project-scoped: it only fires
+    // for hits whose workspace is the project the agent is in now. This fixture
+    // runs from a throwaway tempdir that is not a git repo and whose seeded
+    // workspace does not match, so correlation cannot fire and refs stay empty.
+    // (The on-project case is proved by `search_on_project_correlation_links_bead`.)
     let refs_empty = trust
         .get("provenance_refs")
         .and_then(Value::as_array)
         .is_some_and(|a| a.is_empty());
     ensure(refs_empty, || {
-        format!("{label}: provenance_refs should be empty until correlation lands")
+        format!("{label}: provenance_refs should be empty for off-project hits")
     })?;
     // Not fully trusted in the live layer → an advisory follow-up is set.
     ensure(
@@ -369,5 +372,288 @@ fn search_robot_meta_carries_trust_and_default_paths_do_not() -> TestResult {
         "trust verdict must not change hit ordering".to_string()
     })?;
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// q4pau: live source fs/archive probe and on-project commit/bead correlation.
+// ---------------------------------------------------------------------------
+
+/// Seed a Codex rollout session with a controllable workspace (`cwd`) and body
+/// text, so a single search returns it and (for the on-project case) its content
+/// references a known bead id.
+fn seed_codex_session_full(
+    codex_home: &Path,
+    filename: &str,
+    workspace: &str,
+    body_text: &str,
+    created_ms: i64,
+) -> TestResult {
+    let sessions = codex_home.join("sessions/2026/04/23");
+    std::fs::create_dir_all(&sessions)?;
+    let iso = |ms: i64| -> String {
+        chrono::DateTime::from_timestamp_millis(ms)
+            .map(|d| d.to_rfc3339())
+            .unwrap_or_default()
+    };
+    let lines = [
+        json!({
+            "timestamp": iso(created_ms),
+            "type": "session_meta",
+            "payload": { "id": filename, "cwd": workspace, "cli_version": "0.42.0" },
+        }),
+        json!({
+            "timestamp": iso(created_ms + 1_000),
+            "type": "response_item",
+            "payload": {
+                "type": "message", "role": "user",
+                "content": [{ "type": "input_text", "text": body_text }],
+            },
+        }),
+    ];
+    let body = serialize_jsonl(&lines)?;
+    std::fs::write(sessions.join(filename), body)?;
+    Ok(())
+}
+
+/// Build a `cass` command rooted at an explicit working directory (used so the
+/// correlation index builds against a chosen git repo). Mirrors `cass_cmd` but
+/// overrides `current_dir`.
+fn cass_cmd_in(cwd: &Path, home: &Path, codex_home: &Path, args: &[String]) -> Command {
+    let mut cmd = cass_cmd(home, codex_home, args);
+    cmd.current_dir(cwd);
+    cmd
+}
+
+/// Run a bounded git command, returning trimmed stdout on success.
+fn git_run(repo: &Path, args: &[&str]) -> Result<String, Box<dyn Error>> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()?;
+    ensure(out.status.success(), || {
+        format!(
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        )
+    })?;
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Read the `trust` block of a hit, or an error.
+fn trust_of<'a>(hit: &'a Value, label: &str) -> Result<&'a Value, Box<dyn Error>> {
+    hit.get("trust")
+        .ok_or_else(|| format!("{label}: hit missing trust block").into())
+}
+
+/// The `stale_reason` string of a hit's trust verdict (empty when absent).
+fn stale_reason_of(hit: &Value) -> String {
+    hit.get("trust")
+        .and_then(|t| t.get("stale_reason"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// q4pau Part 3: a local hit whose source file no longer exists on disk is
+/// archive-only, so its verdict must report `source_unhealthy` at low confidence
+/// — instead of overtrusting a dead path. Deterministic: index a session, delete
+/// its source file, then re-search the unchanged index.
+#[test]
+fn search_source_probe_marks_deleted_source_unhealthy() -> TestResult {
+    let (_tmp, home, data_dir) = isolated_home()?;
+    let codex_home = home.join(".codex");
+    let keyword = "sourceprobefixtureunique";
+    let filename = "rollout-2026-source-probe.jsonl";
+
+    // A fresh session so recency alone would score `unverified` — the deleted
+    // source is what must drive the verdict to `source_unhealthy`.
+    seed_codex_session_full(
+        &codex_home,
+        filename,
+        &codex_home.to_string_lossy(),
+        keyword,
+        now_ms() - 2 * DAY_MS,
+    )?;
+
+    let index_args = argv(
+        &["index", "--full", "--json", "--no-progress-events"],
+        &data_dir,
+    );
+    let index_cmd = cass_cmd(&home, &codex_home, &index_args);
+    let index_out = spawn_with_timeout_or_diag(
+        index_cmd,
+        "source_probe_index",
+        Some(&data_dir),
+        INDEX_TIMEOUT,
+    );
+    ensure(
+        index_out.status.success() || !index_out.stdout.is_empty(),
+        || "index produced no output".to_string(),
+    )?;
+
+    // Delete the source file; the archive DB row + lexical index survive.
+    let source_file = codex_home.join("sessions/2026/04/23").join(filename);
+    std::fs::remove_file(&source_file)?;
+
+    let payload = run_search(
+        &home,
+        &codex_home,
+        &data_dir,
+        &["search", keyword, "--json", "--robot-meta", "--limit", "5"],
+        "source_probe_search",
+    )?;
+    let found = hits(&payload);
+    let hit = hit_with_path(&found, "source-probe")
+        .ok_or_else(|| format!("seeded hit not found: {}", head(&payload.to_string())))?;
+    check_trust_shape(hit, "source_probe")?;
+    let trust = trust_of(hit, "source_probe")?;
+    ensure(stale_reason_of(hit) == "source_unhealthy", || {
+        format!(
+            "deleted-source hit should report stale_reason=source_unhealthy, got `{}`",
+            stale_reason_of(hit)
+        )
+    })?;
+    ensure(
+        trust.get("confidence").and_then(Value::as_str) == Some("low"),
+        || "deleted-source hit confidence should be low".to_string(),
+    )?;
+    Ok(())
+}
+
+/// q4pau Part 1+2: from inside a project (a git repo with a closed bead in
+/// `.beads/issues.jsonl`), a hit from that same workspace whose indexed text
+/// references the bead id is correlated to it: the verdict reaches `likely` and
+/// carries a sanitized `bead:` provenance ref. Proves the live join + cwd-
+/// relative workspace match end to end.
+#[test]
+fn search_on_project_correlation_links_bead() -> TestResult {
+    let (_tmp, home, data_dir) = isolated_home()?;
+    let codex_home = home.join(".codex");
+
+    // A throwaway project repo with a closed bead. `source_repo` drives the
+    // id prefix (`corrproj-`); the bead id must start with it.
+    let proj = home.join("proj");
+    std::fs::create_dir_all(&proj)?;
+    git_run(&proj, &["init", "-q"])?;
+    let git_root = git_run(&proj, &["rev-parse", "--show-toplevel"])?;
+    let beads_dir = proj.join(".beads");
+    std::fs::create_dir_all(&beads_dir)?;
+    let bead_id = "corrproj-corrbeadxyz";
+    let bead_line = json!({
+        "id": bead_id,
+        "status": "closed",
+        "source_repo": "corrproj",
+    });
+    std::fs::write(
+        beads_dir.join("issues.jsonl"),
+        format!("{}\n", serde_json::to_string(&bead_line)?),
+    )?;
+
+    // A session whose workspace is the project root and whose body references
+    // the closed bead alongside the search keyword.
+    let keyword = "corrfixtureuniqueword";
+    let body = format!("{keyword} — landed in {bead_id} closeout");
+    seed_codex_session_full(
+        &codex_home,
+        "rollout-2026-correlation.jsonl",
+        &git_root,
+        &body,
+        now_ms() - 3 * DAY_MS,
+    )?;
+
+    let index_args = argv(
+        &["index", "--full", "--json", "--no-progress-events"],
+        &data_dir,
+    );
+    let index_cmd = cass_cmd_in(&proj, &home, &codex_home, &index_args);
+    let index_out = spawn_with_timeout_or_diag(
+        index_cmd,
+        "correlation_index",
+        Some(&data_dir),
+        INDEX_TIMEOUT,
+    );
+    ensure(
+        index_out.status.success() || !index_out.stdout.is_empty(),
+        || "correlation index produced no output".to_string(),
+    )?;
+
+    // Search from inside the project so the correlation index builds against it.
+    let args = argv(
+        &["search", keyword, "--json", "--robot-meta", "--limit", "5"],
+        &data_dir,
+    );
+    let cmd = cass_cmd_in(&proj, &home, &codex_home, &args);
+    let out =
+        spawn_with_timeout_or_diag(cmd, "correlation_search", Some(&data_dir), SEARCH_TIMEOUT);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let payload: Value = serde_json::from_str(stdout.trim()).map_err(|e| {
+        format!(
+            "correlation search stdout not JSON: {e}; head: {}",
+            head(&stdout)
+        )
+    })?;
+    let found = hits(&payload);
+    let hit = hit_with_path(&found, "correlation")
+        .ok_or_else(|| format!("correlation hit not found: {}", head(&payload.to_string())))?;
+    check_trust_shape_on_project(hit, "correlation")?;
+
+    // The closed-bead link lifts the verdict to `likely` with a sanitized ref.
+    ensure(tier_of(hit) == "likely", || {
+        format!(
+            "on-project closed-bead hit should be `likely`, got `{}`",
+            tier_of(hit)
+        )
+    })?;
+    let trust = trust_of(hit, "correlation")?;
+    let has_bead_ref = trust
+        .get("provenance_refs")
+        .and_then(Value::as_array)
+        .is_some_and(|refs| {
+            refs.iter()
+                .filter_map(Value::as_str)
+                .any(|r| r == format!("bead:{bead_id}"))
+        });
+    ensure(has_bead_ref, || {
+        format!(
+            "expected provenance ref `bead:{bead_id}`, got {}",
+            trust
+                .get("provenance_refs")
+                .map(ToString::to_string)
+                .unwrap_or_default()
+        )
+    })?;
+    // On-project: the workspace match must NOT report a mismatch.
+    ensure(stale_reason_of(hit) != "workspace_mismatch", || {
+        "on-project hit must not report workspace_mismatch".to_string()
+    })?;
+    Ok(())
+}
+
+/// Structural invariants for an on-project verdict (like [`check_trust_shape`]
+/// but allows non-empty provenance refs and a `likely`/`trusted` tier).
+fn check_trust_shape_on_project(hit: &Value, label: &str) -> TestResult {
+    let trust = trust_of(hit, label)?;
+    ensure(
+        trust.get("schema_version").and_then(Value::as_u64) == Some(1),
+        || format!("{label}: trust.schema_version must be 1"),
+    )?;
+    let tier = trust
+        .get("trust_tier")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    ensure(
+        matches!(
+            tier,
+            "trusted" | "likely" | "unverified" | "stale" | "failed"
+        ),
+        || format!("{label}: unexpected trust_tier `{tier}`"),
+    )?;
     Ok(())
 }

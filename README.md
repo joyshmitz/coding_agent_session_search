@@ -880,10 +880,20 @@ hit can be a landed fix or a failed attempt):
 
 The verdict is **advisory metadata only** — it never changes result ordering.
 It is derived from metadata-only signals (recency, source health, realized
-search mode, and — opportunistically — linked commit/bead/release provenance);
-it carries no raw session text. The same `trust` block is attached to `cass
-pack` evidence. Branch on `trust_tier` and `stale_reason`, not on `confidence`
-alone.
+search mode, cwd-relative workspace match, and — opportunistically — linked
+commit/bead/release provenance); it carries no raw session text. The same
+`trust` block is attached to `cass pack` evidence. Branch on `trust_tier` and
+`stale_reason`, not on `confidence` alone.
+
+Provenance correlation is **project-scoped and explicit-reference anchored**:
+for a hit from the project you are running `cass` in now, cass links it to a
+closed bead / commit / proof / release only when the hit's own indexed text
+references a known identifier (`bead:<id>`, `commit:<sha>`, `release:<tag>`),
+joined against that project's local beads and git history. A temporal or
+workspace coincidence is never enough, so an unrelated conversation never
+inherits another's trust. Off-project hits report `workspace_mismatch`, and a
+hit whose local source file no longer exists on disk reports `source_unhealthy`
+(archive-only) instead of overtrusting a dead path.
 
 ```bash
 # Deterministic answer pack for handoff prompts
