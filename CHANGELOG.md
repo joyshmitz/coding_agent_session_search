@@ -17,6 +17,47 @@ Repository: <https://github.com/Dicklesworthstone/coding_agent_session_search>
 
 ## Unreleased
 
+## [v0.6.20] -- 2026-06-30
+
+**Linux x86-64 reliability release: a pure-Rust embedder backend (no more
+ONNX runtime), two indexer fixes for watch-mode and large-batch memory, the
+`cass upgrade` installer-asset repair, and the modern-Codex transcript fix
+via a `franken-agent-detection` bump.**
+
+### Changed
+
+- **Dropped the ONNX runtime / fastembed stack for a pure-Rust native
+  embedder + reranker** (commit
+  [`82547d35`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/82547d35), #308). The default MiniLM
+  quality-tier embedder no longer depends on `onnxruntime`, which on Linux
+  x86-64 (AVX2) failed with `LayerNormalization ... GetElementType is not
+  implemented` and embedded 0 docs → stall-abort exit 70. A single binary now
+  serves all x86_64 (the `-baseline` AVX split is obsolete).
+
+### Fixed
+
+- **`cass index --watch` deterministic exit-70 crash-loop** (commit
+  [`345f1ccc`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/345f1ccc), #311). The F4 stall
+  watchdog's #297 finalize-wedge abort fired on a `--watch` daemon's normal
+  quiescent idle (phase 0, `current >= total`, pipeline quiescent), exiting 70
+  every ~300s. The watchdog is now watch-aware: that resting state is treated
+  as healthy idle in watch mode, while genuine phase-2 wedges (and the oneshot
+  post-publish wedge #297 was written for) are still detected and aborted.
+- **`cass models backfill --tier quality` memory-blowup / CPU-spin** (commit
+  [`345f1ccc`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/345f1ccc), #309). Fixed-128-row
+  embed batches padded every row to the longest member, so one long message
+  inflated the padded tensor to multiple GB. Length-aware batching now caps
+  both row count and `row_count × max_canonical_len` (default 16 KiB, env
+  `CASS_SEMANTIC_EMBED_BATCH_CHAR_BUDGET`), order-preserving and embedder-agnostic.
+- **`cass upgrade` 404** (#310). The v0.6.18/v0.6.19 GitHub Releases were
+  missing the installer assets the self-updater fetches; they were restored
+  (`install.sh`/`install.ps1` + `SHA256SUMS` rows) and verified end-to-end.
+  Future releases go through the canonical `release.yml`, which attaches them.
+- **Modern Codex transcripts** via **`franken-agent-detection` 0.1.8 → 0.1.9**
+  (commit [`c60943e7`](https://github.com/Dicklesworthstone/coding_agent_session_search/commit/c60943e7), upstream #13). The
+  Codex connector now captures modern `output_text` assistant messages and
+  `response_item` tool calls/outputs that were previously dropped.
+
 ## [v0.6.9] -- 2026-05-30
 
 **Two correctness fixes uncovered by a fresh-eyes review of the v0.6.7
