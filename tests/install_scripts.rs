@@ -40,16 +40,24 @@ fn install_sh_command(tmp_root: &tempfile::TempDir) -> Command {
 }
 
 #[test]
-fn install_sh_source_fallback_preserves_baseline_feature_flags() {
+fn install_sh_has_no_baseline_artifact_selection() {
+    // cass#308 / bead tg5o9: the ONNX runtime is gone, so the installer must
+    // never select a `-baseline` asset (they are not published anymore) and
+    // the source fallback builds default features on every CPU.
     let script = fs::read_to_string("install.sh").expect("read install.sh");
 
     assert!(
-        script.contains("SOURCE_CARGO_ARGS=(--no-default-features --features \"qr,encryption\")"),
-        "baseline target selection must set ONNX-free source-build flags"
+        !script.contains("TARGET=\"linux-amd64-baseline\"")
+            && !script.contains("TARGET=\"windows-amd64-baseline\""),
+        "installer must not select retired -baseline assets"
+    );
+    assert!(
+        !script.contains("host_has_avx2()"),
+        "the AVX2 runtime probe was retired with the ONNX runtime (cass#308)"
     );
     assert!(
         script.contains("cargo build --locked --release \"${SOURCE_CARGO_ARGS[@]}\""),
-        "source fallback must pass baseline cargo flags through to cargo build"
+        "source fallback must keep the (now always-default) cargo build invocation"
     );
 }
 
