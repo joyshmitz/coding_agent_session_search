@@ -21048,7 +21048,7 @@ fn ingest_watch_batch_with_oom_split_inner(
 ) -> Result<WatchIngestBatchOutcome> {
     debug_assert!(!convs.is_empty());
 
-    let batch_result = if mode == WatchOomIngestMode::Standard
+    let batch_result = if matches!(mode, WatchOomIngestMode::Standard)
         && should_inject_watch_ingest_test_oom(convs)
     {
         // Use the typed `FrankenError::OutOfMemory` variant so the OOM detector
@@ -21114,7 +21114,7 @@ fn ingest_watch_batch_with_oom_split_inner(
             // Standard-mode caller's pressure/size gate decides between
             // deferring and quarantining. Quarantining here would bypass that
             // gate and make the caller's "ingested cleanly solo" log lie.
-            if mode == WatchOomIngestMode::SoloIsolatedRetry {
+            if matches!(mode, WatchOomIngestMode::SoloIsolatedRetry) {
                 return Err(error);
             }
 
