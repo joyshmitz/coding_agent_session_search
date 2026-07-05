@@ -18327,12 +18327,11 @@ fn state_meta_json_inner(
             "hnsw_path": semantic.hnsw_path.as_ref().map(|path| path.display().to_string()),
             "hnsw_ready": semantic.hnsw_ready,
             "progressive_ready": semantic.progressive_ready,
-            // cass#256: surface whether this binary was built with the
-            // `semantic` Cargo feature. `false` means the prebuilt
-            // Microsoft ONNX Runtime is NOT linked (the baseline build
-            // for pre-AVX2 CPUs); semantic search modes will return an
-            // explicit error and hybrid degrades to lexical.
-            "feature_compiled_in": cfg!(feature = "semantic"),
+            // Always true since bead tg5o9 retired the `semantic` Cargo
+            // feature: every build carries the pure-Rust
+            // frankensearch/native backend (no ONNX, no `-baseline`
+            // artifact). The key is kept for schema stability.
+            "feature_compiled_in": true,
             // Sub-fix 3 for cass#257 — additive fields that report
             // quality-tier readiness independently of the
             // progressive/hybrid stack so `--mode semantic` consumers
@@ -22846,39 +22845,11 @@ fn run_cli_search(
                 retryable: true,
             })?,
         SearchMode::Semantic => {
-            // cass#256: in the `-baseline` build (the `semantic` Cargo
-            // feature is disabled), `--mode semantic` returns a clear
-            // CLI envelope rather than reaching code that would expect a
-            // working ORT runtime. Hybrid degrades to lexical via the
-            // existing fail-open path; lexical-only mode is unaffected.
-            #[cfg(not(feature = "semantic"))]
-            {
-                // Suppress unused-binding warnings in the baseline arm:
-                // every input is consumed by the documented error envelope.
-                let _ = (
-                    approximate,
-                    &semantic_opts,
-                    &filters,
-                    &field_mask,
-                    query,
-                    search_limit,
-                    search_offset,
-                );
-                let _ = client;
-                Err::<crate::search::query::SearchResult, CliError>(CliError {
-                    code: 15,
-                    kind: CliErrorKind::SemanticUnavailable.kind_str(),
-                    message:
-                        "semantic search is not available in this build (cass was built without the `semantic` Cargo feature; this is the `-baseline` artifact for pre-AVX2 CPUs; cass#256)"
-                            .to_string(),
-                    hint: Some(
-                        "Re-run with `--mode lexical` (or omit `--mode` and accept the default hybrid-preferred mode, which fails open to lexical), or install the full release artifact (e.g. `cass-windows-amd64.zip` / `cass-linux-amd64.tar.gz`) on a host with AVX2 support."
-                            .to_string(),
-                    ),
-                    retryable: false,
-                })?
-            }
-            #[cfg(feature = "semantic")]
+            // The former `semantic` Cargo feature (and its `-baseline`
+            // refusal arm for the ONNX-era AVX2 hazard, cass#256) was retired
+            // with bead tg5o9: every build carries the pure-Rust
+            // frankensearch/native backend, so semantic availability is a
+            // runtime question (model/vector assets), not a compile-time one.
             {
                 let (hits, ann_stats) = client
                     .search_semantic_with_tier(
@@ -77852,6 +77823,7 @@ struct LiveGatherConfig {
 /// Robot-safe `cass release-verify`. Offline `--from` reuses the tested
 /// [`crate::release_verify::verify_from_json`] core; `--live` gathers explicit
 /// per-channel observations over the network. Prints a ReleaseVerificationReport.
+#[allow(clippy::too_many_arguments)]
 async fn run_release_verify(
     output_format: Option<RobotFormat>,
     from: Option<&str>,

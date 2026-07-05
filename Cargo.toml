@@ -138,20 +138,20 @@ security-framework = "3.7.0"
 openssl = { version = "0.10.79", features = ["vendored"] }
 
 [features]
-default = ["qr", "encryption", "semantic"]
+default = ["qr", "encryption"]
 qr = ["dep:qrcode", "dep:image"]
 encryption = []  # Enables HTML export encryption (deps already included for ChatGPT)
 backtrace = []
-# `semantic` enables embedding/reranking via the pure-Rust `frankensearch/native`
-# backend (frankentorch tensors with runtime-dispatched SIMD: NEON on Apple
-# Silicon, AVX2/FMA when present on x86, scalar fallback otherwise). cass#308
-# removed the prebuilt Microsoft ONNX Runtime (fastembed) entirely, which
-# dissolves the AVX2 static-init crash (cass#256) — every binary now runs on
-# any CPU, so there is no longer a separate `-baseline` artifact. Disabling
-# `semantic` (e.g. `--no-default-features --features qr,encryption`) builds a
-# lexical-only binary; semantic search modes then return a clear error while
-# lexical search and all other functionality remain fully available.
-semantic = ["frankensearch/native"]
+# NOTE: the former `semantic` feature was retired (bead tg5o9). It had become
+# vacuous after cass#308: the pure-Rust `frankensearch/native` backend
+# (frankentorch tensors, runtime-dispatched SIMD) ships in the always-on
+# frankensearch feature set above, so every binary carries semantic support on
+# any CPU and there is no `-baseline` artifact or AVX2 static-init hazard
+# (cass#256) anymore. `--no-default-features` builds still had the native
+# stack compiled in while the stale `cfg(not(feature = "semantic"))` arm
+# refused `--mode semantic` with an ONNX-era error — an internally
+# contradictory binary. Semantic availability is now a runtime question
+# (model installed or hash fallback), never a compile-time one.
 # Opt-in: upgrade sibling repo rev/worktree drift from warning to hard error and
 # validate the optional /data/projects path checkouts before enabling local overrides.
 strict-path-dep-validation = []

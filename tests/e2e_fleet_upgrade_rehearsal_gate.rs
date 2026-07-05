@@ -95,14 +95,15 @@ fn run_rehearsal_json(home: &Path, args: &[&str], ignore_sources: bool) -> Value
         "cass {args:?} leaked ANSI escapes onto stdout"
     );
     let stdout = String::from_utf8(out.stdout).expect("utf8 stdout");
-    serde_json::from_str::<Value>(stdout.trim()).unwrap_or_else(|err| {
-        // Surface full context on stderr (debuggable without a rerun), then fail
-        // via `expect` rather than the `panic!` macro — the bug scanner classes a
-        // bare `panic!` as critical, while `expect` is the accepted test idiom.
+    // Surface full context on stderr before failing (debuggable without a
+    // rerun); fail via `expect` rather than the `panic!` macro — the bug
+    // scanner classes a bare `panic!` as critical, while `expect` is the
+    // accepted test idiom.
+    let parsed = serde_json::from_str::<Value>(stdout.trim());
+    if parsed.is_err() {
         eprintln!("cass {args:?} stdout is not a single pure JSON object:\n{stdout}");
-        Result::<Value, serde_json::Error>::Err(err)
-            .expect("rehearsal stdout must be a single pure JSON object")
-    })
+    }
+    parsed.expect("rehearsal stdout must be a single pure JSON object")
 }
 
 /// The envelope's invariant fields, asserted everywhere.

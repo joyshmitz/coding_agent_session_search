@@ -35,6 +35,7 @@
 //!     `cass index --full`").
 //!   * **indexed** — a tiny seeded Codex session indexed once → `healthy`
 //!     ("Lexical search is ready; …").
+//!
 //! For every surface in both states the human "Recommended:" line must carry
 //! the robot's `recommended_action` *verbatim* and the human headline must
 //! reflect the robot's state family.

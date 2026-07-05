@@ -105,14 +105,14 @@ impl RuntimeLoadability {
         }
     }
 
-    /// Cheap host loadability for the running binary: reflects the compiled
-    /// `semantic` feature. (cass #308) The pure-Rust frankentorch embedder /
-    /// reranker has no ONNX and no AVX requirement, so there is no CPU hard-block
-    /// — the int8 GEMM selects NEON / AVX2-when-present at runtime and falls back
-    /// to SSE2/scalar otherwise. `cpu_has_avx2` is therefore always `true` here.
+    /// Cheap host loadability for the running binary. (cass #308 / tg5o9)
+    /// Every build carries the pure-Rust frankentorch embedder / reranker —
+    /// the former `semantic` Cargo feature is retired — and there is no ONNX
+    /// and no AVX hard-block: the int8 GEMM selects NEON / AVX2-when-present
+    /// at runtime and falls back to SSE2/scalar otherwise, so both probe
+    /// inputs are constant `true`.
     pub(crate) fn probe_cheap_host() -> Self {
-        let semantic_feature_built = cfg!(feature = "semantic");
-        Self::probe_cheap(semantic_feature_built, true)
+        Self::probe_cheap(true, true)
     }
 
     /// Whether this host can never run the model regardless of the on-disk
