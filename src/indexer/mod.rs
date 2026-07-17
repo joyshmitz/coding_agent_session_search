@@ -22649,7 +22649,8 @@ fn should_inject_non_watch_ingest_test_oom(_convs: &[NormalizedConversation]) ->
 
 /// Get all available connector factories.
 ///
-/// Delegates to `franken_agent_detection::get_connector_factories()`.
+/// Delegates to the CASS connector registry, which applies local enrichment
+/// wrappers while preserving upstream FAD factories for all other connectors.
 pub use crate::connectors::get_connector_factories;
 
 /// Detect all active roots for watching/scanning.
@@ -29218,7 +29219,7 @@ pub mod persist {
 mod tests {
     use super::*;
     use crate::connectors::{
-        Connector, DetectionResult, NormalizedConversation, NormalizedMessage,
+        Connector, DetectionResult, NormalizedConversation, NormalizedMessage, ScanContext,
     };
     use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
     use crate::sources::provenance::SourceKind;
@@ -50534,6 +50535,239 @@ mod tests {
             .map(|(name, _)| name)
             .collect::<Vec<_>>();
         assert_eq!(names, vec!["codex"]);
+    }
+
+    #[test]
+    fn cass_connector_registry_only_replaces_codex_factory() {
+        let upstream = franken_agent_detection::get_connector_factories();
+        let configured = get_connector_factories();
+        assert_eq!(configured.len(), upstream.len());
+
+        for ((configured_name, configured_factory), (upstream_name, upstream_factory)) in
+            configured.into_iter().zip(upstream)
+        {
+            assert_eq!(configured_name, upstream_name);
+            if configured_name == "codex" {
+                assert!(!std::ptr::fn_addr_eq(configured_factory, upstream_factory));
+            } else {
+                assert!(std::ptr::fn_addr_eq(configured_factory, upstream_factory));
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn configured_codex_factory_indexes_searchable_modern_tool_calls_once() {
+        let temp = TempDir::new().unwrap();
+        let codex_home = temp.path().join(".codex");
+        let sessions = codex_home.join("sessions/2026/05/08");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::write(
+            sessions.join("rollout-modern.jsonl"),
+            r#"{"timestamp":"2026-05-08T23:09:00.000Z","type":"session_meta","payload":{"id":"modern-id","cwd":"/data/projects/ntm","cli_version":"0.49.0"}}
+{"timestamp":"2026-05-08T23:09:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"investigate cass"}]}}
+{"timestamp":"2026-05-08T23:09:02.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"git log --grep='cass339toolargsneedle'\"}","call_id":"call-modern-1"}}
+"#,
+        )
+        .unwrap();
+
+        let _codex_home_guard = set_env_var("CODEX_HOME", codex_home.to_string_lossy());
+        let _sources_guard = set_env_var("CASS_IGNORE_SOURCES_CONFIG", "1");
+        let factory = configured_connector_factories()
+            .into_iter()
+            .find_map(|(name, factory)| (name == "codex").then_some(factory))
+            .expect("configured Codex factory");
+        let data_dir = temp.path().join("data");
+        fs::create_dir_all(&data_dir).unwrap();
+        let scan_context = ScanContext::local_default(data_dir.clone(), None);
+        let upstream_conversations = franken_agent_detection::CodexConnector::new()
+            .scan(&scan_context)
+            .unwrap();
+        let conversations = factory().scan(&scan_context).unwrap();
+        let repeated_conversations = factory().scan(&scan_context).unwrap();
+
+        assert_eq!(upstream_conversations.len(), 1);
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(repeated_conversations.len(), 1);
+        let upstream = &upstream_conversations[0];
+        let conversation = &conversations[0];
+        let repeated = &repeated_conversations[0];
+        assert_eq!(conversation.agent_slug, upstream.agent_slug);
+        assert_eq!(conversation.external_id, upstream.external_id);
+        assert_eq!(conversation.title, upstream.title);
+        assert_eq!(conversation.workspace, upstream.workspace);
+        assert_eq!(conversation.source_path, upstream.source_path);
+        assert_eq!(conversation.started_at, upstream.started_at);
+        assert_eq!(conversation.ended_at, upstream.ended_at);
+        assert_eq!(conversation.metadata, upstream.metadata);
+        let stable_message_identity = |conversation: &NormalizedConversation| {
+            conversation
+                .messages
+                .iter()
+                .map(|message| {
+                    (
+                        message.idx,
+                        message.role.clone(),
+                        message.author.clone(),
+                        message.created_at,
+                        message.extra.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            stable_message_identity(conversation),
+            stable_message_identity(upstream),
+            "enrichment must preserve upstream message identity and order"
+        );
+        assert_eq!(
+            stable_message_identity(repeated),
+            stable_message_identity(conversation),
+            "repeated enrichment scans must preserve message identity and order"
+        );
+
+        let tool_calls = conversations
+            .iter()
+            .flat_map(|conversation| &conversation.messages)
+            .filter(|message| {
+                message
+                    .invocations
+                    .iter()
+                    .any(|invocation| invocation.call_id.as_deref() == Some("call-modern-1"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tool_calls.len(), 1, "tool call must remain deduplicated");
+        let tool_call = tool_calls[0];
+        assert_eq!(
+            tool_call.invocations.len(),
+            1,
+            "the enriched tool-call message must contain exactly one invocation"
+        );
+        assert!(
+            tool_call
+                .content
+                .contains("git log --grep='cass339toolargsneedle'")
+        );
+        let invocation = &tool_call.invocations[0];
+        assert_eq!(invocation.name, "exec_command");
+        assert_eq!(invocation.call_id.as_deref(), Some("call-modern-1"));
+        assert_eq!(
+            invocation
+                .arguments
+                .as_ref()
+                .and_then(|arguments| arguments.get("cmd"))
+                .and_then(serde_json::Value::as_str),
+            Some("git log --grep='cass339toolargsneedle'")
+        );
+        let repeated_tool_calls = repeated
+            .messages
+            .iter()
+            .filter(|message| {
+                message
+                    .invocations
+                    .iter()
+                    .any(|invocation| invocation.call_id.as_deref() == Some("call-modern-1"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(repeated_tool_calls.len(), 1);
+        assert_eq!(repeated_tool_calls[0].invocations.len(), 1);
+        assert_eq!(repeated_tool_calls[0].content, tool_call.content);
+        assert_eq!(repeated_tool_calls[0].invocations, tool_call.invocations);
+
+        let db_path = data_dir.join("agent_search.db");
+        let storage = FrankenStorage::open(&db_path).unwrap();
+        ensure_fts_schema(&storage);
+        let index_path = index_dir(&data_dir).unwrap();
+        let mut lexical_index = TantivyIndex::open_or_create(&index_path).unwrap();
+        let opts = IndexOptions {
+            full: true,
+            force_rebuild: false,
+            watch: false,
+            watch_once_paths: None,
+            db_path,
+            data_dir,
+            semantic: false,
+            build_hnsw: false,
+            embedder: "fastembed".to_string(),
+            progress: None,
+            watch_interval_secs: 30,
+        };
+        let outcome = run_batch_index_with_connector_factories(
+            &storage,
+            Some(&mut lexical_index),
+            &opts,
+            None,
+            LexicalPopulationStrategy::IncrementalInline,
+            Vec::new(),
+            vec![("codex", factory)],
+            FrankenStorage::now_millis(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(outcome.canonical_mutations.inserted_conversations, 1);
+        assert_eq!(
+            outcome.canonical_mutations.inserted_messages,
+            conversation.messages.len()
+        );
+        lexical_index.commit().unwrap();
+
+        let persisted_messages = storage
+            .raw()
+            .query_map_collect(
+                "SELECT idx, role, created_at, content FROM messages ORDER BY idx",
+                &[] as &[ParamValue],
+                |row| {
+                    Ok((
+                        row.get_typed::<i64>(0)?,
+                        row.get_typed::<String>(1)?,
+                        row.get_typed::<Option<i64>>(2)?,
+                        row.get_typed::<String>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(persisted_messages.len(), conversation.messages.len());
+        let persisted_tool_calls = persisted_messages
+            .iter()
+            .filter(|(_, _, _, content)| content.contains("git log --grep='cass339toolargsneedle'"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            persisted_tool_calls.len(),
+            1,
+            "the production indexer must persist one enriched tool call"
+        );
+        assert_eq!(persisted_tool_calls[0].0, tool_call.idx);
+        assert_eq!(
+            persisted_tool_calls[0].1, "agent",
+            "the indexer intentionally canonicalizes assistant roles to agent"
+        );
+        assert_eq!(persisted_tool_calls[0].2, tool_call.created_at);
+
+        let (reader, fields) = frankensearch::lexical::cass_open_search_reader(
+            &index_path,
+            frankensearch::lexical::ReloadPolicy::Manual,
+        )
+        .unwrap();
+        let filters = frankensearch::lexical::CassQueryFilters {
+            agents: Default::default(),
+            workspaces: Default::default(),
+            created_from: None,
+            created_to: None,
+            source_filter: frankensearch::lexical::CassSourceFilter::All,
+        };
+        let query = frankensearch::lexical::cass_build_tantivy_query(
+            "cass339toolargsneedle",
+            &filters,
+            &fields,
+        );
+        let lexical_matches = reader
+            .searcher()
+            .search(&*query, &frankensearch::lexical::Count)
+            .unwrap();
+        assert_eq!(
+            lexical_matches, 1,
+            "tool-call arguments must reach the production lexical index"
+        );
     }
 
     #[test]

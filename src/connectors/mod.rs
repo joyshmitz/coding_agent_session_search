@@ -1,7 +1,8 @@
 //! Connectors for agent histories.
 //!
-//! All connector implementations live in `franken_agent_detection`.
-//! This module provides re-export stubs for backward-compatible import paths.
+//! Most connector implementations live in `franken_agent_detection`.
+//! This module provides re-export stubs plus the CASS-specific Codex enrichment
+//! wrapper used by every connector factory exposed to the indexer.
 
 use std::fs;
 use std::io;
@@ -37,7 +38,6 @@ pub use franken_agent_detection::{
     file_modified_since,
     flatten_content,
     franken_detection_for_connector,
-    get_connector_factories,
     normalize_model,
     parse_timestamp,
     reindex_messages,
@@ -220,3 +220,29 @@ pub mod openhands;
 pub mod pi_agent;
 pub mod qwen;
 pub mod vibe;
+
+/// Constructor function used by the runtime connector registry.
+pub type ConnectorFactory = fn() -> Box<dyn Connector + Send>;
+
+fn codex_connector_factory() -> Box<dyn Connector + Send> {
+    Box::new(codex::CodexConnector::new())
+}
+
+/// Return connector factories with CASS-specific wrappers applied.
+///
+/// Non-Codex factories remain exactly the upstream FAD factories. Codex must
+/// pass through CASS's enrichment wrapper so modern `function_call` arguments
+/// reach the production indexer instead of remaining placeholder-only content.
+#[must_use]
+pub fn get_connector_factories() -> Vec<(&'static str, ConnectorFactory)> {
+    franken_agent_detection::get_connector_factories()
+        .into_iter()
+        .map(|(name, factory)| {
+            if name == "codex" {
+                (name, codex_connector_factory as ConnectorFactory)
+            } else {
+                (name, factory)
+            }
+        })
+        .collect()
+}
