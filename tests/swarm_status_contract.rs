@@ -3186,6 +3186,7 @@ fn swarm_macros_blocked_case_lists_missing_facts() -> Result<(), Box<dyn Error>>
 
 #[test]
 fn swarm_repro_capsule_scrubs_and_targets_fixture_data() -> Result<(), Box<dyn Error>> {
+    let private_session_text = "user secret: my key is sk-ant-AAA and pw hunter2";
     let (_tmp, fixture_path) = write_swarm_evidence_fixture(
         "repro-capsule-redacted",
         json!({
@@ -3199,7 +3200,7 @@ fn swarm_repro_capsule_scrubs_and_targets_fixture_data() -> Result<(), Box<dyn E
                 "evidence_refs": ["/home/alice/.claude/s.jsonl:9"],
                 "expected": "no panic",
                 "actual": "panic",
-                "private_session_text": "user secret: my key is sk-ant-AAA and pw hunter2",
+                "private_session_text": private_session_text,
                 "privacy_tier": "redacted"
             }
         }),
@@ -3232,7 +3233,36 @@ fn swarm_repro_capsule_scrubs_and_targets_fixture_data() -> Result<(), Box<dyn E
     )?;
     // Safety: no raw secret, email, or absolute path may appear.
     assert_no_forbidden_fixture_leaks("repro-capsule-redacted", &output);
+    validate_raw_session_privacy_contract(&output, private_session_text)
+        .map_err(test_error)?;
     Ok(())
+}
+
+#[test]
+fn swarm_repro_capsule_raw_session_metadata_requires_explicit_false() {
+    let raw_session_text = "PRIVATE RAW SESSION CONTENT";
+    let safe = json!({
+        "privacy": {"contains_raw_session_text": false},
+        "capsule": {"summary": "redacted"}
+    });
+    assert!(validate_raw_session_privacy_contract(&safe, raw_session_text).is_ok());
+
+    for unsafe_output in [
+        json!({"privacy": {"contains_raw_session_text": true}}),
+        json!({"privacy": {"contains_raw_session_text": "false"}}),
+        json!({"privacy": {"contains_raw_session_text": null}}),
+        json!({"privacy": {}}),
+        json!({}),
+        json!({
+            "privacy": {"contains_raw_session_text": false},
+            "capsule": {"transcript": raw_session_text}
+        }),
+    ] {
+        assert!(
+            validate_raw_session_privacy_contract(&unsafe_output, raw_session_text).is_err(),
+            "unsafe or ambiguous raw-session state must be rejected: {unsafe_output}"
+        );
+    }
 }
 
 #[test]
@@ -4326,7 +4356,6 @@ fn assert_no_forbidden_fixture_leaks(fixture_id: &str, value: &Value) {
         "PRIVATE KEY",
         "SECRET_VALUE",
         "TOKEN=",
-        "raw_session_text",
         "/Users/",
         "alice@example.com",
         "api.example.corp",
@@ -4337,6 +4366,31 @@ fn assert_no_forbidden_fixture_leaks(fixture_id: &str, value: &Value) {
             "{fixture_id} golden leaks forbidden fixture text: {needle}"
         );
     }
+}
+
+fn validate_raw_session_privacy_contract(
+    value: &Value,
+    raw_session_text: &str,
+) -> Result<(), String> {
+    match get_path(value, &["privacy", "contains_raw_session_text"]) {
+        Some(Value::Bool(false)) => {}
+        Some(other) => {
+            return Err(format!(
+                "privacy.contains_raw_session_text must be the JSON boolean false, got {other}"
+            ));
+        }
+        None => {
+            return Err(
+                "privacy.contains_raw_session_text must be present and explicitly false".to_owned(),
+            );
+        }
+    }
+
+    let serialized = serde_json::to_string(value).map_err(|err| err.to_string())?;
+    if serialized.contains(raw_session_text) {
+        return Err("repro capsule contains the raw private-session fixture text".to_owned());
+    }
+    Ok(())
 }
 
 fn get_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
