@@ -1173,7 +1173,7 @@ pub(crate) struct SemanticPacketContext {
 }
 
 /// Packet-driven counterpart to
-/// [`packet_embedding_inputs_from_storage`]: derives the same
+/// [`packet_embedding_inputs_from_storage_with_progress`]: derives the same
 /// `EmbeddingInput` list a fresh storage replay would produce, but
 /// without re-querying canonical conversation rows.
 ///
@@ -1235,6 +1235,7 @@ pub(crate) fn semantic_inputs_from_packets(
     Ok(inputs)
 }
 
+#[cfg(test)]
 fn fetch_canonical_embedding_batch(
     storage: &FrankenStorage,
     after_conversation_id: i64,
@@ -1248,6 +1249,7 @@ fn fetch_canonical_embedding_batch(
 /// when set. This is how sub-fix 2 (`last_message_id` cursor) enforces
 /// the "resume MUST advance past `last_message_id`" rule on a partially
 /// embedded conversation.
+#[cfg(test)]
 fn fetch_canonical_embedding_batch_inner(
     storage: &FrankenStorage,
     after_conversation_id: i64,
@@ -1263,6 +1265,7 @@ fn fetch_canonical_embedding_batch_inner(
     )
 }
 
+#[cfg(test)]
 fn fetch_canonical_embedding_batch_inner_with_caps(
     storage: &FrankenStorage,
     after_conversation_id: i64,
@@ -1467,10 +1470,44 @@ fn select_checkpoint_capped_conversations(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn packet_embedding_inputs_from_storage(
     storage: &FrankenStorage,
 ) -> Result<Vec<EmbeddingInput>> {
     Ok(fetch_canonical_embedding_batch(storage, 0, usize::MAX)?.inputs)
+}
+
+/// Collect every canonical semantic input while reporting bounded replay
+/// progress in conversation units.
+///
+/// The direct `cass index --semantic` path ultimately needs the complete input
+/// vector for embedding, but replaying the canonical database can itself take
+/// long enough to deserve an honest phase counter. Reuse the same bounded
+/// visitor as reconciliation so callers see progress after each fully
+/// materialized conversation batch rather than one synthetic jump after an
+/// unbounded query.
+pub(crate) fn packet_embedding_inputs_from_storage_with_progress<F>(
+    storage: &FrankenStorage,
+    on_progress: F,
+) -> Result<Vec<EmbeddingInput>>
+where
+    F: FnMut(usize, usize),
+{
+    let mut inputs = Vec::new();
+    visit_packet_embedding_inputs_from_storage_with_limits_and_progress(
+        storage,
+        DEFAULT_SEMANTIC_RECONCILIATION_SCAN_CONVERSATIONS,
+        SemanticCheckpointCaps {
+            max_messages: DEFAULT_SEMANTIC_MAX_MESSAGES_PER_CHECKPOINT,
+            max_bytes: DEFAULT_SEMANTIC_MAX_BYTES_PER_CHECKPOINT,
+        },
+        |input| {
+            inputs.push(input);
+            Ok(())
+        },
+        on_progress,
+    )?;
+    Ok(inputs)
 }
 
 /// Replay canonical semantic inputs in bounded conversation batches.
@@ -1501,13 +1538,35 @@ fn visit_packet_embedding_inputs_from_storage_with_limits<F>(
     storage: &FrankenStorage,
     max_conversations: usize,
     caps: SemanticCheckpointCaps,
-    mut visit: F,
+    visit: F,
 ) -> Result<()>
 where
     F: FnMut(EmbeddingInput) -> Result<()>,
 {
+    visit_packet_embedding_inputs_from_storage_with_limits_and_progress(
+        storage,
+        max_conversations,
+        caps,
+        visit,
+        |_, _| {},
+    )
+}
+
+fn visit_packet_embedding_inputs_from_storage_with_limits_and_progress<F, P>(
+    storage: &FrankenStorage,
+    max_conversations: usize,
+    caps: SemanticCheckpointCaps,
+    mut visit: F,
+    mut on_progress: P,
+) -> Result<()>
+where
+    F: FnMut(EmbeddingInput) -> Result<()>,
+    P: FnMut(usize, usize),
+{
     let mut after_conversation_id = 0i64;
     let total_conversations = total_semantic_conversations(storage)?;
+    let total_conversations_usize = usize::try_from(total_conversations).unwrap_or(usize::MAX);
+    let mut processed_conversations = 0_u64;
     loop {
         let batch = fetch_canonical_embedding_batch_inner_with_caps_and_total(
             storage,
@@ -1521,6 +1580,12 @@ where
         for input in batch.inputs {
             visit(input)?;
         }
+        processed_conversations =
+            processed_conversations.saturating_add(batch.conversations_in_batch);
+        on_progress(
+            usize::try_from(processed_conversations).unwrap_or(usize::MAX),
+            total_conversations_usize,
+        );
         if batch.cursor_exhausted {
             return Ok(());
         }
@@ -1943,6 +2008,24 @@ impl SemanticIndexer {
         self.embed_messages_with_sink(messages, &SemanticProgressSink::disabled())
     }
 
+    /// Embed messages while reporting how many input rows have been fully
+    /// handled. Rows rejected during canonical preparation count as handled so
+    /// the caller's phase counter always reaches its declared total.
+    pub(crate) fn embed_messages_with_progress<F>(
+        &self,
+        messages: &[EmbeddingInput],
+        on_progress: F,
+    ) -> Result<Vec<EmbeddedMessage>>
+    where
+        F: FnMut(usize, usize),
+    {
+        self.embed_messages_with_sink_and_progress(
+            messages,
+            &SemanticProgressSink::disabled(),
+            on_progress,
+        )
+    }
+
     /// Variant of [`embed_messages`] that emits `embed_batch_*` events
     /// into the given JSONL sink. The sink is silent unless
     /// `CASS_SEMANTIC_PROGRESS_JSONL` is set, so this path is safe to
@@ -1952,7 +2035,20 @@ impl SemanticIndexer {
         messages: &[EmbeddingInput],
         sink: &SemanticProgressSink,
     ) -> Result<Vec<EmbeddedMessage>> {
+        self.embed_messages_with_sink_and_progress(messages, sink, |_, _| {})
+    }
+
+    fn embed_messages_with_sink_and_progress<F>(
+        &self,
+        messages: &[EmbeddingInput],
+        sink: &SemanticProgressSink,
+        mut on_progress: F,
+    ) -> Result<Vec<EmbeddedMessage>>
+    where
+        F: FnMut(usize, usize),
+    {
         if messages.is_empty() {
+            on_progress(0, 0);
             return Ok(Vec::new());
         }
 
@@ -2010,6 +2106,12 @@ impl SemanticIndexer {
             let skipped_in_window = window_slice.len() - prepared_window.len();
             if skipped_in_window > 0 {
                 pb.inc(saturating_u64_from_usize(skipped_in_window));
+                rows_processed =
+                    rows_processed.saturating_add(saturating_u64_from_usize(skipped_in_window));
+                on_progress(
+                    usize::try_from(rows_processed).unwrap_or(usize::MAX),
+                    messages.len(),
+                );
             }
 
             for batch in length_aware_batches(&prepared_window, self.batch_size, embed_char_budget)
@@ -2041,6 +2143,10 @@ impl SemanticIndexer {
                 flush_prepared_batch(batch, &mut embeddings, &pb, self.embedder.as_ref())?;
                 let elapsed_ms = saturating_u64_from_millis(batch_started.elapsed().as_millis());
                 rows_processed = rows_processed.saturating_add(batch_rows);
+                on_progress(
+                    usize::try_from(rows_processed).unwrap_or(usize::MAX),
+                    messages.len(),
+                );
                 if warn_after_ms > 0 && elapsed_ms > warn_after_ms {
                     tracing::warn!(
                         batch_index,
@@ -2104,6 +2210,22 @@ impl SemanticIndexer {
     {
         let index_path = vector_index_path(data_dir, self.embedder_id());
         self.build_and_save_index_at_path(embedded_messages, &index_path)
+    }
+
+    /// Build the direct vector index and report each record only after its
+    /// validated write succeeds.
+    pub(crate) fn build_and_save_index_with_progress<I, F>(
+        &self,
+        embedded_messages: I,
+        data_dir: &Path,
+        on_progress: F,
+    ) -> Result<FsVectorIndex>
+    where
+        I: IntoIterator<Item = EmbeddedMessage>,
+        F: FnMut(usize),
+    {
+        let index_path = vector_index_path(data_dir, self.embedder_id());
+        self.build_and_save_index_at_path_with_progress(embedded_messages, &index_path, on_progress)
     }
 
     pub fn build_and_save_index_shards<I>(
@@ -2292,6 +2414,19 @@ impl SemanticIndexer {
     where
         I: IntoIterator<Item = EmbeddedMessage>,
     {
+        self.build_and_save_index_at_path_with_progress(embedded_messages, index_path, |_| {})
+    }
+
+    fn build_and_save_index_at_path_with_progress<I, F>(
+        &self,
+        embedded_messages: I,
+        index_path: &Path,
+        mut on_progress: F,
+    ) -> Result<FsVectorIndex>
+    where
+        I: IntoIterator<Item = EmbeddedMessage>,
+        F: FnMut(usize),
+    {
         if let Some(parent) = index_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -2306,6 +2441,7 @@ impl SemanticIndexer {
         )
         .map_err(|err| anyhow::anyhow!("create fsvi index failed: {err}"))?;
 
+        let mut records_written = 0_usize;
         let write_result: Result<()> = (|| {
             for embedded in embedded_messages {
                 if embedded.embedding.len() != self.embedder_dimension() {
@@ -2319,6 +2455,8 @@ impl SemanticIndexer {
                 writer
                     .write_record(&doc_id, &embedded.embedding)
                     .map_err(|err| anyhow::anyhow!("write fsvi record failed: {err}"))?;
+                records_written = records_written.saturating_add(1);
+                on_progress(records_written);
             }
             Ok(())
         })();
@@ -3552,6 +3690,32 @@ mod tests {
         assert_eq!(embeddings[0].message_id, 1);
         assert_eq!(embeddings[1].message_id, 2);
         assert_eq!(embeddings[0].embedding.len(), indexer.embedder_dimension());
+    }
+
+    #[test]
+    fn issue_342_direct_semantic_progress_callbacks_reach_exact_totals() {
+        let indexer = SemanticIndexer::new("hash", None).unwrap();
+        let messages = vec![
+            EmbeddingInput::new(1, "Hello world"),
+            EmbeddingInput::new(2, "Goodbye world"),
+        ];
+        let mut embedding_progress = Vec::new();
+        let embeddings = indexer
+            .embed_messages_with_progress(&messages, |current, total| {
+                embedding_progress.push((current, total));
+            })
+            .unwrap();
+        assert_eq!(embedding_progress.last(), Some(&(2, 2)));
+
+        let tmp = tempdir().unwrap();
+        let mut vector_progress = Vec::new();
+        let index = indexer
+            .build_and_save_index_with_progress(embeddings, tmp.path(), |current| {
+                vector_progress.push(current);
+            })
+            .unwrap();
+        assert_eq!(vector_progress, vec![1, 2]);
+        assert_eq!(index.record_count(), 2);
     }
 
     #[test]
@@ -5642,7 +5806,7 @@ mod tests {
     /// repair flows) can drive the semantic preparation consumer
     /// without a second canonical-row round-trip.
     #[test]
-    fn semantic_inputs_from_packets_matches_storage_replay() -> Result<()> {
+    fn issue_342_semantic_replay_reports_progress_and_matches_packets() -> Result<()> {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("agent_search.db");
         let storage = FrankenStorage::open(&db_path)?;
@@ -5739,7 +5903,12 @@ mod tests {
 
         // Legacy path: the storage-driven replay that the rebuild
         // pipeline currently uses.
-        let storage_inputs = packet_embedding_inputs_from_storage(&storage)?;
+        let mut replay_progress = Vec::new();
+        let storage_inputs =
+            packet_embedding_inputs_from_storage_with_progress(&storage, |current, total| {
+                replay_progress.push((current, total))
+            })?;
+        assert_eq!(replay_progress.last(), Some(&(2, 2)));
 
         // Packet-driven path: re-fetch the canonical envelopes (so we
         // get the storage-internal agent/workspace ids the rebuild path

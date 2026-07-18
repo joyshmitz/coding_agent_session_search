@@ -342,12 +342,19 @@ pub enum Commands {
         #[arg(long, default_value_t = 30)]
         watch_interval: u64,
 
-        /// Build semantic vector index after text indexing
+        /// Build semantic vector index after text indexing. Progress reports
+        /// canonical replay, embedding, vector publish, optional HNSW,
+        /// manifest publish, and finalization as distinct phases. Set
+        /// CASS_INDEX_STALL_DETECT_SECS=0 to disable stall diagnostics, or
+        /// CASS_INDEX_STALL_ABORT_SECS=0 to keep abort-eligible lexical stalls
+        /// report-only while still reporting semantic phase progress.
         #[arg(long)]
         semantic: bool,
 
         /// Build HNSW index for approximate nearest neighbor search (requires --semantic).
-        /// Enables O(log n) search with `--approximate` flag at query time.
+        /// Enables O(log n) search with `--approximate` at query time. Native
+        /// HNSW construction is an opaque phase: cass reports its vector total
+        /// but does not synthesize forward progress the backend cannot expose.
         #[arg(long, default_value_t = false)]
         build_hnsw: bool,
 
@@ -77087,6 +77094,16 @@ fn build_env_var_capabilities() -> Vec<EnvVarCapability> {
             "Suppress NDJSON progress events from cass index --json when set to 1.",
         ),
         env_var_capability(
+            "CASS_INDEX_STALL_DETECT_SECS",
+            Some("120"),
+            "Seconds without measured phase progress before cass index emits diagnostics; 0 disables detection.",
+        ),
+        env_var_capability(
+            "CASS_INDEX_STALL_ABORT_SECS",
+            Some("300"),
+            "Seconds without progress before an abort-eligible lexical stall exits 70; 0 keeps stalls report-only. Semantic phases are report-only.",
+        ),
+        env_var_capability(
             "CASS_SEMANTIC_EMBEDDER",
             None,
             "Select the semantic embedder/model implementation when configured.",
@@ -84909,8 +84926,10 @@ const INDEX_STALL_HINT: &str = concat!(
     "Capture a stack trace with `sudo cat /proc/$(pgrep -f 'cass index')/stack` ",
     "and/or `sudo gdb -batch -ex 'thread apply all bt' -p $(pgrep -f 'cass index') 2>/dev/null | head -200` ",
     "and attach to issue #244 (indexing-phase wedges) or #258 (watch_startup wedges where the lock-file ",
-    "heartbeat keeps refreshing while one thread spins). Set CASS_INDEX_STALL_DETECT_SECS=0 to disable detection; ",
-    "set CASS_INDEX_STALL_ABORT_SECS=0 to keep phase-2 stalls report-only. ",
+    "heartbeat keeps refreshing while one thread spins). Semantic replay, embedding, vector publish, manifest, ",
+    "and finalize phases expose their own counters and are report-only; native HNSW construction is explicitly ",
+    "labelled but opaque. Set CASS_INDEX_STALL_DETECT_SECS=0 to disable detection; set ",
+    "CASS_INDEX_STALL_ABORT_SECS=0 to keep abort-eligible lexical stalls report-only. ",
     "If `finalizing` is true in the diagnostics the indexer is inside the final WAL checkpoint of a large ",
     "deferred bulk-ingest WAL (slow on macOS); CASS_INDEX_FINALIZE_ABORT_SECS (default 1800) bounds that window, ",
     "and CASS_INDEX_WRITER_WAL_AUTOCHECKPOINT_PAGES=1000 caps WAL growth so the final checkpoint stays small."
@@ -85002,15 +85021,10 @@ struct IndexStallWatchdog {
     /// `current >= total`) is normal idle between rescans, not a wedge, so the
     /// finalize-wedge detect/abort is suppressed (cass #311).
     is_watch: bool,
-    /// True when this run is building semantic (vector) assets. The native
-    /// MiniLM embed + HNSW build + vector publish all run AFTER the lexical
-    /// rebuild has already parked the progress atomics in the quiescent
-    /// finalize state (phase 0 "preparing", `current >= total`), and they never
-    /// advance those atomics — so that multi-minute CPU-heavy work looks
-    /// identical to a #297 finalize wedge. Without this flag the abort fires
-    /// mid-embed and kills the process with exit(70) before any vector file is
-    /// published, so the next run starts over and semantic search never becomes
-    /// available (cass #315). Set on the semantic index path only.
+    /// True when this run is building semantic (vector) assets. Semantic work
+    /// now publishes honest per-phase counters; this flag keeps those phases
+    /// report-only and suppresses false stall reports during the one opaque
+    /// native HNSW call. A preceding phase-2 lexical wedge remains abortable.
     semantic_build: bool,
     last_phase: usize,
     last_current: usize,
@@ -85048,17 +85062,11 @@ impl IndexStallWatchdog {
         self
     }
 
-    /// Mark this watchdog as supervising a one-shot semantic (vector) index
-    /// build. The native embedding pass, HNSW build, and vector publish all run
-    /// while the progress atomics are already parked in the quiescent finalize
-    /// state (phase 0 "preparing", `current >= total`) left by the preceding
-    /// lexical rebuild, and never advance them — so that legitimate multi-minute
-    /// work matches the #297 finalize-wedge shape exactly. Without this flag the
-    /// #297 abort fires after `abort_threshold` and kills the process with
-    /// exit(70) before any vector file is published (cass #315). Treating the
-    /// quiescent finalize state as healthy active work (like watch-mode idle)
-    /// lets the semantic build run to completion and publish. A genuine phase-2
-    /// (lexical indexing) wedge does not match and is still detected + aborted.
+    /// Mark this watchdog as supervising a one-shot semantic (vector) build.
+    /// Measured semantic phases can emit diagnostics but never exit the
+    /// process; native HNSW is opaque and therefore excluded from no-progress
+    /// diagnostics. A genuine phase-2 lexical wedge is still detected and
+    /// aborted under the ordinary policy.
     fn semantic_aware(mut self, semantic_build: bool) -> Self {
         self.semantic_build = semantic_build;
         self
@@ -85118,6 +85126,10 @@ impl IndexStallWatchdog {
             self.last_current = current;
             self.stall_reported_for_phase = None;
             self.stall_abort_reported_for_phase = None;
+            return None;
+        }
+
+        if self.semantic_build && phase_code == indexer::INDEX_PHASE_SEMANTIC_HNSW {
             return None;
         }
 
@@ -85333,7 +85345,23 @@ fn abort_after_index_stall_if_requested(payload: &serde_json::Value, data_dir: &
 #[cfg(test)]
 mod stall_diagnostics_tests {
     use super::collect_stall_diagnostics;
+    use clap::CommandFactory;
     use tempfile::TempDir;
+
+    #[test]
+    fn issue_342_index_help_documents_semantic_stall_controls() {
+        super::run_on_large_stack(|| {
+            let mut command = super::Cli::command();
+            let index = command
+                .find_subcommand_mut("index")
+                .expect("index subcommand");
+            let help = index.render_long_help().to_string();
+            let normalized_help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(normalized_help.contains("CASS_INDEX_STALL_DETECT_SECS=0"));
+            assert!(normalized_help.contains("CASS_INDEX_STALL_ABORT_SECS=0"));
+            assert!(normalized_help.contains("opaque phase"));
+        });
+    }
 
     #[test]
     fn empty_data_dir_produces_null_checkpoint_and_no_lock() {
@@ -85686,6 +85714,80 @@ mod stall_diagnostics_tests {
             .ok_or_else(|| anyhow::anyhow!("phase-2 semantic stall did not abort"))?;
         assert_eq!(abort["event"], serde_json::json!("stall_aborting"));
         assert_eq!(abort["exit_code"], serde_json::json!(70));
+        Ok(())
+    }
+
+    #[test]
+    fn issue_342_watchdog_reports_semantic_embedding_stall_without_aborting() -> anyhow::Result<()>
+    {
+        use super::{IndexStallAbortPolicy, IndexStallWatchdog};
+        use crate::indexer::{INDEX_PHASE_SEMANTIC_EMBEDDING, IndexingProgress};
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let tmp = TempDir::new()?;
+        let mut watchdog = IndexStallWatchdog::with_abort_policy(
+            tmp.path().to_path_buf(),
+            Duration::from_millis(50),
+            IndexStallAbortPolicy::AbortPhaseTwo,
+        )
+        .semantic_aware(true);
+        watchdog.threshold = Some(Duration::from_millis(1));
+        watchdog.abort_threshold = Some(Duration::from_millis(2));
+        watchdog.last_phase = INDEX_PHASE_SEMANTIC_EMBEDDING;
+        watchdog.last_current = 7;
+        watchdog.last_progress_advance = std::time::Instant::now() - Duration::from_millis(100);
+
+        let progress = Arc::new(IndexingProgress::default());
+        progress
+            .phase
+            .store(INDEX_PHASE_SEMANTIC_EMBEDDING, Ordering::Relaxed);
+        progress.current.store(7, Ordering::Relaxed);
+        progress.total.store(100, Ordering::Relaxed);
+
+        let report = watchdog
+            .observe(&progress, 100)
+            .ok_or_else(|| anyhow::anyhow!("semantic embedding stall did not report"))?;
+        assert_eq!(report["event"], serde_json::json!("stall_detected"));
+        assert_eq!(report["phase"], serde_json::json!("semantic_embedding"));
+        assert_ne!(report["abort_process"], serde_json::json!(true));
+        assert!(
+            watchdog.observe(&progress, 200).is_none(),
+            "semantic phases must remain report-only past the abort threshold"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn issue_342_watchdog_suppresses_false_stall_for_opaque_semantic_hnsw() -> anyhow::Result<()> {
+        use super::{IndexStallAbortPolicy, IndexStallWatchdog};
+        use crate::indexer::{INDEX_PHASE_SEMANTIC_HNSW, IndexingProgress};
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let tmp = TempDir::new()?;
+        let mut watchdog = IndexStallWatchdog::with_abort_policy(
+            tmp.path().to_path_buf(),
+            Duration::from_millis(50),
+            IndexStallAbortPolicy::AbortPhaseTwo,
+        )
+        .semantic_aware(true);
+        watchdog.threshold = Some(Duration::from_millis(1));
+        watchdog.abort_threshold = Some(Duration::from_millis(2));
+        watchdog.last_phase = INDEX_PHASE_SEMANTIC_HNSW;
+        watchdog.last_current = 0;
+        watchdog.last_progress_advance = std::time::Instant::now() - Duration::from_millis(100);
+
+        let progress = Arc::new(IndexingProgress::default());
+        progress
+            .phase
+            .store(INDEX_PHASE_SEMANTIC_HNSW, Ordering::Relaxed);
+        progress.total.store(100, Ordering::Relaxed);
+
+        assert!(watchdog.observe(&progress, 100).is_none());
+        assert!(watchdog.observe(&progress, 200).is_none());
         Ok(())
     }
 
@@ -86153,14 +86255,21 @@ fn run_index_with_data(
                 .unwrap_or_default();
 
             let phase_str = match phase {
-                1 => "Scanning",
-                2 => "Indexing",
+                indexer::INDEX_PHASE_SCANNING => "Scanning",
+                indexer::INDEX_PHASE_LEXICAL_INDEXING => "Indexing",
+                indexer::INDEX_PHASE_SEMANTIC_INITIALIZE => "Semantic initialize",
+                indexer::INDEX_PHASE_SEMANTIC_REPLAY => "Semantic replay",
+                indexer::INDEX_PHASE_SEMANTIC_EMBEDDING => "Semantic embedding",
+                indexer::INDEX_PHASE_SEMANTIC_VECTOR_PUBLISH => "Semantic vector publish",
+                indexer::INDEX_PHASE_SEMANTIC_HNSW => "Semantic HNSW",
+                indexer::INDEX_PHASE_SEMANTIC_MANIFEST => "Semantic manifest",
+                indexer::INDEX_PHASE_SEMANTIC_FINALIZE => "Semantic finalize",
                 _ => "Preparing",
             };
 
             let rebuild_indicator = if is_rebuilding { " (rebuilding)" } else { "" };
 
-            let msg = if phase == 1 {
+            let msg = if phase == indexer::INDEX_PHASE_SCANNING {
                 let scan_progress = if total > 0 {
                     format!("{current}/{total} connectors")
                 } else {
@@ -86186,7 +86295,7 @@ fn run_index_with_data(
                         phase_str, rebuild_indicator, scan_progress
                     )
                 }
-            } else if phase == 2 {
+            } else if phase == indexer::INDEX_PHASE_LEXICAL_INDEXING {
                 // Indexing phase - show progress
                 if total > 0 {
                     let pct = (current as f64 / total as f64 * 100.0).min(100.0);
@@ -86197,6 +86306,16 @@ fn run_index_with_data(
                 } else {
                     format!("{}{}: Processing...", phase_str, rebuild_indicator)
                 }
+            } else if phase >= indexer::INDEX_PHASE_SEMANTIC_INITIALIZE && total > 0 {
+                let pct = (current as f64 / total as f64 * 100.0).min(100.0);
+                format!(
+                    "{}: {}/{} {} ({:.0}%)",
+                    phase_str,
+                    current,
+                    total,
+                    indexer::IndexingProgress::phase_unit_for(phase),
+                    pct
+                )
             } else {
                 format!("{}{}...", phase_str, rebuild_indicator)
             };
@@ -86242,6 +86361,9 @@ fn run_index_with_data(
         let mut last_agents = 0;
         let mut last_current = 0;
         let mut last_scan_current = 0;
+        let mut last_counter_emit = std::time::Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(std::time::Instant::now);
         let mut stall_watchdog =
             IndexStallWatchdog::aborting_phase_two(data_dir.clone(), progress_interval)
                 .watch_aware(watch)
@@ -86260,15 +86382,22 @@ fn run_index_with_data(
             // Print status on phase change
             if phase != last_phase {
                 match phase {
-                    1 => eprintln!("Scanning for agents..."),
-                    2 => eprintln!("Indexing conversations..."),
+                    indexer::INDEX_PHASE_SCANNING => eprintln!("Scanning for agents..."),
+                    indexer::INDEX_PHASE_LEXICAL_INDEXING => {
+                        eprintln!("Indexing conversations...")
+                    }
+                    phase if phase >= indexer::INDEX_PHASE_SEMANTIC_INITIALIZE => {
+                        eprintln!("{}...", indexer::IndexingProgress::phase_label_for(phase));
+                    }
                     _ => {}
                 }
                 last_phase = phase;
+                last_current = current;
+                last_counter_emit = std::time::Instant::now();
             }
 
             // Print scan progress during discovery
-            if phase == 1 && current != last_scan_current {
+            if phase == indexer::INDEX_PHASE_SCANNING && current != last_scan_current {
                 if total > 0 {
                     eprintln!("  Scanned {}/{} connectors", current, total);
                 } else {
@@ -86284,13 +86413,43 @@ fn run_index_with_data(
             }
 
             // Print indexing progress every 100 conversations
-            if phase == 2 && current > last_current && current % 100 == 0 {
+            if phase == indexer::INDEX_PHASE_LEXICAL_INDEXING
+                && current > last_current
+                && current % 100 == 0
+            {
                 if total > 0 {
                     eprintln!("  Indexed {}/{} conversations", current, total);
                 } else {
                     eprintln!("  Indexed {} conversations", current);
                 }
                 last_current = current;
+            }
+
+            // Semantic counters can advance rapidly during replay/vector
+            // publish. Emit at most once per second, plus the exact terminal
+            // value, so plain mode is informative without becoming a log
+            // flood on large corpora.
+            if phase >= indexer::INDEX_PHASE_SEMANTIC_INITIALIZE
+                && current != last_current
+                && (last_counter_emit.elapsed() >= Duration::from_secs(1)
+                    || (total > 0 && current >= total))
+            {
+                if total > 0 {
+                    eprintln!(
+                        "  {}/{} {}",
+                        current,
+                        total,
+                        indexer::IndexingProgress::phase_unit_for(phase)
+                    );
+                } else {
+                    eprintln!(
+                        "  {} {}",
+                        current,
+                        indexer::IndexingProgress::phase_unit_for(phase)
+                    );
+                }
+                last_current = current;
+                last_counter_emit = std::time::Instant::now();
             }
 
             if let Some(payload) =

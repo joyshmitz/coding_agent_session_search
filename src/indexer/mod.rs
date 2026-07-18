@@ -80,8 +80,8 @@ use crate::storage::sqlite::{
     seed_canonical_from_best_historical_bundle,
 };
 use semantic::{
-    EmbeddingInput, SemanticIndexer, packet_embedding_inputs_from_storage,
-    packet_embedding_inputs_from_storage_since, semantic_doc_id_for_input,
+    EmbeddingInput, SemanticIndexer, packet_embedding_inputs_from_storage_since,
+    packet_embedding_inputs_from_storage_with_progress, semantic_doc_id_for_input,
     visit_packet_embedding_inputs_from_storage,
 };
 
@@ -950,11 +950,23 @@ impl PartialEq<CanonicalMutationCounts> for NonWatchIngestOutcome {
     }
 }
 
+pub(crate) const INDEX_PHASE_PREPARING: usize = 0;
+pub(crate) const INDEX_PHASE_SCANNING: usize = 1;
+pub(crate) const INDEX_PHASE_LEXICAL_INDEXING: usize = 2;
+pub(crate) const INDEX_PHASE_SEMANTIC_INITIALIZE: usize = 3;
+pub(crate) const INDEX_PHASE_SEMANTIC_REPLAY: usize = 4;
+pub(crate) const INDEX_PHASE_SEMANTIC_EMBEDDING: usize = 5;
+pub(crate) const INDEX_PHASE_SEMANTIC_VECTOR_PUBLISH: usize = 6;
+pub(crate) const INDEX_PHASE_SEMANTIC_HNSW: usize = 7;
+pub(crate) const INDEX_PHASE_SEMANTIC_MANIFEST: usize = 8;
+pub(crate) const INDEX_PHASE_SEMANTIC_FINALIZE: usize = 9;
+
 #[derive(Debug, Default)]
 pub struct IndexingProgress {
     pub total: AtomicUsize,
     pub current: AtomicUsize,
-    // Simple phase indicator: 0=Idle, 1=Scanning, 2=Indexing
+    // Phase indicator. Values 0-2 cover canonical/lexical work; 3-9 identify
+    // the independently measured semantic pipeline stages above.
     pub phase: AtomicUsize,
     pub is_rebuilding: AtomicBool,
     /// Set by `run_index` while it is inside the post-publish finalize window —
@@ -1062,16 +1074,48 @@ pub struct IndexingProgress {
 }
 
 impl IndexingProgress {
-    fn phase_label_for(phase: usize) -> &'static str {
+    pub(crate) fn phase_label_for(phase: usize) -> &'static str {
         match phase {
-            1 => "scanning",
-            2 => "indexing",
+            INDEX_PHASE_PREPARING => "preparing",
+            INDEX_PHASE_SCANNING => "scanning",
+            INDEX_PHASE_LEXICAL_INDEXING => "indexing",
+            INDEX_PHASE_SEMANTIC_INITIALIZE => "semantic_initialize",
+            INDEX_PHASE_SEMANTIC_REPLAY => "semantic_replay",
+            INDEX_PHASE_SEMANTIC_EMBEDDING => "semantic_embedding",
+            INDEX_PHASE_SEMANTIC_VECTOR_PUBLISH => "semantic_vector_publish",
+            INDEX_PHASE_SEMANTIC_HNSW => "semantic_hnsw",
+            INDEX_PHASE_SEMANTIC_MANIFEST => "semantic_manifest",
+            INDEX_PHASE_SEMANTIC_FINALIZE => "semantic_finalize",
             _ => "preparing",
         }
     }
 
+    pub(crate) fn phase_unit_for(phase: usize) -> &'static str {
+        match phase {
+            INDEX_PHASE_SCANNING => "connectors",
+            INDEX_PHASE_LEXICAL_INDEXING | INDEX_PHASE_SEMANTIC_REPLAY => "conversations",
+            INDEX_PHASE_SEMANTIC_EMBEDDING => "messages",
+            INDEX_PHASE_SEMANTIC_VECTOR_PUBLISH | INDEX_PHASE_SEMANTIC_HNSW => "vectors",
+            INDEX_PHASE_SEMANTIC_MANIFEST | INDEX_PHASE_SEMANTIC_FINALIZE => "steps",
+            _ => "items",
+        }
+    }
+
+    pub(crate) fn set_phase_progress(&self, phase: usize, current: usize, total: usize) {
+        // Publish counters before the phase code so a polling observer never
+        // sees a new phase paired with stale lexical totals.
+        self.total.store(total, Ordering::Relaxed);
+        self.current.store(current, Ordering::Relaxed);
+        self.phase.store(phase, Ordering::Relaxed);
+    }
+
+    pub(crate) fn update_phase_progress(&self, current: usize, total: usize) {
+        self.total.store(total, Ordering::Relaxed);
+        self.current.store(current, Ordering::Relaxed);
+    }
+
     /// Human-readable label for the current phase.
-    /// 0 = preparing (pre-scan), 1 = scanning, 2 = indexing.
+    /// See the `INDEX_PHASE_*` constants for the canonical phase taxonomy.
     pub fn phase_label(&self) -> &'static str {
         Self::phase_label_for(self.phase.load(Ordering::Relaxed))
     }
@@ -6247,6 +6291,20 @@ fn acquire_index_run_lock(
     db_path: &Path,
     mode: SearchMaintenanceMode,
 ) -> Result<IndexRunLockGuard> {
+    acquire_index_run_lock_with_job_kind(
+        data_dir,
+        db_path,
+        mode,
+        maintenance_job_kind_for_mode(mode),
+    )
+}
+
+fn acquire_index_run_lock_with_job_kind(
+    data_dir: &Path,
+    db_path: &Path,
+    mode: SearchMaintenanceMode,
+    job_kind: SearchMaintenanceJobKind,
+) -> Result<IndexRunLockGuard> {
     fs::create_dir_all(data_dir)
         .with_context(|| format!("creating cass data directory {}", data_dir.display()))?;
     let lock_path = data_dir.join("index-run.lock");
@@ -6286,7 +6344,7 @@ fn acquire_index_run_lock(
         last_progress_at_ms_atomic: Arc::new(AtomicI64::new(now_ms)),
         db_path: crate::normalize_path_identity(db_path),
         job_id: String::new(),
-        job_kind: maintenance_job_kind_for_mode(mode),
+        job_kind,
         metadata_write_lock: Arc::new(Mutex::new(())),
     };
     guard.job_id = format!(
@@ -12943,8 +13001,17 @@ pub fn run_index(
     } else {
         SearchMaintenanceMode::Index
     };
-    let mut index_run_lock =
-        acquire_index_run_lock(&opts.data_dir, &opts.db_path, initial_lock_mode)?;
+    let job_kind = if opts.semantic || opts.build_hnsw {
+        SearchMaintenanceJobKind::SemanticRebuild
+    } else {
+        maintenance_job_kind_for_mode(initial_lock_mode)
+    };
+    let mut index_run_lock = acquire_index_run_lock_with_job_kind(
+        &opts.data_dir,
+        &opts.db_path,
+        initial_lock_mode,
+        job_kind,
+    )?;
     let _index_run_lock_heartbeat = IndexRunLockHeartbeat::start(
         opts.data_dir.clone(),
         index_run_lock_heartbeat_interval(),
@@ -14406,10 +14473,24 @@ pub fn run_index(
                 }
             };
             set_semantic_phase("semantic:initialize");
+            set_semantic_progress_phase(
+                opts.progress.as_ref(),
+                &progress_bump,
+                INDEX_PHASE_SEMANTIC_INITIALIZE,
+                0,
+                0,
+            );
             tracing::info!(embedder = %opts.embedder, "starting semantic indexing");
 
             let semantic_indexer = SemanticIndexer::new(&opts.embedder, Some(&opts.data_dir))?;
-            set_semantic_phase("semantic:canonical_replay");
+            set_semantic_phase("semantic:replay");
+            set_semantic_progress_phase(
+                opts.progress.as_ref(),
+                &progress_bump,
+                INDEX_PHASE_SEMANTIC_REPLAY,
+                0,
+                0,
+            );
             let mut semantic_read_storage = FrankenStorage::open_readonly(&opts.db_path)
                 .with_context(|| {
                     format!(
@@ -14418,8 +14499,17 @@ pub fn run_index(
                     )
                 })?;
 
-            let mut embedding_inputs =
-                packet_embedding_inputs_from_storage(&semantic_read_storage)?;
+            let mut embedding_inputs = packet_embedding_inputs_from_storage_with_progress(
+                &semantic_read_storage,
+                |current, total| {
+                    update_semantic_progress(
+                        opts.progress.as_ref(),
+                        &progress_bump,
+                        current,
+                        total,
+                    );
+                },
+            )?;
             tracing::info!(
                 message_count = embedding_inputs.len(),
                 packet_driven = true,
@@ -14431,8 +14521,25 @@ pub fn run_index(
             });
 
             // Generate embeddings
-            set_semantic_phase("semantic:embed");
-            let embedded_messages = semantic_indexer.embed_messages(&embedding_inputs)?;
+            set_semantic_phase("semantic:embedding");
+            set_semantic_progress_phase(
+                opts.progress.as_ref(),
+                &progress_bump,
+                INDEX_PHASE_SEMANTIC_EMBEDDING,
+                0,
+                embedding_inputs.len(),
+            );
+            let embedded_messages = semantic_indexer.embed_messages_with_progress(
+                &embedding_inputs,
+                |current, total| {
+                    update_semantic_progress(
+                        opts.progress.as_ref(),
+                        &progress_bump,
+                        current,
+                        total,
+                    );
+                },
+            )?;
             tracing::info!(
                 embedded_count = embedded_messages.len(),
                 "generated embeddings"
@@ -14442,8 +14549,25 @@ pub fn run_index(
                 let embedded_doc_count = embedded_messages.len();
                 let build_started_at_ms = semantic_indexing_now_ms();
                 set_semantic_phase("semantic:vector_publish");
-                let vector_index =
-                    semantic_indexer.build_and_save_index(embedded_messages, &opts.data_dir)?;
+                set_semantic_progress_phase(
+                    opts.progress.as_ref(),
+                    &progress_bump,
+                    INDEX_PHASE_SEMANTIC_VECTOR_PUBLISH,
+                    0,
+                    embedded_doc_count,
+                );
+                let vector_index = semantic_indexer.build_and_save_index_with_progress(
+                    embedded_messages,
+                    &opts.data_dir,
+                    |current| {
+                        update_semantic_progress(
+                            opts.progress.as_ref(),
+                            &progress_bump,
+                            current,
+                            embedded_doc_count,
+                        );
+                    },
+                )?;
                 let index_path = crate::search::vector_index::vector_index_path(
                     &opts.data_dir,
                     semantic_indexer.embedder_id(),
@@ -14457,12 +14581,26 @@ pub fn run_index(
                 // Build HNSW index for approximate nearest neighbor search (if enabled)
                 if opts.build_hnsw {
                     set_semantic_phase("semantic:hnsw");
+                    let vector_count = vector_index.record_count();
+                    set_semantic_progress_phase(
+                        opts.progress.as_ref(),
+                        &progress_bump,
+                        INDEX_PHASE_SEMANTIC_HNSW,
+                        0,
+                        vector_count,
+                    );
                     let hnsw_path = semantic_indexer.build_hnsw_index(
                         &vector_index,
                         &opts.data_dir,
                         None, // Use default M
                         None, // Use default ef_construction
                     )?;
+                    update_semantic_progress(
+                        opts.progress.as_ref(),
+                        &progress_bump,
+                        vector_count,
+                        vector_count,
+                    );
                     tracing::info!(
                         path = %hnsw_path.display(),
                         embedder = semantic_indexer.embedder_id(),
@@ -14477,6 +14615,13 @@ pub fn run_index(
                 // status reports `semantic: stale / available: false`
                 // even though semantic search works (issue #203).
                 set_semantic_phase("semantic:manifest");
+                set_semantic_progress_phase(
+                    opts.progress.as_ref(),
+                    &progress_bump,
+                    INDEX_PHASE_SEMANTIC_MANIFEST,
+                    0,
+                    1,
+                );
                 if let Err(err) = publish_direct_semantic_artifact(
                     &semantic_read_storage,
                     &opts.data_dir,
@@ -14491,14 +14636,23 @@ pub fn run_index(
                         error = %err,
                         "direct semantic artifact published to disk but \
                          manifest update failed; cass status may report \
-                         stale/unavailable until next backfill cycle"
+                        stale/unavailable until next backfill cycle"
                     );
+                } else {
+                    update_semantic_progress(opts.progress.as_ref(), &progress_bump, 1, 1);
                 }
             }
-            semantic_read_storage.close_best_effort_in_place();
 
             // Set watermark so incremental watch-mode embedding only sees new messages
             set_semantic_phase("semantic:finalize");
+            set_semantic_progress_phase(
+                opts.progress.as_ref(),
+                &progress_bump,
+                INDEX_PHASE_SEMANTIC_FINALIZE,
+                0,
+                1,
+            );
+            semantic_read_storage.close_best_effort_in_place();
             if let Some(max_id) = embedding_inputs.iter().map(|e| e.message_id).max() {
                 persist::with_ephemeral_writer(
                     &storage,
@@ -14510,6 +14664,7 @@ pub fn run_index(
                     },
                 )?;
             }
+            update_semantic_progress(opts.progress.as_ref(), &progress_bump, 1, 1);
         }
     }
 
@@ -15437,6 +15592,31 @@ const fn should_optimize_tantivy_after_watch_once_ingest(
 
 fn prepare_progress_for_semantic_build(progress: Option<&Arc<IndexingProgress>>) {
     reset_progress_to_idle(progress);
+}
+
+fn set_semantic_progress_phase(
+    progress: Option<&Arc<IndexingProgress>>,
+    progress_bump: &Arc<AtomicI64>,
+    phase: usize,
+    current: usize,
+    total: usize,
+) {
+    if let Some(progress) = progress {
+        progress.set_phase_progress(phase, current, total);
+    }
+    bump_index_run_lock_progress_atomic(progress_bump);
+}
+
+fn update_semantic_progress(
+    progress: Option<&Arc<IndexingProgress>>,
+    progress_bump: &Arc<AtomicI64>,
+    current: usize,
+    total: usize,
+) {
+    if let Some(progress) = progress {
+        progress.update_phase_progress(current, total);
+    }
+    bump_index_run_lock_progress_atomic(progress_bump);
 }
 
 fn parse_semantic_content_fingerprint(raw: &str) -> Option<SemanticContentFingerprint> {
@@ -30615,6 +30795,38 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn issue_342_semantic_index_lock_identifies_rebuild_job_and_phase() -> Result<()> {
+        use crate::search::asset_state::read_search_maintenance_snapshot;
+
+        let tmp = TempDir::new()?;
+        let db_path = tmp.path().join("agent_search.db");
+        std::fs::write(&db_path, b"placeholder")?;
+        let mut guard = acquire_index_run_lock_with_job_kind(
+            tmp.path(),
+            &db_path,
+            SearchMaintenanceMode::Index,
+            SearchMaintenanceJobKind::SemanticRebuild,
+        )?;
+        guard.set_phase(SearchMaintenanceMode::Index, "semantic:embedding")?;
+
+        let snapshot = read_search_maintenance_snapshot(tmp.path());
+        assert_eq!(
+            snapshot.job_kind,
+            Some(SearchMaintenanceJobKind::SemanticRebuild)
+        );
+        assert_eq!(snapshot.phase.as_deref(), Some("semantic:embedding"));
+        assert!(
+            snapshot
+                .job_id
+                .as_deref()
+                .is_some_and(|job_id| job_id.starts_with("semantic_rebuild-"))
+        );
+
+        drop(guard);
+        Ok(())
+    }
+
     /// Regression for cass#265.
     ///
     /// Before this fix, every preflight step inside `run_index`'s
@@ -45719,8 +45931,9 @@ mod tests {
     }
 
     #[test]
-    fn semantic_build_parks_completed_lexical_progress_for_watchdog() {
+    fn issue_342_semantic_build_replaces_stale_lexical_progress_with_initialize_phase() {
         let progress = Arc::new(IndexingProgress::default());
+        let progress_bump = Arc::new(AtomicI64::new(0));
         progress.phase.store(2, Ordering::Relaxed);
         progress.total.store(1, Ordering::Relaxed);
         progress.current.store(1, Ordering::Relaxed);
@@ -45730,14 +45943,33 @@ mod tests {
             .store(1, Ordering::Relaxed);
 
         prepare_progress_for_semantic_build(Some(&progress));
-
-        assert_eq!(progress.phase.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            progress.phase.load(Ordering::Relaxed),
+            INDEX_PHASE_PREPARING,
+            "shared targeted semantic repair must remain in its opaque phase"
+        );
         assert_eq!(progress.total.load(Ordering::Relaxed), 1);
         assert_eq!(progress.current.load(Ordering::Relaxed), 1);
+        assert!(progress.rebuild_pipeline_is_quiescent());
+
+        set_semantic_progress_phase(
+            Some(&progress),
+            &progress_bump,
+            INDEX_PHASE_SEMANTIC_INITIALIZE,
+            0,
+            0,
+        );
+
+        assert_eq!(
+            progress.phase.load(Ordering::Relaxed),
+            INDEX_PHASE_SEMANTIC_INITIALIZE
+        );
+        assert_eq!(progress.total.load(Ordering::Relaxed), 0);
+        assert_eq!(progress.current.load(Ordering::Relaxed), 0);
         assert!(!progress.is_rebuilding.load(Ordering::Relaxed));
         assert!(
             progress.rebuild_pipeline_is_quiescent(),
-            "the semantic-aware watchdog exemption requires a quiescent phase-0 progress state"
+            "semantic initialization must not inherit lexical pipeline activity"
         );
     }
 
