@@ -85452,6 +85452,12 @@ struct IndexStallWatchdog {
     semantic_build: bool,
     last_phase: usize,
     last_current: usize,
+    /// #332: last observed `IndexingProgress::activity` tick. Producers bump
+    /// activity once per parsed conversation and the consumer once per batch,
+    /// so an advancing tick proves live work between coarse `current`
+    /// publications (a long parse of one large source artifact must not read
+    /// as a stall).
+    last_activity: u64,
     last_progress_advance: std::time::Instant,
     stall_reported_for_phase: Option<usize>,
     stall_abort_reported_for_phase: Option<usize>,
@@ -85518,6 +85524,7 @@ impl IndexStallWatchdog {
             semantic_build: false,
             last_phase: usize::MAX,
             last_current: 0,
+            last_activity: 0,
             last_progress_advance: std::time::Instant::now(),
             stall_reported_for_phase: None,
             stall_abort_reported_for_phase: None,
@@ -85535,10 +85542,14 @@ impl IndexStallWatchdog {
         let current = index_progress
             .current
             .load(std::sync::atomic::Ordering::Relaxed);
+        let activity = index_progress
+            .activity
+            .load(std::sync::atomic::Ordering::Relaxed);
 
         if phase_code != self.last_phase {
             self.last_phase = phase_code;
             self.last_current = current;
+            self.last_activity = activity;
             self.last_progress_advance = std::time::Instant::now();
             self.stall_reported_for_phase = None;
             self.stall_abort_reported_for_phase = None;
@@ -85548,6 +85559,19 @@ impl IndexStallWatchdog {
         if current != self.last_current {
             self.last_progress_advance = std::time::Instant::now();
             self.last_current = current;
+            self.last_activity = activity;
+            self.stall_reported_for_phase = None;
+            self.stall_abort_reported_for_phase = None;
+            return None;
+        }
+
+        // #332: `current` measures batch publication, not worker activity. A
+        // producer mid-parse of one large source artifact publishes nothing
+        // for minutes while ticking the activity counter per parsed
+        // conversation — that is forward progress, not a stall.
+        if activity != self.last_activity {
+            self.last_progress_advance = std::time::Instant::now();
+            self.last_activity = activity;
             self.stall_reported_for_phase = None;
             self.stall_abort_reported_for_phase = None;
             return None;
@@ -85916,6 +85940,85 @@ mod stall_diagnostics_tests {
         assert!(
             repeat.is_none(),
             "watchdog must not spam repeated events for the same phase",
+        );
+    }
+
+    /// Regression for #332: `current` measures batch publication, not worker
+    /// activity. While a producer is mid-parse of a large source artifact it
+    /// ticks `IndexingProgress::activity` per parsed conversation without
+    /// advancing `current` — the watchdog must treat that tick as forward
+    /// progress instead of emitting a false `stall_detected`.
+    #[test]
+    fn watchdog_treats_activity_ticks_as_progress() {
+        use super::IndexStallWatchdog;
+        use crate::indexer::IndexingProgress;
+        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let tmp = TempDir::new().expect("temp dir");
+        let mut watchdog =
+            IndexStallWatchdog::new(tmp.path().to_path_buf(), Duration::from_millis(50));
+        watchdog.threshold = Some(Duration::from_millis(1));
+        watchdog.last_phase = 2;
+        watchdog.last_current = 141;
+        watchdog.last_activity = 0;
+        watchdog.last_progress_advance = std::time::Instant::now() - Duration::from_millis(100);
+
+        let progress = Arc::new(IndexingProgress::default());
+        progress.phase.store(2, Ordering::Relaxed);
+        progress.total.store(221, Ordering::Relaxed);
+        progress.current.store(141, Ordering::Relaxed);
+        // Active parsing: the counter that CAN move during a long parse moved.
+        progress.tick_activity();
+
+        assert!(
+            watchdog.observe(&progress, 100).is_none(),
+            "an advancing activity tick is forward progress, not a stall (#332)"
+        );
+
+        // With current AND activity both flat past the threshold, the stall
+        // genuinely fires.
+        watchdog.last_progress_advance = std::time::Instant::now() - Duration::from_millis(100);
+        let payload = watchdog
+            .observe(&progress, 200)
+            .expect("a genuinely idle phase must still stall-detect");
+        assert_eq!(payload["event"], serde_json::json!("stall_detected"));
+    }
+
+    /// Regression for #332 (ETA half): while `total` is still an expanding
+    /// "discovered so far" count, the snapshot must not publish an ETA (it
+    /// would regress by hours as discovery expands the denominator), and it
+    /// must label the unit + finality so dashboards can tell the difference.
+    #[test]
+    fn snapshot_suppresses_eta_until_total_is_final() {
+        use crate::indexer::IndexingProgress;
+        use std::sync::atomic::Ordering;
+
+        let progress = IndexingProgress::default();
+        progress.phase.store(2, Ordering::Relaxed);
+        progress.total.store(221, Ordering::Relaxed);
+        progress.current.store(141, Ordering::Relaxed);
+        progress.total_is_final.store(false, Ordering::Relaxed);
+
+        let expanding = progress.snapshot_json(60_000);
+        assert_eq!(expanding["total_is_final"], serde_json::json!(false));
+        assert_eq!(expanding["unit"], serde_json::json!("conversations"));
+        assert!(
+            expanding["eta_seconds"].is_null(),
+            "an expanding denominator must not publish a regressing ETA: {expanding}"
+        );
+        assert!(
+            expanding["rate_per_sec"].is_number(),
+            "the observed rate stays available while the total expands"
+        );
+
+        progress.total_is_final.store(true, Ordering::Relaxed);
+        let stable = progress.snapshot_json(60_000);
+        assert_eq!(stable["total_is_final"], serde_json::json!(true));
+        assert!(
+            stable["eta_seconds"].is_number(),
+            "a final denominator publishes a real ETA: {stable}"
         );
     }
 

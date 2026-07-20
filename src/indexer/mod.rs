@@ -965,6 +965,20 @@ pub(crate) const INDEX_PHASE_SEMANTIC_FINALIZE: usize = 9;
 pub struct IndexingProgress {
     pub total: AtomicUsize,
     pub current: AtomicUsize,
+    /// #332: monotonic work-liveness tick. Producer threads bump it once per
+    /// parsed conversation (BEFORE batch publication) and the streaming
+    /// consumer bumps it per received/persisted batch, so the stall watchdog
+    /// can tell "actively parsing a large source artifact between coarse
+    /// batch publications" apart from a genuine wedge even while
+    /// `current`/`total` sit still.
+    pub activity: std::sync::atomic::AtomicU64,
+    /// #332: true when `total` is a final denominator for the current phase
+    /// (known connector count, known conversation total, exact semantic
+    /// counters); false while `total` is still "discovered so far" and can
+    /// expand (streaming ingest accumulation). Snapshot consumers suppress
+    /// ETA while the denominator is not final, because an expanding total
+    /// makes ETA regress by hours and useless for scheduling.
+    pub total_is_final: AtomicBool,
     // Phase indicator. Values 0-2 cover canonical/lexical work; 3-9 identify
     // the independently measured semantic pipeline stages above.
     pub phase: AtomicUsize,
@@ -1106,12 +1120,23 @@ impl IndexingProgress {
         // sees a new phase paired with stale lexical totals.
         self.total.store(total, Ordering::Relaxed);
         self.current.store(current, Ordering::Relaxed);
+        // Semantic pipeline stages publish exact denominators.
+        self.total_is_final.store(true, Ordering::Relaxed);
         self.phase.store(phase, Ordering::Relaxed);
     }
 
     pub(crate) fn update_phase_progress(&self, current: usize, total: usize) {
         self.total.store(total, Ordering::Relaxed);
         self.current.store(current, Ordering::Relaxed);
+    }
+
+    /// #332: record one unit of real work (a parsed conversation, a received
+    /// or persisted batch) without touching the published `current`/`total`
+    /// counters. The stall watchdog treats an advancing tick as forward
+    /// progress.
+    pub fn tick_activity(&self) {
+        self.activity
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Human-readable label for the current phase.
@@ -1354,13 +1379,19 @@ impl IndexingProgress {
             })
             .unwrap_or_default();
 
+        let total_is_final = self.total_is_final.load(Ordering::Relaxed);
+        let activity = self.activity.load(std::sync::atomic::Ordering::Relaxed);
+
         // Derived rate + ETA for the indexing phase. Guard against divide-by-zero
-        // and bogus values when `total` isn't set yet.
+        // and bogus values when `total` isn't set yet. #332: ETA is only
+        // published against a FINAL denominator — while `total` is still
+        // "discovered so far" an ETA computed from it regresses by hours as
+        // discovery expands, so it is suppressed (rate stays available).
         let (rate_per_sec, eta_seconds) = if phase == 2 && elapsed_ms > 0 && current > 0 {
             let secs = (elapsed_ms as f64) / 1000.0;
             let rate = (current as f64) / secs.max(0.001);
             let remaining = total.saturating_sub(current) as f64;
-            let eta = if rate > 0.0 && total > 0 {
+            let eta = if rate > 0.0 && total > 0 && total_is_final {
                 Some(remaining / rate)
             } else {
                 None
@@ -1373,8 +1404,19 @@ impl IndexingProgress {
         serde_json::json!({
             "phase": Self::phase_label_for(phase),
             "phase_code": phase,
+            // #332: the unit `current`/`total` count in this phase, so
+            // dashboards never mix source artifacts, conversations, and
+            // vectors under one unlabeled shape.
+            "unit": Self::phase_unit_for(phase),
             "total": total,
+            // #332: false while `total` is a lazily expanding "discovered so
+            // far" count; true once it is a stable denominator.
+            "total_is_final": total_is_final,
             "current": current,
+            // #332: monotonic work-liveness tick (parsed conversations +
+            // received/persisted batches); advances during long parses even
+            // when `current` cannot.
+            "activity": activity,
             "discovered_agents": agents,
             "agent_names": agent_names,
             "is_rebuilding": is_rebuilding,
@@ -11680,6 +11722,13 @@ fn spawn_connector_producer(
                     None,
                     &mut conversation,
                 );
+                // #332: each parsed conversation is live work even while the
+                // batch sender buffers it below publication thresholds — this
+                // tick keeps the stall watchdog from firing during a long
+                // parse of a large source artifact.
+                if let Some(p) = &config.progress {
+                    p.tick_activity();
+                }
                 batch_sender.push(conversation)
             }) {
                 Ok(()) => {
@@ -11782,6 +11831,11 @@ fn spawn_connector_producer(
                     batch_sender.mark_next_batch_discovered();
                 }
 
+                // #332: parsed-conversation liveness tick (see the local-scan
+                // callback above).
+                if let Some(p) = &config.progress {
+                    p.tick_activity();
+                }
                 batch_sender.push(conversation)
             }) {
                 Ok(()) => {
@@ -12037,6 +12091,10 @@ fn run_streaming_consumer(
                         p.phase.store(2, Ordering::Relaxed); // Indexing
                         p.total.store(0, Ordering::Relaxed); // Reset - will accumulate as batches arrive
                         p.current.store(0, Ordering::Relaxed);
+                        // #332: this total is "discovered so far", not a
+                        // stable denominator — flag it so ETA is suppressed
+                        // instead of regressing as discovery expands it.
+                        p.total_is_final.store(false, Ordering::Relaxed);
                     }
                     switched_to_indexing = true;
                 }
@@ -12044,6 +12102,9 @@ fn run_streaming_consumer(
                 // Update progress total (we learn about sizes as batches arrive)
                 if let Some(p) = progress {
                     p.total.fetch_add(combined_batch_size, Ordering::Relaxed);
+                    // #332: a received batch is proof of live work even before
+                    // it is persisted and `current` advances.
+                    p.tick_activity();
                 }
 
                 // Track discovered agent names
@@ -12084,6 +12145,7 @@ fn run_streaming_consumer(
                                 }
                                 if let Some(p) = progress {
                                     p.total.fetch_add(extra_size, Ordering::Relaxed);
+                                    p.tick_activity();
                                 }
                                 combined_conversations.extend(extra_convs);
                                 combined_message_count += extra_msg_count;
@@ -12421,6 +12483,8 @@ fn run_streaming_index_with_connector_factories(
         p.phase.store(1, Ordering::Relaxed); // Scanning
         p.total.store(num_connectors, Ordering::Relaxed);
         p.current.store(0, Ordering::Relaxed);
+        // The connector count is a stable denominator for the scan phase.
+        p.total_is_final.store(true, Ordering::Relaxed);
         p.discovered_agents.store(0, Ordering::Relaxed);
         if let Ok(mut names) = p.discovered_agent_names.lock() {
             names.clear();
@@ -12573,6 +12637,8 @@ fn run_batch_index_with_connector_factories(
         // Track connector scan progress during discovery.
         p.total.store(connector_factories.len(), Ordering::Relaxed);
         p.current.store(0, Ordering::Relaxed);
+        // The connector count is a stable denominator for the scan phase.
+        p.total_is_final.store(true, Ordering::Relaxed);
         p.discovered_agents.store(0, Ordering::Relaxed);
         if let Ok(mut names) = p.discovered_agent_names.lock() {
             names.clear();
@@ -12837,6 +12903,8 @@ fn run_batch_index_with_connector_factories(
         p.phase.store(2, Ordering::Relaxed); // Indexing
         p.total.store(total_conversations, Ordering::Relaxed);
         p.current.store(0, Ordering::Relaxed);
+        // The pre-counted conversation total is a stable denominator.
+        p.total_is_final.store(true, Ordering::Relaxed);
     }
 
     let index_start = std::time::Instant::now();
@@ -18923,6 +18991,8 @@ fn rebuild_tantivy_from_db_via_staged_shards(
         p.total.store(total_conversations, Ordering::Relaxed);
         p.current
             .store(rebuild_state.processed_conversations, Ordering::Relaxed);
+        // The rebuild's conversation total is a stable denominator.
+        p.total_is_final.store(true, Ordering::Relaxed);
         p.discovered_agents.store(0, Ordering::Relaxed);
     }
     let lexical_rebuild_started = Instant::now();
@@ -20480,6 +20550,8 @@ fn rebuild_tantivy_from_db_with_options(
         p.total.store(total_conversations, Ordering::Relaxed);
         p.current
             .store(rebuild_state.processed_conversations, Ordering::Relaxed);
+        // The rebuild's conversation total is a stable denominator.
+        p.total_is_final.store(true, Ordering::Relaxed);
         p.discovered_agents.store(0, Ordering::Relaxed);
     }
 
@@ -21145,6 +21217,7 @@ fn ingest_batch_detailed(
     // Update progress counter for all conversations at once
     if let Some(p) = progress {
         p.current.fetch_add(convs.len(), Ordering::Relaxed);
+        p.tick_activity();
     }
     bump_index_run_lock_progress_if_present(progress_bump);
     robot_trace_ingest_finish(
@@ -21195,6 +21268,11 @@ fn ingest_non_watch_batch_with_oom_split(
                 defer_checkpoints,
                 progress_bump,
             )?;
+            // #332: each persisted chunk is live work even while the outer
+            // batch's `current` bump waits for the whole batch to finish.
+            if let Some(p) = progress {
+                p.tick_activity();
+            }
             merged = merged.accumulate(outcome);
         }
         return Ok(merged);
@@ -23442,7 +23520,11 @@ fn reindex_paths_with_semantic_delta(
         // Update total and phase to indexing
         if let Some(p) = &opts.progress {
             p.total.fetch_add(convs.len(), Ordering::Relaxed);
+            // Watch batches accumulate the total as sessions arrive; it is
+            // never a stable denominator.
+            p.total_is_final.store(false, Ordering::Relaxed);
             p.phase.store(2, Ordering::Relaxed);
+            p.tick_activity();
         }
 
         let conv_count = convs.len();
