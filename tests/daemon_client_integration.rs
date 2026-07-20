@@ -13,6 +13,75 @@ use coding_agent_search::search::reranker::{
 use frankensearch::ModelCategory;
 use parking_lot::Mutex;
 
+#[cfg(unix)]
+#[test]
+fn issue_347_uds_client_rejects_same_width_wrong_model() {
+    use coding_agent_search::daemon::protocol::{
+        EmbedResponse, FramedMessage, HealthStatus, PROTOCOL_VERSION, Request, Response,
+        decode_message, encode_message,
+    };
+    use coding_agent_search::daemon::{DaemonClientConfig, UdsDaemonClient};
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let socket = temp.path().join("semantic.sock");
+    let listener = UnixListener::bind(&socket).expect("bind daemon fixture socket");
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept client");
+        for _ in 0..2 {
+            let mut len = [0_u8; 4];
+            stream.read_exact(&mut len).expect("read request length");
+            let mut payload = vec![0_u8; u32::from_be_bytes(len) as usize];
+            stream
+                .read_exact(&mut payload)
+                .expect("read request payload");
+            let request: FramedMessage<Request> = decode_message(&payload).expect("decode request");
+            let response = match request.payload {
+                Request::Health => Response::Health(HealthStatus {
+                    uptime_secs: 1,
+                    version: PROTOCOL_VERSION,
+                    ready: true,
+                    memory_bytes: 0,
+                }),
+                Request::Embed { texts, .. } => Response::Embed(EmbedResponse {
+                    embeddings: vec![vec![0.25; 384]; texts.len()],
+                    model: "hash-384".to_string(),
+                    elapsed_ms: 1,
+                }),
+                _ => Response::Health(HealthStatus {
+                    uptime_secs: 1,
+                    version: PROTOCOL_VERSION,
+                    ready: false,
+                    memory_bytes: 0,
+                }),
+            };
+            stream
+                .write_all(
+                    &encode_message(&FramedMessage::new(request.request_id, response))
+                        .expect("encode response"),
+                )
+                .expect("write response");
+        }
+    });
+
+    let client = UdsDaemonClient::new(DaemonClientConfig {
+        socket_path: socket,
+        auto_spawn: false,
+        expected_embedder_id: Some("minilm-384".to_string()),
+        ..Default::default()
+    });
+    client.connect().expect("connect to fixture daemon");
+    assert!(client.is_available(), "fixture health must be ready");
+    let error = client
+        .embed("daemon contract probe", "issue-347")
+        .expect_err("a hash response must be rejected for the MiniLM index");
+    assert!(matches!(error, DaemonError::InvalidInput(_)));
+    assert!(error.to_string().contains("expected minilm-384"));
+    assert!(error.to_string().contains("received hash-384"));
+    server.join().expect("daemon fixture thread");
+}
+
 #[derive(Clone, Copy)]
 enum DaemonMode {
     Ok,

@@ -524,8 +524,9 @@ pub enum Commands {
         #[arg(long)]
         reranker: Option<String>,
 
-        /// Use daemon for warm model inference (faster repeated queries).
-        /// If daemon is unavailable, falls back to direct inference.
+        /// Auto-spawn the warm-model daemon when one is not already running.
+        /// Search discovers and uses an existing daemon by default; if daemon
+        /// inference is unavailable, it lazily falls back to direct inference.
         #[arg(long, default_value_t = false)]
         daemon: bool,
 
@@ -536,9 +537,9 @@ pub enum Commands {
         // ==========================================================================
         // Two-tier progressive search flags (bd-3dcw)
         // ==========================================================================
-        /// Enable two-tier progressive search: fast results immediately, refined via daemon.
-        /// Returns initial results from fast embedder (~1ms), then refines with quality
-        /// embedder via daemon (~130ms). Best of both worlds for interactive search.
+        /// Request the quality-refined tier of the two-tier search pipeline.
+        /// The one-shot CLI emits the final quality result set; the interactive TUI
+        /// is the surface that displays fast results first and refines them in place.
         #[arg(long, default_value_t = false)]
         two_tier: bool,
 
@@ -548,8 +549,8 @@ pub enum Commands {
         fast_only: bool,
 
         /// Quality-only search: wait for full transformer model results.
-        /// Higher latency (~130ms) but most accurate semantic matching.
-        /// Requires daemon to be available; falls back to fast if unavailable.
+        /// Uses an existing daemon when available and lazily falls back to the
+        /// installed local model; higher latency than --fast-only, but more accurate.
         #[arg(long, default_value_t = false)]
         quality_only: bool,
 
@@ -6656,11 +6657,16 @@ async fn execute_cli(
                         crate::search::query::SemanticTierMode::Single
                     };
 
+                    let daemon_policy = semantic_daemon_policy(daemon, no_daemon);
                     let semantic_opts = SemanticSearchOptions {
                         model: model.clone(),
                         rerank,
                         reranker: reranker.clone(),
-                        use_daemon: daemon && !no_daemon,
+                        // #347: an already-running daemon is the inexpensive
+                        // default. `--daemon` additionally permits auto-spawn;
+                        // `--no-daemon` is the explicit direct-inference escape.
+                        use_daemon: daemon_policy.use_existing,
+                        auto_spawn_daemon: daemon_policy.auto_spawn,
                         approximate,
                         tier_mode,
                     };
@@ -20853,10 +20859,51 @@ pub struct SemanticSearchOptions {
     pub reranker: Option<String>,
     /// Use daemon for warm model inference
     pub use_daemon: bool,
+    /// Auto-spawn the daemon if no existing instance is reachable.
+    pub auto_spawn_daemon: bool,
     /// Use approximate nearest neighbor search when available
     pub approximate: bool,
     /// Optional two-tier execution strategy for semantic mode.
     pub tier_mode: crate::search::query::SemanticTierMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SemanticDaemonPolicy {
+    use_existing: bool,
+    auto_spawn: bool,
+}
+
+const fn semantic_daemon_policy(daemon: bool, no_daemon: bool) -> SemanticDaemonPolicy {
+    SemanticDaemonPolicy {
+        use_existing: !no_daemon,
+        auto_spawn: daemon && !no_daemon,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn issue_347_semantic_daemon_policy_discovers_existing_by_default_and_respects_overrides() {
+    assert_eq!(
+        semantic_daemon_policy(false, false),
+        SemanticDaemonPolicy {
+            use_existing: true,
+            auto_spawn: false,
+        }
+    );
+    assert_eq!(
+        semantic_daemon_policy(true, false),
+        SemanticDaemonPolicy {
+            use_existing: true,
+            auto_spawn: true,
+        }
+    );
+    assert_eq!(
+        semantic_daemon_policy(false, true),
+        SemanticDaemonPolicy {
+            use_existing: false,
+            auto_spawn: false,
+        }
+    );
 }
 
 impl TimeFilter {
@@ -22390,7 +22437,8 @@ fn run_cli_search(
     semantic_opts: SemanticSearchOptions,
 ) -> CliResult<()> {
     use crate::search::model_manager::{
-        load_hash_semantic_context, load_semantic_context, load_semantic_context_for_embedder,
+        load_hash_semantic_context, load_semantic_context, load_semantic_context_deferred,
+        load_semantic_context_for_embedder, load_semantic_context_for_embedder_deferred,
     };
     use crate::search::query::{
         QueryExplanation, SearchClient, SearchClientOptions, SearchFilters, SearchMode,
@@ -22623,6 +22671,8 @@ fn run_cli_search(
     // If semantic assets are unavailable, hybrid searches fail open to lexical
     // while robot metadata reports the realized mode and fallback reason.
     let mut mode_meta = SearchModeMeta::new(mode.unwrap_or_default(), mode.is_none());
+    mode_meta.quality_tier_refined =
+        semantic_opts.tier_mode != crate::search::query::SemanticTierMode::FastOnly;
     let hybrid_fail_open = mode_meta.fail_open_on_semantic_unavailable();
 
     if semantic_opts.tier_mode != crate::search::query::SemanticTierMode::Single
@@ -22668,12 +22718,23 @@ fn run_cli_search(
             Some(name) => registry.get(name),
             None => Some(registry.best_available()),
         };
-        let prefer_hash = embedder_info.is_some_and(|e| e.name == HASH_EMBEDDER);
+        // `--fast-only` is a request for the hash-vector space, not merely a
+        // scoring toggle over a quality embedding. Feeding a MiniLM daemon
+        // vector to the same-dimensional FNV index is silently wrong (#347).
+        let prefer_hash = semantic_opts.tier_mode
+            == crate::search::query::SemanticTierMode::FastOnly
+            || embedder_info.is_some_and(|e| e.name == HASH_EMBEDDER);
 
         let setup = if prefer_hash {
             load_hash_semantic_context(&data_dir, &db_path)
         } else if let Some(model_name) = requested_model {
-            load_semantic_context_for_embedder(&data_dir, &db_path, model_name)
+            if semantic_opts.use_daemon {
+                load_semantic_context_for_embedder_deferred(&data_dir, &db_path, model_name)
+            } else {
+                load_semantic_context_for_embedder(&data_dir, &db_path, model_name)
+            }
+        } else if semantic_opts.use_daemon {
+            load_semantic_context_deferred(&data_dir, &db_path)
         } else {
             load_semantic_context(&data_dir, &db_path)
         };
@@ -22684,33 +22745,40 @@ fn run_cli_search(
             let additional_indexes = context.additional_indexes;
             let filter_maps = context.filter_maps;
             let roles = context.roles;
+            let daemon_embedder_compatible = embedder.id()
+                == crate::search::fastembed_embedder::FastEmbedder::embedder_id_static();
 
-            let embedder: Arc<dyn crate::search::embedder::Embedder> = if semantic_opts.use_daemon {
-                use crate::search::daemon_client::{DaemonFallbackEmbedder, DaemonRetryConfig};
+            let embedder: Arc<dyn crate::search::embedder::Embedder> =
+                if semantic_opts.use_daemon && !prefer_hash && daemon_embedder_compatible {
+                    use crate::search::daemon_client::{DaemonFallbackEmbedder, DaemonRetryConfig};
 
-                #[cfg(unix)]
-                {
-                    let daemon = crate::daemon::client::try_connect()
+                    #[cfg(unix)]
+                    {
+                        let daemon = (if semantic_opts.auto_spawn_daemon {
+                            crate::daemon::client::connect_or_spawn_for_embedder(embedder.id()).ok()
+                        } else {
+                            crate::daemon::client::try_connect_for_embedder(embedder.id())
+                        })
                         .map(|d| d as Arc<dyn crate::search::daemon_client::DaemonClient>)
                         .unwrap_or_else(|| {
                             Arc::new(crate::search::daemon_client::NoopDaemonClient::new(
                                 "daemon-unconfigured",
                             ))
                         });
-                    let config = DaemonRetryConfig::from_env();
-                    Arc::new(DaemonFallbackEmbedder::new(daemon, embedder, config))
-                }
-                #[cfg(not(unix))]
-                {
-                    let daemon = Arc::new(crate::search::daemon_client::NoopDaemonClient::new(
-                        "daemon-unconfigured",
-                    ));
-                    let config = DaemonRetryConfig::from_env();
-                    Arc::new(DaemonFallbackEmbedder::new(daemon, embedder, config))
-                }
-            } else {
-                embedder
-            };
+                        let config = DaemonRetryConfig::from_env();
+                        Arc::new(DaemonFallbackEmbedder::new(daemon, embedder, config))
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let daemon = Arc::new(crate::search::daemon_client::NoopDaemonClient::new(
+                            "daemon-unconfigured",
+                        ));
+                        let config = DaemonRetryConfig::from_env();
+                        Arc::new(DaemonFallbackEmbedder::new(daemon, embedder, config))
+                    }
+                } else {
+                    embedder
+                };
 
             let ann_path = Some(
                 data_dir
@@ -22774,6 +22842,22 @@ fn run_cli_search(
         } else {
             semantic_opts.approximate
         };
+    // The one-shot CLI emits one final result set. Its legacy synchronous
+    // two-tier helper accepts only one query vector, which would incorrectly
+    // reuse a MiniLM vector against the FNV fast index. The interactive TUI has
+    // the true two-embedder progressive pipeline; here progressive/quality-only
+    // correctly return the final quality result, while fast-only uses the hash
+    // context selected above (#347).
+    let semantic_execution_tier = match semantic_opts.tier_mode {
+        crate::search::query::SemanticTierMode::FastOnly => {
+            crate::search::query::SemanticTierMode::FastOnly
+        }
+        crate::search::query::SemanticTierMode::Single
+        | crate::search::query::SemanticTierMode::Progressive
+        | crate::search::query::SemanticTierMode::QualityOnly => {
+            crate::search::query::SemanticTierMode::Single
+        }
+    };
 
     // Use search_with_fallback to get full metadata (wildcard_fallback, cache_stats)
     let sparse_threshold = 3; // Threshold for triggering wildcard fallback
@@ -22877,7 +22961,7 @@ fn run_cli_search(
                         search_offset,
                         field_mask,
                         approximate,
-                        semantic_opts.tier_mode,
+                        semantic_execution_tier,
                     )
                     .map_err(|e| {
                         let err_str = e.to_string();
@@ -25046,6 +25130,7 @@ struct SearchModeMeta {
     defaulted: bool,
     fallback_tier: Option<&'static str>,
     fallback_reason: Option<String>,
+    quality_tier_refined: bool,
 }
 
 impl SearchModeMeta {
@@ -25056,6 +25141,7 @@ impl SearchModeMeta {
             defaulted,
             fallback_tier: None,
             fallback_reason: None,
+            quality_tier_refined: true,
         }
     }
 
@@ -25084,7 +25170,10 @@ impl SearchModeMeta {
         if self.fallback_tier.is_some() {
             crate::search::readiness::SearchRefinementLevel::LexicalOnly
         } else {
-            crate::search::search_mode_metadata::refinement_level(self.realized, true)
+            crate::search::search_mode_metadata::refinement_level(
+                self.realized,
+                self.quality_tier_refined,
+            )
         }
     }
 

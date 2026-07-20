@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::search::embedder::Embedder;
-use crate::search::fastembed_embedder::FastEmbedder;
+use crate::search::fastembed_embedder::{FastEmbedder, LazyFastEmbedder};
 use crate::search::hash_embedder::HashEmbedder;
 use crate::search::model_download::{
     ModelAcquisitionPolicy, ModelCacheState, ModelManifest, classify_model_cache,
@@ -450,12 +450,30 @@ pub fn load_semantic_context(data_dir: &Path, db_path: &Path) -> SemanticSetup {
     load_semantic_context_for_embedder(data_dir, db_path, active_policy_embedder_name())
 }
 
+/// Load the active policy context without initializing its local model yet.
+pub fn load_semantic_context_deferred(data_dir: &Path, db_path: &Path) -> SemanticSetup {
+    load_semantic_context_for_embedder_deferred(data_dir, db_path, active_policy_embedder_name())
+}
+
 pub fn load_semantic_context_for_embedder(
     data_dir: &Path,
     db_path: &Path,
     embedder_name: &str,
 ) -> SemanticSetup {
-    load_semantic_context_inner(data_dir, db_path, true, embedder_name)
+    load_semantic_context_inner(data_dir, db_path, true, embedder_name, false)
+}
+
+/// Load index/filter metadata now while deferring the local model itself.
+///
+/// This is the daemon-first CLI path: the returned embedder preserves the
+/// vector index's stable id/dimension contract, but initializes local inference
+/// only if the daemon wrapper needs its fallback (#347).
+pub fn load_semantic_context_for_embedder_deferred(
+    data_dir: &Path,
+    db_path: &Path,
+    embedder_name: &str,
+) -> SemanticSetup {
+    load_semantic_context_inner(data_dir, db_path, true, embedder_name, true)
 }
 
 /// Probe semantic availability without loading the embedder, vector index, or
@@ -599,7 +617,13 @@ pub fn load_hash_semantic_context(data_dir: &Path, db_path: &Path) -> SemanticSe
 /// Use this when you've already acknowledged an update and want to load
 /// the model anyway.
 pub fn load_semantic_context_no_version_check(data_dir: &Path, db_path: &Path) -> SemanticSetup {
-    load_semantic_context_inner(data_dir, db_path, false, active_policy_embedder_name())
+    load_semantic_context_inner(
+        data_dir,
+        db_path,
+        false,
+        active_policy_embedder_name(),
+        false,
+    )
 }
 
 fn load_semantic_context_inner(
@@ -607,6 +631,7 @@ fn load_semantic_context_inner(
     db_path: &Path,
     check_for_updates: bool,
     embedder_name: &str,
+    defer_embedder_load: bool,
 ) -> SemanticSetup {
     let canonical_name = FastEmbedder::canonical_name(embedder_name).unwrap_or("minilm");
     let Some(config) = FastEmbedder::config_for(canonical_name) else {
@@ -705,8 +730,14 @@ fn load_semantic_context_inner(
         }
     };
 
-    let embedder = match FastEmbedder::load_by_name(data_dir, canonical_name) {
-        Ok(embedder) => Arc::new(embedder) as Arc<dyn Embedder>,
+    let embedder: Arc<dyn Embedder> = match if defer_embedder_load {
+        LazyFastEmbedder::new(data_dir, canonical_name)
+            .map(|embedder| Arc::new(embedder) as Arc<dyn Embedder>)
+    } else {
+        FastEmbedder::load_by_name(data_dir, canonical_name)
+            .map(|embedder| Arc::new(embedder) as Arc<dyn Embedder>)
+    } {
+        Ok(embedder) => embedder,
         Err(err) => {
             return SemanticSetup {
                 availability: SemanticAvailability::LoadFailed {

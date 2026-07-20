@@ -20,6 +20,7 @@
 //! 768-dim `nomic-embed` model is rejected pending a follow-up).
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use super::embedder::{Embedder, EmbedderError, EmbedderResult};
 use frankensearch::{ModelCategory, ModelTier, NativeEmbedder};
@@ -78,6 +79,95 @@ pub struct FastEmbedder {
     id: String,
     model_id: String,
     dimension: usize,
+}
+
+/// Metadata-stable, on-demand wrapper for the local quality embedder.
+///
+/// Semantic CLI searches normally prefer the resident daemon. Loading the
+/// several-hundred-megabyte local model before the daemon is even probed adds
+/// roughly eleven seconds to every short-lived process and defeats the daemon's
+/// purpose (#347). This wrapper exposes the index-contract metadata eagerly but
+/// initializes the local model only if daemon inference actually falls back.
+pub struct LazyFastEmbedder {
+    data_dir: PathBuf,
+    canonical_name: String,
+    config: OnnxEmbedderConfig,
+    inner: OnceLock<Result<FastEmbedder, String>>,
+}
+
+impl LazyFastEmbedder {
+    /// Construct a lazy wrapper for a known quality embedder.
+    pub fn new(data_dir: &Path, embedder_name: &str) -> EmbedderResult<Self> {
+        let canonical_name = FastEmbedder::canonical_name(embedder_name).ok_or_else(|| {
+            FastEmbedder::unavailable_error(
+                embedder_name,
+                format!("unknown embedder: {embedder_name}"),
+            )
+        })?;
+        let config = FastEmbedder::config_for(canonical_name).ok_or_else(|| {
+            FastEmbedder::unavailable_error(
+                embedder_name,
+                format!("no config for embedder: {embedder_name}"),
+            )
+        })?;
+        Ok(Self {
+            data_dir: data_dir.to_path_buf(),
+            canonical_name: canonical_name.to_string(),
+            config,
+            inner: OnceLock::new(),
+        })
+    }
+
+    fn loaded(&self) -> EmbedderResult<&FastEmbedder> {
+        match self.inner.get_or_init(|| {
+            FastEmbedder::load_by_name(&self.data_dir, &self.canonical_name)
+                .map_err(|err| err.to_string())
+        }) {
+            Ok(embedder) => Ok(embedder),
+            Err(reason) => Err(FastEmbedder::unavailable_error(
+                &self.config.embedder_id,
+                reason.clone(),
+            )),
+        }
+    }
+}
+
+impl Embedder for LazyFastEmbedder {
+    fn embed_sync(&self, text: &str) -> EmbedderResult<Vec<f32>> {
+        self.loaded()?.embed_sync(text)
+    }
+
+    fn embed_batch_sync(&self, texts: &[&str]) -> EmbedderResult<Vec<Vec<f32>>> {
+        self.loaded()?.embed_batch_sync(texts)
+    }
+
+    fn dimension(&self) -> usize {
+        self.config.dimension
+    }
+
+    fn id(&self) -> &str {
+        &self.config.embedder_id
+    }
+
+    fn model_name(&self) -> &str {
+        &self.config.model_id
+    }
+
+    fn is_ready(&self) -> bool {
+        self.inner.get().is_none_or(Result::is_ok)
+    }
+
+    fn is_semantic(&self) -> bool {
+        true
+    }
+
+    fn category(&self) -> ModelCategory {
+        ModelCategory::TransformerEmbedder
+    }
+
+    fn tier(&self) -> ModelTier {
+        ModelTier::Quality
+    }
 }
 
 impl FastEmbedder {
@@ -372,6 +462,27 @@ mod tests {
             }
             other => panic!("expected EmbedderUnavailable, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn issue_347_lazy_embedder_defers_model_initialization_until_fallback_inference() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let embedder = LazyFastEmbedder::new(tmp.path(), "minilm").expect("known model");
+
+        assert_eq!(embedder.id(), "minilm-384");
+        assert_eq!(embedder.dimension(), 384);
+        assert_eq!(embedder.model_name(), "all-minilm-l6-v2");
+        assert!(
+            embedder.inner.get().is_none(),
+            "construction must not load the local model"
+        );
+
+        let error = embedder
+            .embed_sync("daemon fallback")
+            .expect_err("missing local bundle must fail only when fallback is used");
+        assert!(error.to_string().contains("model directory not found"));
+        assert!(embedder.inner.get().is_some());
+        assert!(!embedder.is_ready());
     }
 
     #[test]

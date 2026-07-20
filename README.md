@@ -216,6 +216,15 @@ AI coding agents are transforming how we write software. Claude Code, Codex, Cur
 
 ### 🧠 Optional Semantic Search (Local Inference, No Network at Query Time)
 - **Local inference**: Uses a FastEmbed embedder running ONNX on-device. Once the chosen model is installed, no network traffic is required to answer queries.
+- **Warm-daemon reuse**: Semantic and hybrid CLI searches automatically use an
+  already-running local embedding daemon (including a socket selected with
+  `CASS_DAEMON_SOCKET`) and only initialize the installed in-process model if
+  daemon inference fails. Pass `--daemon` to permit auto-spawning a missing
+  daemon, or `--no-daemon` to force direct inference. `--fast-only` stays in
+  the deterministic hash-vector space, and daemon responses are accepted only
+  when their reported embedder matches the active vector index. The one-shot
+  CLI's `--two-tier` output is the final quality result set, while the TUI is
+  the surface that displays fast results and refines them in place.
 - **Opt-in acquisition**: `cass models install` downloads the requested embedder from Hugging Face on explicit request and verifies SHA256 checksums. Nothing is fetched until you run the install command. Three embedders are supported:
   - `all-minilm-l6-v2` — `cass models install --model all-minilm-l6-v2` (alias: `minilm`). 384-dim. ~90 MB. The default; fastest. Best for general English semantic similarity.
   - `snowflake-arctic-s` — `cass models install --model snowflake-arctic-s`. 384-dim. ~120 MB. Stronger MTEB scores than MiniLM at similar cost; good drop-in replacement for code-heavy corpora.

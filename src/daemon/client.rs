@@ -45,6 +45,13 @@ pub struct DaemonClientConfig {
     pub auto_spawn: bool,
     /// Path to the daemon binary (if auto-spawn is enabled).
     pub daemon_binary: Option<PathBuf>,
+    /// Embedder identity required by the caller's vector index.
+    ///
+    /// The daemon protocol reports the model that produced every embedding.
+    /// When this is set, a response from a different model is rejected instead
+    /// of feeding a same-width but semantically incompatible vector into the
+    /// caller's index (#347).
+    pub expected_embedder_id: Option<String>,
 }
 
 impl Default for DaemonClientConfig {
@@ -55,6 +62,7 @@ impl Default for DaemonClientConfig {
             request_timeout: Duration::from_secs(30),
             auto_spawn: true,
             daemon_binary: None, // Will use current executable with --daemon flag
+            expected_embedder_id: None,
         }
     }
 }
@@ -116,6 +124,17 @@ impl UdsDaemonClient {
     /// Create a client with default configuration.
     pub fn with_defaults() -> Self {
         Self::new(DaemonClientConfig::from_env())
+    }
+
+    fn validate_embedder_id(&self, actual: &str) -> Result<(), DaemonError> {
+        if let Some(expected) = self.config.expected_embedder_id.as_deref()
+            && actual != expected
+        {
+            return Err(DaemonError::InvalidInput(format!(
+                "daemon embedder mismatch: expected {expected}, received {actual}"
+            )));
+        }
+        Ok(())
     }
 
     /// Connect to the daemon, optionally spawning it if not running.
@@ -534,6 +553,7 @@ impl DaemonClient for UdsDaemonClient {
 
         match response {
             Response::Embed(embed) => {
+                self.validate_embedder_id(&embed.model)?;
                 if embed.embeddings.is_empty() {
                     return Err(DaemonError::Failed("no embeddings returned".to_string()));
                 }
@@ -569,6 +589,7 @@ impl DaemonClient for UdsDaemonClient {
 
         match response {
             Response::Embed(embed) => {
+                self.validate_embedder_id(&embed.model)?;
                 if embed.embeddings.len() != texts.len() {
                     return Err(DaemonError::Failed(format!(
                         "embedding count mismatch: expected {}, got {}",
@@ -663,10 +684,35 @@ pub fn connect_or_spawn() -> Result<Arc<UdsDaemonClient>, DaemonError> {
     Ok(Arc::new(client))
 }
 
+/// Connect to an existing daemon or spawn one, requiring embeddings from the
+/// model that owns the caller's vector index.
+pub fn connect_or_spawn_for_embedder(
+    expected_embedder_id: &str,
+) -> Result<Arc<UdsDaemonClient>, DaemonError> {
+    let mut config = DaemonClientConfig::from_env();
+    config.expected_embedder_id = Some(expected_embedder_id.to_string());
+    let client = UdsDaemonClient::new(config);
+    client.connect()?;
+    Ok(Arc::new(client))
+}
+
 /// Try to connect to an existing daemon without spawning.
 pub fn try_connect() -> Option<Arc<UdsDaemonClient>> {
     let mut config = DaemonClientConfig::from_env();
     config.auto_spawn = false;
+    let client = UdsDaemonClient::new(config);
+    match client.connect() {
+        Ok(()) => Some(Arc::new(client)),
+        Err(_) => None,
+    }
+}
+
+/// Try an existing daemon without spawning and require embeddings from the
+/// model that owns the caller's vector index.
+pub fn try_connect_for_embedder(expected_embedder_id: &str) -> Option<Arc<UdsDaemonClient>> {
+    let mut config = DaemonClientConfig::from_env();
+    config.auto_spawn = false;
+    config.expected_embedder_id = Some(expected_embedder_id.to_string());
     let client = UdsDaemonClient::new(config);
     match client.connect() {
         Ok(()) => Some(Arc::new(client)),
@@ -712,6 +758,22 @@ mod tests {
 
         let client = UdsDaemonClient::new(config);
         assert!(!client.is_available());
+    }
+
+    #[test]
+    fn issue_347_embedding_response_model_must_match_the_callers_vector_index() {
+        let client = UdsDaemonClient::new(DaemonClientConfig {
+            expected_embedder_id: Some("minilm-384".to_string()),
+            ..Default::default()
+        });
+
+        assert!(client.validate_embedder_id("minilm-384").is_ok());
+        let error = client
+            .validate_embedder_id("hash-384")
+            .expect_err("a hash vector must never enter the MiniLM index");
+        assert!(matches!(error, DaemonError::InvalidInput(_)));
+        assert!(error.to_string().contains("expected minilm-384"));
+        assert!(error.to_string().contains("received hash-384"));
     }
 
     #[test]
