@@ -858,6 +858,67 @@ mod tests {
         assert_eq!(config.ionice_class, 2);
     }
 
+    /// Regression for #346: on macOS `/tmp` is a symlink to `/private/tmp`,
+    /// and the daemon refused to start with "socket parent is not a
+    /// directory: /tmp" because the parent check used symlink (lstat)
+    /// semantics. The classifier must follow a symlinked parent and the full
+    /// bind flow must succeed for a socket whose parent is a symlink to a
+    /// world-writable directory (routing through the private runtime dir).
+    #[test]
+    fn test_bind_follows_symlinked_socket_parent() {
+        let tmp = TempDir::new().expect("tempdir");
+        // real_tmp plays /private/tmp: a real, world-writable directory.
+        let real_tmp = tmp.path().join("private").join("tmp");
+        fs::create_dir_all(&real_tmp).expect("create real tmp");
+        fs::set_permissions(&real_tmp, fs::Permissions::from_mode(0o777)).expect("chmod real tmp");
+        // link_tmp plays /tmp: a symlink to the real directory.
+        let link_tmp = tmp.path().join("tmp");
+        std::os::unix::fs::symlink(&real_tmp, &link_tmp).expect("symlink tmp");
+
+        let socket_path = link_tmp.join("cass-semantic.sock");
+
+        // The parent classifier must follow the symlink instead of erroring
+        // with InvalidInput ("socket parent is not a directory").
+        let owner_only = parent_dir_is_owner_only(&socket_path)
+            .expect("symlinked parent must classify, not error (#346)");
+        // A 0o777 parent is shared, so the daemon must route through the
+        // private runtime directory rather than bind directly.
+        assert!(!owner_only, "world-writable parent must not be owner-only");
+
+        let bound = bind_owner_only_unix_listener(&socket_path)
+            .expect("daemon bind must succeed through a symlinked /tmp (#346)");
+        assert_eq!(bound.public_path, socket_path);
+        assert_ne!(
+            bound.bind_path, socket_path,
+            "shared parent must route to the private runtime dir"
+        );
+        // The public path is a symlink to the private-runtime socket.
+        let public_meta = fs::symlink_metadata(&socket_path).expect("public socket path exists");
+        assert!(public_meta.file_type().is_symlink());
+        cleanup_bound_socket(&bound.public_path, &bound.bind_path);
+    }
+
+    /// Complement to the #346 regression: an owner-only (0o700) symlinked
+    /// parent binds the socket directly at the requested path.
+    #[test]
+    fn test_bind_symlinked_owner_only_parent_binds_directly() {
+        let tmp = TempDir::new().expect("tempdir");
+        let real_dir = tmp.path().join("real-private");
+        fs::create_dir_all(&real_dir).expect("create dir");
+        fs::set_permissions(&real_dir, fs::Permissions::from_mode(0o700)).expect("chmod");
+        let link_dir = tmp.path().join("linked-private");
+        std::os::unix::fs::symlink(&real_dir, &link_dir).expect("symlink");
+
+        let socket_path = link_dir.join("daemon.sock");
+        assert!(
+            parent_dir_is_owner_only(&socket_path).expect("owner-only symlinked parent classifies")
+        );
+        let bound = bind_owner_only_unix_listener(&socket_path)
+            .expect("bind through owner-only symlinked parent");
+        assert_eq!(bound.bind_path, socket_path);
+        cleanup_bound_socket(&bound.public_path, &bound.bind_path);
+    }
+
     #[test]
     fn test_daemon_uptime() {
         let config = DaemonConfig::default();

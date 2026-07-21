@@ -423,7 +423,7 @@ pub fn run_doctor_rebuild_canonical_fts(
     let storage = if dry_run {
         FrankenStorage::open_readonly(&db_path)
     } else {
-        FrankenStorage::open(&db_path)
+        FrankenStorage::open_existing_schema_only_for_fts_repair(&db_path)
     }
     .map_err(|e| {
         storage_error(
@@ -920,6 +920,69 @@ mod tests {
             .expect("count FTS generation markers after dry-run");
         assert_eq!(schema_rows_after, schema_rows_before);
         assert_eq!(marker_rows_after, marker_rows_before);
+    }
+
+    #[test]
+    fn rebuild_canonical_fts_repairs_absent_shadow_without_canonical_row_changes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("agent_search.db");
+        let conversation_id = {
+            let storage = FrankenStorage::open(&db_path).expect("open db");
+            let agent_id = seed_agent(&storage);
+            let conversation_id =
+                seed_conversation(&storage, agent_id, "fts-repair", "/orig/fts.jsonl");
+            write_message(
+                &storage,
+                conversation_id,
+                0,
+                r#"{"type":"user","uuid":"fts-1","text":"canonical sentinel"}"#,
+            );
+            assert_eq!(
+                storage
+                    .inspect_search_fallback_fts_parity()
+                    .expect("inspect absent FTS")
+                    .status,
+                FtsShadowParityStatus::Absent
+            );
+            conversation_id
+        };
+
+        run_doctor_rebuild_canonical_fts(
+            Some(tmp.path().to_path_buf()),
+            Some(db_path.clone()),
+            false,
+            true,
+            Some(RobotFormat::Json),
+        )
+        .expect("repair absent FTS through schema-only writer");
+
+        let readonly = FrankenStorage::open_readonly(&db_path).expect("reopen read-only");
+        let parity = readonly
+            .inspect_search_fallback_fts_parity()
+            .expect("inspect repaired FTS");
+        assert_eq!(parity.status, FtsShadowParityStatus::Healthy);
+        assert_eq!(parity.canonical_messages, 1);
+        assert_eq!(parity.indexable_messages, 1);
+        assert_eq!(parity.indexed_messages, Some(1));
+        let canonical: (i64, i64, String, String) = readonly
+            .raw()
+            .query_row_map(
+                "SELECT id, conversation_id, content, extra_json FROM messages",
+                &[] as &[ParamValue],
+                |row| {
+                    Ok((
+                        row.get_typed(0)?,
+                        row.get_typed(1)?,
+                        row.get_typed(2)?,
+                        row.get_typed(3)?,
+                    ))
+                },
+            )
+            .expect("read canonical sentinel after repair");
+        assert_eq!(canonical.0, 1);
+        assert_eq!(canonical.1, conversation_id);
+        assert_eq!(canonical.2, "content 0");
+        assert!(canonical.3.contains("canonical sentinel"));
     }
 
     #[test]

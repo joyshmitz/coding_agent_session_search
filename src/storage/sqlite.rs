@@ -1118,6 +1118,23 @@ pub const FTS5_REGISTER_SQL: &str = "\
 const FTS_FRANKEN_REBUILD_META_KEY: &str = "fts_frankensqlite_rebuild_generation";
 const FTS_FRANKEN_REBUILD_FINGERPRINT_META_KEY: &str = "fts_frankensqlite_archive_fingerprint";
 const FTS_FRANKEN_REBUILD_GENERATION: i64 = 1;
+/// Exact canonical cardinality driven by the compact parent-rowid domain.
+/// FrankenSQLite 0.1.18 lowers this shape to `CountIndexEqRun`: each real
+/// conversation rowid counts its complete equality-prefix run in the
+/// `(conversation_id, idx)` uniqueness index without opening the message table,
+/// crossing the Rust row handler per message, or admitting orphan parent IDs.
+const FTS_INDEXABLE_MESSAGE_COUNT_SQL: &str = "SELECT COUNT(*) \
+     FROM messages INDEXED BY sqlite_autoindex_messages_1 \
+     WHERE conversation_id IN (SELECT rowid FROM conversations)";
+/// Exact intersection stream driven by the (potentially much smaller) derived
+/// shadow. The supported two-table join scans `fts_messages_docsize` once and
+/// point-seeks canonical messages by integer primary key. Only the compact
+/// parent ID crosses into Rust, where a bounded parent-ID set excludes orphan
+/// messages exactly. No TEMP writes are required, which is essential for
+/// read-only doctor dry-runs.
+const FTS_INDEXED_CANONICAL_INTERSECTION_SQL: &str = "SELECT m.conversation_id \
+     FROM fts_messages_docsize f NOT INDEXED \
+     INNER JOIN messages m NOT INDEXED ON m.id = f.id";
 const DAILY_STATS_HEALTH_META_KEY: &str = "daily_stats_archive_fingerprint";
 const DAILY_STATS_HEALTH_GENERATION_META_KEY: &str = "daily_stats_health_generation";
 const DAILY_STATS_HEALTH_GENERATION: i64 = 1;
@@ -4052,14 +4069,60 @@ impl FrankenStorage {
         let path_str = path.to_string_lossy().to_string();
         let _doctor_guard =
             acquire_doctor_mutation_db_open_guard(path, DOCTOR_MUTATION_DB_OPEN_LOCK_TIMEOUT)?;
-        let conn = FrankenConnection::open(&path_str)
-            .with_context(|| format!("opening frankensqlite db at {}", path.display()))?;
+        let existing_archive = match fs::metadata(path) {
+            Ok(metadata) => metadata.len() > 0,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("inspecting frankensqlite db path at {}", path.display())
+                });
+            }
+        };
+        let conn = if existing_archive {
+            // `open_existing_schema_only` never creates or zero-initializes
+            // the archive path. FrankenSQLite 0.1.19 loads only the schema
+            // image for this writable existing-only lane (rows stay
+            // pager-backed; the compatibility `MemDatabase` is not hydrated
+            // eagerly), so ordinary opens stay bounded on multi-gigabyte
+            // archives.
+            FrankenConnection::open_existing_schema_only(&path_str).with_context(|| {
+                format!("opening existing frankensqlite db at {}", path.display())
+            })?
+        } else {
+            FrankenConnection::open(&path_str)
+                .with_context(|| format!("creating frankensqlite db at {}", path.display()))?
+        };
         let storage = Self::new(conn, path.to_path_buf());
         storage.apply_open_stage_busy_timeout();
         storage.run_migrations()?;
         storage.repair_missing_current_schema_objects()?;
         storage.apply_config()?;
         storage.set_fts_messages_present_cache(true);
+        Ok(storage)
+    }
+
+    /// Open an existing archive for a narrowly scoped derived-FTS repair.
+    ///
+    /// Unlike [`Self::open`], this uses FrankenSQLite's existing-only
+    /// read-write lane: the path must already exist (never created or
+    /// zero-initialized), and 0.1.19 keeps canonical rows pager-backed
+    /// instead of hydrating them into the compatibility `MemDatabase`. It
+    /// intentionally does not run migrations or repair canonical schema
+    /// objects. The caller may inspect ordinary B-trees and mutate only the
+    /// rebuildable FTS shadow under an explicit doctor repair contract.
+    pub(crate) fn open_existing_schema_only_for_fts_repair(path: &Path) -> Result<Self> {
+        let path_str = path.to_string_lossy().to_string();
+        let _doctor_guard =
+            acquire_doctor_mutation_db_open_guard(path, DOCTOR_MUTATION_DB_OPEN_LOCK_TIMEOUT)?;
+        let conn = FrankenConnection::open_existing_schema_only(&path_str).with_context(|| {
+            format!(
+                "opening existing frankensqlite db for FTS repair at {}",
+                path.display()
+            )
+        })?;
+        let storage = Self::new(conn, path.to_path_buf());
+        storage.apply_open_stage_busy_timeout();
+        storage.apply_config()?;
         Ok(storage)
     }
 
@@ -10728,6 +10791,7 @@ impl FrankenStorage {
         Ok(())
     }
 
+    #[cfg(test)]
     fn fetch_indexable_message_id_parity_page(
         &self,
         after: Option<i64>,
@@ -10757,6 +10821,7 @@ impl FrankenStorage {
         .with_context(|| "streaming bounded canonical message IDs for exact FTS parity")
     }
 
+    #[cfg(test)]
     fn fetch_fts_docsize_id_parity_page(
         &self,
         after: Option<i64>,
@@ -10784,15 +10849,15 @@ impl FrankenStorage {
         .with_context(|| "streaming bounded FTS docsize IDs for exact parity")
     }
 
-    /// Compare the two unique, ordered ID sets without relying on
-    /// FrankenSQLite 0.1.13's LEFT-JOIN anti-join fallback. That fallback can
-    /// report a missing right-side row even when both persisted ID lists are
-    /// byte-for-byte identical. The merge below is exact, collision-free, and
-    /// retains at most two 4,096-ID pages regardless of corpus size.
+    /// Test oracle for the aggregate parity classifier. The production path
+    /// deliberately avoids this exact-but-expensive repeated keyset traversal;
+    /// keeping it available in tests lets small fixtures compare both methods.
+    #[cfg(test)]
     fn inspect_fts_rowid_set_difference_bounded(&self) -> Result<(bool, bool)> {
         self.inspect_fts_rowid_set_difference_with_page_rows(4_096)
     }
 
+    #[cfg(test)]
     fn inspect_fts_rowid_set_difference_with_page_rows(
         &self,
         page_rows: usize,
@@ -10877,6 +10942,50 @@ impl FrankenStorage {
         }
     }
 
+    fn load_fts_conversation_id_set(&self) -> Result<HashSet<i64>> {
+        self.conn
+            .query_map_collect(
+                "SELECT id FROM conversations NOT INDEXED",
+                fparams![],
+                |row| row.get_typed(0),
+            )
+            .with_context(|| "loading bounded canonical conversation IDs for FTS parity")
+            .map(|ids| ids.into_iter().collect())
+    }
+
+    /// Compute exact canonical/FTS rowid intersection in one bounded-memory,
+    /// shadow-driven pass. A partial 39k-row shadow performs 39k primary-key
+    /// probes rather than streaming the multi-million-row canonical message
+    /// table; a complete shadow remains exact and read-only. Memory scales
+    /// with parent conversations, not messages or the FTS rowid domain.
+    fn count_fts_indexed_canonical_intersection(&self) -> Result<i64> {
+        let conversation_ids = self.load_fts_conversation_id_set()?;
+        let mut intersection_messages = 0_i64;
+        let mut count_overflowed = false;
+        self.conn
+            .query_with_params_for_each(FTS_INDEXED_CANONICAL_INTERSECTION_SQL, &[], |row| {
+                let conversation_id = row.get_typed::<i64>(0)?;
+                if conversation_ids.contains(&conversation_id) {
+                    match intersection_messages.checked_add(1) {
+                        Some(next) => intersection_messages = next,
+                        None => count_overflowed = true,
+                    }
+                }
+                Ok(())
+            })
+            .with_context(|| "streaming exact shadow-driven canonical/FTS intersection")?;
+        anyhow::ensure!(!count_overflowed, "FTS parity row count exceeds i64::MAX");
+        Ok(intersection_messages)
+    }
+
+    fn count_fts_indexable_messages(&self) -> Result<i64> {
+        self.conn
+            .query_row_map(FTS_INDEXABLE_MESSAGE_COUNT_SQL, fparams![], |row| {
+                row.get_typed::<i64>(0)
+            })
+            .with_context(|| "counting exact canonical FTS messages by parent index runs")
+    }
+
     pub(crate) fn inspect_search_fallback_fts_parity(&self) -> Result<FtsShadowParity> {
         let canonical_messages =
             self.conn
@@ -10889,21 +10998,11 @@ impl FrankenStorage {
             |row| row.get_typed::<i64>(0),
         )?;
 
-        let count_indexable_messages = || {
-            self.conn.query_row_map(
-                "SELECT COUNT(*)
-                 FROM messages m
-                 INNER JOIN conversations c ON c.id = m.conversation_id",
-                fparams![],
-                |row| row.get_typed::<i64>(0),
-            )
-        };
-
         if fts_schema_rows == 0 {
             return Ok(FtsShadowParity {
                 status: FtsShadowParityStatus::Absent,
                 canonical_messages,
-                indexable_messages: count_indexable_messages()?,
+                indexable_messages: self.count_fts_indexable_messages()?,
                 indexed_messages: None,
                 detail: None,
             });
@@ -10912,7 +11011,7 @@ impl FrankenStorage {
             return Ok(FtsShadowParity {
                 status: FtsShadowParityStatus::Unqueryable,
                 canonical_messages,
-                indexable_messages: count_indexable_messages()?,
+                indexable_messages: self.count_fts_indexable_messages()?,
                 indexed_messages: None,
                 detail: Some(format!(
                     "sqlite_master contains {fts_schema_rows} fts_messages rows; expected exactly one"
@@ -10933,37 +11032,45 @@ impl FrankenStorage {
                 return Ok(FtsShadowParity {
                     status: FtsShadowParityStatus::Unqueryable,
                     canonical_messages,
-                    indexable_messages: count_indexable_messages()?,
+                    indexable_messages: self.count_fts_indexable_messages()?,
                     indexed_messages: None,
                     detail: Some(format!("counting fts_messages_docsize failed: {err}")),
                 });
             }
         };
-        let indexable_messages = count_indexable_messages()?;
-        let (has_missing_rowid, has_excess_rowid) =
-            self.inspect_fts_rowid_set_difference_bounded()?;
+        anyhow::ensure!(
+            indexed_messages >= 0,
+            "invalid FTS docsize count: {indexed_messages}"
+        );
+        let indexable_messages = self.count_fts_indexable_messages()?;
+        let intersection_messages = self.count_fts_indexed_canonical_intersection()?;
+        anyhow::ensure!(
+            intersection_messages >= 0
+                && intersection_messages <= indexable_messages
+                && intersection_messages <= indexed_messages,
+            "invalid canonical/FTS intersection cardinality: intersection={intersection_messages}, indexable={indexable_messages}, indexed={indexed_messages}"
+        );
+        let missing_messages = indexable_messages.saturating_sub(intersection_messages);
+        let excess_messages = indexed_messages.saturating_sub(intersection_messages);
         let (status, detail) = match indexed_messages.cmp(&indexable_messages) {
             std::cmp::Ordering::Less => {
-                if has_excess_rowid {
+                if excess_messages > 0 {
                     (
                         FtsShadowParityStatus::Divergent,
-                        Some(
-                            "FTS contains non-canonical rowids while canonical rowids are also missing"
-                                .to_string(),
-                        ),
+                        Some(format!(
+                            "FTS contains {excess_messages} non-canonical rowids while {missing_messages} canonical rowids are missing (intersection={intersection_messages})"
+                        )),
                     )
                 } else {
                     (FtsShadowParityStatus::Partial, None)
                 }
             }
             std::cmp::Ordering::Equal => {
-                let missing = has_missing_rowid;
-                let excess = has_excess_rowid;
-                if missing || excess {
+                if missing_messages > 0 || excess_messages > 0 {
                     (
                         FtsShadowParityStatus::Divergent,
                         Some(format!(
-                            "equal counts conceal rowid divergence (missing_canonical_rowid={missing}, excess_fts_rowid={excess})"
+                            "equal counts conceal rowid divergence (missing_canonical_rowids={missing_messages}, excess_fts_rowids={excess_messages}, intersection={intersection_messages})"
                         )),
                     )
                 } else {
@@ -10971,13 +11078,12 @@ impl FrankenStorage {
                 }
             }
             std::cmp::Ordering::Greater => {
-                if has_missing_rowid {
+                if missing_messages > 0 {
                     (
                         FtsShadowParityStatus::Divergent,
-                        Some(
-                            "FTS has excess non-canonical rowids while canonical rowids are also missing"
-                                .to_string(),
-                        ),
+                        Some(format!(
+                            "FTS has {excess_messages} excess non-canonical rowids while {missing_messages} canonical rowids are missing (intersection={intersection_messages})"
+                        )),
                     )
                 } else {
                     (FtsShadowParityStatus::Excess, None)
@@ -11249,6 +11355,14 @@ impl FrankenStorage {
             // this is the exact prefix boundary whose row/byte invariants were
             // checked before any FTS insert.
             last_rowid = page.last_rowid;
+
+            #[cfg(test)]
+            emit_fts_page_diagnostics(
+                self,
+                &format!(
+                    "stream_batch_complete last_rowid={last_rowid} total_inserted={total_inserted}"
+                ),
+            );
 
             #[cfg(test)]
             if total_inserted > 0 {
@@ -15174,16 +15288,18 @@ impl FrankenStorage {
             DAILY_STATS_REBUILD_MESSAGE_BATCH_SIZE,
         );
 
-        let total_messages: i64 =
-            self.conn
-                .query_row_map("SELECT COUNT(*) FROM messages", fparams![], |row| {
-                    row.get_typed(0)
-                })?;
-        let message_metrics_rows: i64 =
-            self.conn
-                .query_row_map("SELECT COUNT(*) FROM message_metrics", fparams![], |row| {
-                    row.get_typed(0)
-                })?;
+        let total_messages: i64 = self
+            .conn
+            .query_row_map("SELECT COUNT(*) FROM messages", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .with_context(|| "daily_stats phase=count_messages table=messages")?;
+        let message_metrics_rows: i64 = self
+            .conn
+            .query_row_map("SELECT COUNT(*) FROM message_metrics", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .with_context(|| "daily_stats phase=count_messages table=message_metrics")?;
         let use_message_metrics = total_messages > 0 && total_messages == message_metrics_rows;
 
         tracing::info!(
@@ -15200,8 +15316,9 @@ impl FrankenStorage {
         // message corpus, defeating the bounded query batches above. The live
         // materialization remains untouched until the final atomic publish, so
         // an interrupted rebuild leaves the last known-good stats available.
-        self.conn.execute(
-            "CREATE TEMP TABLE IF NOT EXISTS daily_stats_rebuild_stage (
+        self.conn
+            .execute(
+                "CREATE TEMP TABLE IF NOT EXISTS daily_stats_rebuild_stage (
                 day_id INTEGER NOT NULL,
                 agent_slug TEXT NOT NULL,
                 source_id TEXT NOT NULL,
@@ -15211,8 +15328,11 @@ impl FrankenStorage {
                 last_updated INTEGER NOT NULL,
                 PRIMARY KEY (day_id, agent_slug, source_id)
             )",
-        )?;
-        self.conn.execute("DELETE FROM daily_stats_rebuild_stage")?;
+            )
+            .with_context(|| "daily_stats phase=create_stage")?;
+        self.conn
+            .execute("DELETE FROM daily_stats_rebuild_stage")
+            .with_context(|| "daily_stats phase=clear_stage")?;
 
         let mut last_conversation_id = 0_i64;
         let mut conversation_batch_count = 0_usize;
@@ -15223,20 +15343,30 @@ impl FrankenStorage {
         let mut expanded_entries_flushed = 0_usize;
         let message_scan_sql = if use_message_metrics {
             "SELECT m.idx, mm.content_chars
-             FROM messages m
+             FROM messages m INDEXED BY sqlite_autoindex_messages_1
              JOIN message_metrics mm ON mm.message_id = m.id
              WHERE m.conversation_id = ?1
                AND m.idx > ?2
-             ORDER BY m.conversation_id, m.idx
+             ORDER BY m.idx
              LIMIT ?3"
         } else {
             "SELECT m.idx, COALESCE(LENGTH(CAST(m.content AS BLOB)), 0)
-             FROM messages m
+             FROM messages m INDEXED BY sqlite_autoindex_messages_1
              WHERE m.conversation_id = ?1
                AND m.idx > ?2
-             ORDER BY m.conversation_id, m.idx
+             ORDER BY m.idx
              LIMIT ?3"
         };
+        // #329: prepare this once and stream each bounded page through the row
+        // handler. Re-preparing and materializing one Vec per conversation/page
+        // retained engine execution state until the 967k-message field corpus
+        // reached ~10.4 GiB RSS and failed with an internal OOM. The explicit
+        // uniqueness-index hint pins the `(conversation_id, idx)` keyset walk;
+        // neither memory nor planner work scales with unrelated messages.
+        let message_scan_statement = self
+            .conn
+            .prepare(message_scan_sql)
+            .with_context(|| "preparing daily_stats bounded message scan")?;
 
         loop {
             // Avoid the 2-table JOIN with LIMIT that triggers frankensqlite's
@@ -15269,7 +15399,13 @@ impl FrankenStorage {
                     );
                     continue;
                 }
-                Err(err) => return Err(err.into()),
+                Err(err) => {
+                    return Err(err).with_context(|| {
+                        format!(
+                            "daily_stats phase=conversation_scan last_conversation_id={last_conversation_id} batch_size={conversation_batch_size}"
+                        )
+                    });
+                }
             };
             if conversation_rows.is_empty() {
                 break;
@@ -15295,13 +15431,26 @@ impl FrankenStorage {
             let entries = aggregate.expand();
             expanded_entries_flushed += entries.len();
             if !entries.is_empty() {
-                let mut batch_tx = self.conn.transaction()?;
+                let mut batch_tx = self.conn.transaction().with_context(|| {
+                    format!(
+                        "daily_stats phase=conversation_stage_begin last_conversation_id={last_conversation_id}"
+                    )
+                })?;
                 franken_update_daily_stats_batched_in_tx_for_target(
                     &batch_tx,
                     &entries,
                     DailyStatsBatchTarget::RebuildStage,
-                )?;
-                batch_tx.commit()?;
+                )
+                .with_context(|| {
+                    format!(
+                        "daily_stats phase=conversation_stage_upsert last_conversation_id={last_conversation_id}"
+                    )
+                })?;
+                batch_tx.commit().with_context(|| {
+                    format!(
+                        "daily_stats phase=conversation_stage_commit last_conversation_id={last_conversation_id}"
+                    )
+                })?;
             }
             if conversation_batch_count.is_multiple_of(25) {
                 tracing::info!(
@@ -15320,15 +15469,33 @@ impl FrankenStorage {
             for (conversation_id, day_id, agent_slug, source_id) in conversation_batch_meta {
                 let mut cursor_message_idx = -1_i64;
                 loop {
-                    let message_rows = match self.conn.query_with_params(
-                        message_scan_sql,
-                        &params_from_iter([
-                            ParamValue::from(conversation_id),
-                            ParamValue::from(cursor_message_idx),
-                            ParamValue::from(message_batch_size as i64),
-                        ]),
-                    ) {
-                        Ok(rows) => rows,
+                    let page_start_message_idx = cursor_message_idx;
+                    let mut next_message_idx = cursor_message_idx;
+                    let mut page_rows = 0_usize;
+                    let mut aggregate = StatsAggregator::new();
+                    let scan_params = [
+                        SqliteValue::from(conversation_id),
+                        SqliteValue::from(page_start_message_idx),
+                        SqliteValue::from(message_batch_size as i64),
+                    ];
+                    let scan_result =
+                        message_scan_statement.query_with_params_for_each(&scan_params, |row| {
+                            let message_idx: i64 = row.get_typed(0)?;
+                            let content_len: i64 = row.get_typed(1)?;
+                            next_message_idx = message_idx;
+                            page_rows = page_rows.saturating_add(1);
+                            aggregate.record_delta(
+                                &agent_slug,
+                                &source_id,
+                                day_id,
+                                0,
+                                1,
+                                content_len,
+                            );
+                            Ok(())
+                        });
+                    match scan_result {
+                        Ok(()) => cursor_message_idx = next_message_idx,
                         Err(err) if is_out_of_memory_error(&err) && message_batch_size > 1 => {
                             let previous_batch_size = message_batch_size;
                             message_batch_size = (message_batch_size / 2).max(1);
@@ -15336,38 +15503,51 @@ impl FrankenStorage {
                                 previous_batch_size,
                                 message_batch_size,
                                 conversation_id,
-                                cursor_message_idx,
+                                cursor_message_idx = page_start_message_idx,
+                                phase = "message_scan",
                                 "daily_stats message scan ran out of memory; retrying with smaller batch"
                             );
                             continue;
                         }
-                        Err(err) => return Err(err.into()),
-                    };
-                    if message_rows.is_empty() {
+                        Err(err) => {
+                            return Err(err).with_context(|| {
+                                format!(
+                                    "daily_stats phase=message_scan conversation_id={conversation_id} cursor_message_idx={page_start_message_idx} batch_size={message_batch_size}"
+                                )
+                            });
+                        }
+                    }
+                    if page_rows == 0 {
                         break;
                     }
 
-                    let mut aggregate = StatsAggregator::new();
-                    for row in &message_rows {
-                        let message_idx: i64 = row.get_typed(0)?;
-                        let content_len: i64 = row.get_typed(1)?;
-                        cursor_message_idx = message_idx;
-                        aggregate.record_delta(&agent_slug, &source_id, day_id, 0, 1, content_len);
-                        messages_processed += 1;
-                    }
+                    messages_processed = messages_processed.saturating_add(page_rows);
 
                     message_batch_count += 1;
                     raw_entries_flushed += aggregate.raw_entry_count();
                     let entries = aggregate.expand();
                     expanded_entries_flushed += entries.len();
                     if !entries.is_empty() {
-                        let mut batch_tx = self.conn.transaction()?;
+                        let mut batch_tx = self.conn.transaction().with_context(|| {
+                            format!(
+                                "daily_stats phase=message_stage_begin conversation_id={conversation_id} cursor_message_idx={cursor_message_idx}"
+                            )
+                        })?;
                         franken_update_daily_stats_batched_in_tx_for_target(
                             &batch_tx,
                             &entries,
                             DailyStatsBatchTarget::RebuildStage,
-                        )?;
-                        batch_tx.commit()?;
+                        )
+                        .with_context(|| {
+                            format!(
+                                "daily_stats phase=message_stage_upsert conversation_id={conversation_id} cursor_message_idx={cursor_message_idx}"
+                            )
+                        })?;
+                        batch_tx.commit().with_context(|| {
+                            format!(
+                                "daily_stats phase=message_stage_commit conversation_id={conversation_id} cursor_message_idx={cursor_message_idx}"
+                            )
+                        })?;
                     }
                     if message_batch_count.is_multiple_of(50) {
                         tracing::info!(
@@ -15385,32 +15565,52 @@ impl FrankenStorage {
                             "daily_stats rebuild message scan progress"
                         );
                     }
+                    if page_rows < message_batch_size {
+                        break;
+                    }
                 }
             }
         }
 
-        let rows_created: i64 = self.conn.query_row_map(
-            "SELECT COUNT(*) FROM daily_stats_rebuild_stage",
-            fparams![],
-            |row| row.get_typed(0),
-        )?;
-        let total_sessions: i64 = self.conn.query_row_map(
-            "SELECT COALESCE(SUM(session_count), 0) FROM daily_stats_rebuild_stage WHERE agent_slug = 'all' AND source_id = 'all'",
-            fparams![],
-            |row| row.get_typed(0),
-        )?;
+        let rows_created: i64 = self
+            .conn
+            .query_row_map(
+                "SELECT COUNT(*) FROM daily_stats_rebuild_stage",
+                fparams![],
+                |row| row.get_typed(0),
+            )
+            .with_context(|| "daily_stats phase=stage_count metric=rows_created")?;
+        let total_sessions: i64 = self
+            .conn
+            .query_row_map(
+                "SELECT COALESCE(SUM(session_count), 0) FROM daily_stats_rebuild_stage WHERE agent_slug = 'all' AND source_id = 'all'",
+                fparams![],
+                |row| row.get_typed(0),
+            )
+            .with_context(|| "daily_stats phase=stage_count metric=total_sessions")?;
 
-        let mut publish_tx = self.conn.transaction()?;
-        publish_tx.execute("DELETE FROM daily_stats")?;
-        publish_tx.execute(
-            "INSERT INTO daily_stats (
+        let mut publish_tx = self
+            .conn
+            .transaction()
+            .with_context(|| "daily_stats phase=publish_begin")?;
+        publish_tx
+            .execute("DELETE FROM daily_stats")
+            .with_context(|| "daily_stats phase=publish_delete")?;
+        publish_tx
+            .execute(
+                "INSERT INTO daily_stats (
                 day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated
              )
              SELECT day_id, agent_slug, source_id, session_count, message_count, total_chars, last_updated
              FROM daily_stats_rebuild_stage",
-        )?;
-        publish_tx.commit()?;
-        self.conn.execute("DELETE FROM daily_stats_rebuild_stage")?;
+            )
+            .with_context(|| "daily_stats phase=publish_insert")?;
+        publish_tx
+            .commit()
+            .with_context(|| "daily_stats phase=publish_commit")?;
+        self.conn
+            .execute("DELETE FROM daily_stats_rebuild_stage")
+            .with_context(|| "daily_stats phase=clear_stage_after_publish")?;
 
         tracing::info!(
             target: "cass::perf::daily_stats",
@@ -16517,7 +16717,7 @@ pub struct AnalyticsRebuildResult {
 }
 
 /// Result of rebuilding daily stats.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DailyStatsRebuildResult {
     pub rows_created: i64,
     pub total_sessions: i64,
@@ -16745,6 +16945,62 @@ std::thread_local! {
     static TEST_FTS_REBUILD_INTERRUPTION_PHASE: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
     static TEST_FTS_PAGE_AFTER_PLAN_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         std::cell::RefCell::new(None);
+    static TEST_FTS_PAGE_DIAGNOSTIC_PATH: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn arm_fts_page_diagnostics(db_path: &Path) {
+    TEST_FTS_PAGE_DIAGNOSTIC_PATH.with(|path| {
+        *path.borrow_mut() = Some(db_path.to_path_buf());
+    });
+}
+
+#[cfg(test)]
+fn emit_fts_page_diagnostics(storage: &FrankenStorage, stage: &str) {
+    let enabled = TEST_FTS_PAGE_DIAGNOSTIC_PATH.with(|path| {
+        path.borrow()
+            .as_deref()
+            .is_some_and(|path| path == storage.db_path)
+    });
+    if !enabled {
+        return;
+    }
+
+    let query_i64 = |sql: &str| {
+        storage
+            .raw()
+            .query_row_map(sql, fparams![], |row| row.get_typed::<i64>(0))
+            .map_err(|error| error.to_string())
+    };
+    let page_count = query_i64("PRAGMA page_count");
+    let page_size = query_i64("PRAGMA page_size");
+    let temp_probe_root = query_i64(
+        "SELECT rootpage FROM temp.sqlite_master WHERE name = 'cass_fts_repair_probe_ids'",
+    );
+    let docsize_root =
+        query_i64("SELECT rootpage FROM main.sqlite_master WHERE name = 'fts_messages_docsize'");
+    let file_len = std::fs::metadata(&storage.db_path)
+        .map(|metadata| metadata.len())
+        .map_err(|error| error.to_string());
+    let header_page_count = (|| -> std::io::Result<u32> {
+        use std::io::Read as _;
+
+        let mut file = std::fs::File::open(&storage.db_path)?;
+        let mut header = [0_u8; 32];
+        file.read_exact(&mut header)?;
+        Ok(u32::from_be_bytes([
+            header[28], header[29], header[30], header[31],
+        ]))
+    })()
+    .map_err(|error| error.to_string());
+
+    eprintln!(
+        "CASS_FTS_PAGE_DIAG stage={stage:?} pragma_page_count={page_count:?} \
+         pragma_page_size={page_size:?} header_page_count={header_page_count:?} \
+         file_len={file_len:?} temp_probe_root={temp_probe_root:?} \
+         docsize_root={docsize_root:?}"
+    );
 }
 
 #[cfg(test)]
@@ -17039,6 +17295,220 @@ mod tests {
         );
     }
 
+    fn reference_indexable_message_count(storage: &FrankenStorage) -> i64 {
+        storage
+            .raw()
+            .query_row_map(
+                "SELECT COUNT(*)
+                 FROM messages m
+                 INNER JOIN conversations c ON c.id = m.conversation_id",
+                fparams![],
+                |row| row.get_typed(0),
+            )
+            .expect("count indexable messages with the unforced reference join")
+    }
+
+    #[test]
+    fn fts_indexable_count_and_intersection_plans_are_bounded_and_exact() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("fts-indexable-count-plan.db");
+        let storage = FrankenStorage::open(&db_path).unwrap();
+        seed_atomic_fts_rebuild_fixture(&storage);
+
+        let message_rootpage: i64 = storage
+            .raw()
+            .query_row_map(
+                "SELECT rootpage FROM sqlite_master WHERE name = 'messages'",
+                fparams![],
+                |row| row.get_typed(0),
+            )
+            .expect("load messages table rootpage");
+        let message_index_rootpage: i64 = storage
+            .raw()
+            .query_row_map(
+                "SELECT rootpage FROM sqlite_master WHERE name = 'sqlite_autoindex_messages_1'",
+                fparams![],
+                |row| row.get_typed(0),
+            )
+            .expect("load messages uniqueness-index rootpage");
+        let conversation_rootpage: i64 = storage
+            .raw()
+            .query_row_map(
+                "SELECT rootpage FROM sqlite_master WHERE name = 'conversations'",
+                fparams![],
+                |row| row.get_typed(0),
+            )
+            .expect("load conversations table rootpage");
+        let docsize_rootpage: i64 = storage
+            .raw()
+            .query_row_map(
+                "SELECT rootpage FROM sqlite_master WHERE name = 'fts_messages_docsize'",
+                fparams![],
+                |row| row.get_typed(0),
+            )
+            .expect("load FTS docsize rootpage");
+        let count_opcodes: Vec<(String, i64)> = storage
+            .raw()
+            .query_map_collect(
+                &format!("EXPLAIN {FTS_INDEXABLE_MESSAGE_COUNT_SQL}"),
+                fparams![],
+                |row| Ok((row.get_typed(1)?, row.get_typed(3)?)),
+            )
+            .expect("explain fused indexable-message parent-run count");
+        assert!(
+            count_opcodes
+                .iter()
+                .any(|(opcode, _)| opcode == "CountIndexEqRun"),
+            "parity cardinality must use fused duplicate-prefix run counting: {count_opcodes:?}"
+        );
+        assert!(
+            !count_opcodes.iter().any(|(opcode, _)| matches!(
+                opcode.as_str(),
+                "OpenAutoindex" | "Count" | "AggStep" | "AggFinal"
+            )),
+            "parent-run cardinality must avoid probe materialization and generic aggregate counting: {count_opcodes:?}"
+        );
+        let open_read_rootpages: Vec<i64> = count_opcodes
+            .iter()
+            .filter_map(|(opcode, rootpage)| (opcode == "OpenRead").then_some(*rootpage))
+            .collect();
+        assert!(
+            open_read_rootpages.contains(&message_index_rootpage)
+                && open_read_rootpages.contains(&conversation_rootpage)
+                && !open_read_rootpages.contains(&message_rootpage)
+                && open_read_rootpages.len() == 2,
+            "parity cardinality must open only the composite index and parent table: roots={open_read_rootpages:?}, opcodes={count_opcodes:?}"
+        );
+        assert_eq!(
+            storage.count_fts_indexable_messages().unwrap(),
+            reference_indexable_message_count(&storage),
+            "the forced access path must preserve the reference join's exact result"
+        );
+
+        assert_eq!(
+            storage
+                .count_fts_indexed_canonical_intersection()
+                .expect("count the one-row healthy intersection"),
+            1
+        );
+        let intersection_opcodes: Vec<(String, i64, i64)> = storage
+            .raw()
+            .query_map_collect(
+                &format!("EXPLAIN {FTS_INDEXED_CANONICAL_INTERSECTION_SQL}"),
+                fparams![],
+                |row| Ok((row.get_typed(1)?, row.get_typed(2)?, row.get_typed(3)?)),
+            )
+            .expect("explain read-only shadow-driven canonical intersection");
+        let cursor_for_rootpage = |rootpage: i64| {
+            intersection_opcodes.iter().find_map(|(opcode, p1, p2)| {
+                (opcode == "OpenRead" && *p2 == rootpage).then_some(*p1)
+            })
+        };
+        let docsize_cursor = cursor_for_rootpage(docsize_rootpage)
+            .expect("intersection must open the FTS docsize table");
+        let message_cursor =
+            cursor_for_rootpage(message_rootpage).expect("intersection must open messages");
+        assert!(
+            intersection_opcodes
+                .iter()
+                .any(|(opcode, p1, _)| opcode == "Rewind" && *p1 == docsize_cursor)
+                && intersection_opcodes
+                    .iter()
+                    .any(|(opcode, p1, _)| opcode == "SeekRowid" && *p1 == message_cursor)
+                && !intersection_opcodes.iter().any(|(opcode, p1, _)| {
+                    matches!(opcode.as_str(), "Rewind" | "Next") && *p1 == message_cursor
+                })
+                && intersection_opcodes
+                    .iter()
+                    .any(|(opcode, _, _)| opcode == "ResultRow")
+                && !intersection_opcodes.iter().any(|(opcode, _, _)| matches!(
+                    opcode.as_str(),
+                    "SorterOpen" | "OpenEphemeral"
+                )),
+            "intersection must scan only the derived shadow, point-seek canonical messages, and stream one compact parent ID without materialization: {intersection_opcodes:?}"
+        );
+
+        let conversation_id: i64 = storage
+            .raw()
+            .query_row_map("SELECT id FROM conversations LIMIT 1", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        for idx in 1_i64..5 {
+            storage
+                .raw()
+                .execute_compat(
+                    "INSERT INTO messages(conversation_id, idx, role, content)
+                     VALUES(?1, ?2, 'assistant', 'count-index equality-run regression')",
+                    fparams![conversation_id, idx],
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            storage.count_fts_indexable_messages().unwrap(),
+            5,
+            "a five-row equality run must count five rows, not the triangular sum 5+4+3+2+1"
+        );
+        assert_eq!(
+            storage.count_fts_indexable_messages().unwrap(),
+            reference_indexable_message_count(&storage),
+            "fused equality-run counting must remain exact beyond a one-row proof"
+        );
+
+        storage.raw().execute("PRAGMA foreign_keys = OFF").unwrap();
+        storage
+            .raw()
+            .execute(
+                "INSERT INTO messages(id, conversation_id, idx, role, content)
+                 VALUES(9999999, 9999999, 0, 'user', 'deliberate orphan')",
+            )
+            .unwrap();
+        storage.raw().execute("PRAGMA foreign_keys = ON").unwrap();
+        assert_eq!(
+            storage
+                .raw()
+                .query_row_map("SELECT COUNT(*) FROM messages", fparams![], |row| {
+                    row.get_typed::<i64>(0)
+                })
+                .unwrap(),
+            6,
+            "the fixture must contain five canonical messages and one orphan"
+        );
+        assert_eq!(
+            storage.count_fts_indexable_messages().unwrap(),
+            reference_indexable_message_count(&storage),
+            "prepared parent counts must exclude orphan IDs exactly"
+        );
+        let canonical_id: i64 = storage
+            .raw()
+            .query_row_map(
+                "SELECT id FROM messages WHERE conversation_id != 9999999 LIMIT 1",
+                fparams![],
+                |row| row.get_typed(0),
+            )
+            .unwrap();
+        storage
+            .raw()
+            .execute_compat(
+                "INSERT INTO fts_messages_docsize(id, sz)
+                 SELECT 9999999, sz FROM fts_messages_docsize WHERE id = ?1",
+                fparams![canonical_id],
+            )
+            .unwrap();
+        assert_eq!(
+            storage.count_fts_indexed_canonical_intersection().unwrap(),
+            1,
+            "intersection must reject an indexed message whose parent conversation is absent"
+        );
+        drop(storage);
+        let readonly = FrankenStorage::open_readonly(&db_path).unwrap();
+        assert_eq!(
+            readonly.count_fts_indexed_canonical_intersection().unwrap(),
+            1,
+            "exact intersection must require no TEMP or canonical writes on a read-only doctor connection"
+        );
+    }
+
     #[test]
     fn transactional_fts_rebuild_interruptions_preserve_the_published_shadow() {
         let dir = TempDir::new().unwrap();
@@ -17129,6 +17599,7 @@ mod tests {
             storage.inspect_search_fallback_fts_parity().unwrap().status,
             FtsShadowParityStatus::Partial
         );
+        arm_fts_page_diagnostics(&db_path);
 
         // The first page contains the already-indexed row plus the first
         // missing row. Its autocommit INSERT is durable before the injected
@@ -17141,9 +17612,11 @@ mod tests {
             error.to_string().contains("resuming missing FTS rows"),
             "unexpected partial catch-up error: {error:#}"
         );
+        emit_fts_page_diagnostics(&storage, "after_initial_interruption");
         drop(storage);
 
-        let reopened = FrankenStorage::open(&db_path).unwrap();
+        let reopened = FrankenStorage::open_existing_schema_only_for_fts_repair(&db_path).unwrap();
+        emit_fts_page_diagnostics(&reopened, "immediately_after_reopen");
         let search_count = |term: &str| {
             reopened
                 .raw()
@@ -17165,6 +17638,7 @@ mod tests {
         let repair = match reopened.ensure_search_fallback_fts_consistency() {
             Ok(repair) => repair,
             Err(error) => {
+                emit_fts_page_diagnostics(&reopened, "after_resumed_repair_failure");
                 let canonical_ids: Vec<i64> = reopened
                     .raw()
                     .query_map_collect("SELECT id FROM messages ORDER BY id", fparams![], |row| {
@@ -17252,6 +17726,34 @@ mod tests {
                 .indexed_messages,
             Some(5)
         );
+        drop(reopened);
+
+        let ordinary = FrankenStorage::open(&db_path)
+            .expect("ordinary post-doctor open must retain lazy contentless FTS support");
+        assert_eq!(
+            ordinary
+                .inspect_search_fallback_fts_parity()
+                .expect("inspect parity after ordinary reopen")
+                .status,
+            FtsShadowParityStatus::Healthy
+        );
+        for term in [
+            "survives",
+            "resumecommitted",
+            "resumependingtwo",
+            "resumependingthree",
+            "resumependingfour",
+        ] {
+            let count: i64 = ordinary
+                .raw()
+                .query_row_map(
+                    "SELECT COUNT(*) FROM fts_messages WHERE fts_messages MATCH ?1",
+                    fparams![term],
+                    |row| row.get_typed(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "ordinary reopen lost term {term}");
+        }
     }
 
     #[test]
@@ -17619,6 +18121,11 @@ mod tests {
         assert_eq!(parity.canonical_messages, 2);
         assert_eq!(parity.indexable_messages, 2);
         assert_eq!(parity.indexed_messages, Some(1));
+        assert_eq!(
+            storage.count_fts_indexable_messages().unwrap(),
+            reference_indexable_message_count(&storage),
+            "partial-shadow classification must use an exact indexable-message count"
+        );
     }
 
     #[test]
@@ -17681,6 +18188,91 @@ mod tests {
                 .detail
                 .as_deref()
                 .is_some_and(|detail| detail.contains("equal counts conceal rowid divergence"))
+        );
+    }
+
+    #[test]
+    fn fts_shadow_parity_intersection_matches_exact_merge_for_excess_and_divergence() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("fts-intersection-cardinality.db");
+        let storage = FrankenStorage::open(&db_path).unwrap();
+        seed_atomic_fts_rebuild_fixture(&storage);
+
+        let canonical_id: i64 = storage
+            .raw()
+            .query_row_map("SELECT id FROM messages LIMIT 1", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        let first_excess_id = canonical_id.saturating_add(1_000_000);
+        storage
+            .raw()
+            .execute_compat(
+                "INSERT INTO fts_messages_docsize(id, sz)
+                 SELECT ?1, sz FROM fts_messages_docsize WHERE id = ?2",
+                fparams![first_excess_id, canonical_id],
+            )
+            .unwrap();
+
+        let excess = storage.inspect_search_fallback_fts_parity().unwrap();
+        assert_eq!(excess.indexable_messages, 1);
+        assert_eq!(excess.indexed_messages, Some(2));
+        assert_eq!(excess.status, FtsShadowParityStatus::Excess);
+        assert_eq!(
+            storage
+                .inspect_fts_rowid_set_difference_bounded()
+                .expect("compare one-row canonical set with a strict FTS superset"),
+            (false, true),
+            "the exact merge oracle must agree that only an excess rowid exists"
+        );
+
+        let conversation_id: i64 = storage
+            .raw()
+            .query_row_map("SELECT id FROM conversations LIMIT 1", fparams![], |row| {
+                row.get_typed(0)
+            })
+            .unwrap();
+        storage
+            .raw()
+            .execute_compat(
+                "INSERT INTO messages(conversation_id, idx, role, content)
+                 VALUES(?1, 1, 'assistant', 'missing from divergent shadow')",
+                fparams![conversation_id],
+            )
+            .unwrap();
+        let second_excess_id = first_excess_id.saturating_add(1);
+        storage
+            .raw()
+            .execute_compat(
+                "INSERT INTO fts_messages_docsize(id, sz)
+                 SELECT ?1, sz FROM fts_messages_docsize WHERE id = ?2",
+                fparams![second_excess_id, canonical_id],
+            )
+            .unwrap();
+
+        let divergent = storage.inspect_search_fallback_fts_parity().unwrap();
+        assert_eq!(divergent.indexable_messages, 2);
+        assert_eq!(divergent.indexed_messages, Some(3));
+        assert_eq!(divergent.status, FtsShadowParityStatus::Divergent);
+        assert_eq!(
+            storage.count_fts_indexable_messages().unwrap(),
+            reference_indexable_message_count(&storage),
+            "divergent-shadow classification must use an exact indexable-message count"
+        );
+        assert!(
+            divergent.detail.as_deref().is_some_and(|detail| {
+                detail.contains("2 excess non-canonical rowids")
+                    && detail.contains("1 canonical rowids are missing")
+                    && detail.contains("intersection=1")
+            }),
+            "divergent detail must expose exact intersection-derived counts: {divergent:?}"
+        );
+        assert_eq!(
+            storage
+                .inspect_fts_rowid_set_difference_bounded()
+                .expect("compare missing-plus-excess rowid domains"),
+            (true, true),
+            "the exact merge oracle must agree that both missing and excess rowids exist"
         );
     }
 
@@ -21290,6 +21882,135 @@ mod tests {
             )
             .unwrap();
         assert_eq!(rebuilt_total, expected_bytes);
+    }
+
+    #[test]
+    #[serial]
+    fn rebuild_daily_stats_reuses_streaming_statement_across_large_message_pages() {
+        const MESSAGE_COUNT: i64 = 512;
+        const CONTENT_BYTES: usize = 8 * 1024;
+
+        fn linux_rss_bytes() -> Option<u64> {
+            let status = std::fs::read_to_string("/proc/self/status").ok()?;
+            let rss_kib = status.lines().find_map(|line| {
+                line.strip_prefix("VmRSS:")?
+                    .split_whitespace()
+                    .next()?
+                    .parse::<u64>()
+                    .ok()
+            })?;
+            rss_kib.checked_mul(1_024)
+        }
+
+        let _conversation_batch =
+            set_env_var("CASS_DAILY_STATS_REBUILD_CONVERSATION_BATCH_SIZE", "1");
+        let _message_batch = set_env_var("CASS_DAILY_STATS_REBUILD_MESSAGE_BATCH_SIZE", "1");
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("daily-stats-many-pages.db");
+        let bootstrap = SqliteStorage::open(&db_path).unwrap();
+        drop(bootstrap);
+
+        // Build the fixture outside the measured region with the repository's
+        // existing stock-SQLite interop test dependency. Batch size one forces
+        // 512 executions of the same prepared FrankenSQLite statement; the
+        // pre-#329 ad-hoc materialization path retained enough per-execution
+        // state to reach ~10.4 GiB on the 967k-message field corpus.
+        let mut sqlite = rusqlite::Connection::open(&db_path).unwrap();
+        let tx = sqlite.transaction().unwrap();
+        tx.execute(
+            "INSERT INTO agents(id, slug, name, kind, created_at, updated_at)
+             VALUES(1, 'codex', 'Codex', 'cli', 0, 0)",
+            [],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO conversations(
+                 id, agent_id, source_id, external_id, source_path, started_at
+             ) VALUES(1, 1, 'local', 'cass-329-many-pages', '/tmp/cass-329.jsonl', ?1)",
+            rusqlite::params![1_700_000_000_000_i64],
+        )
+        .unwrap();
+        let content = "x".repeat(CONTENT_BYTES);
+        {
+            let mut insert = tx
+                .prepare(
+                    "INSERT INTO messages(id, conversation_id, idx, role, content)
+                     VALUES(?1, 1, ?2, 'user', ?3)",
+                )
+                .unwrap();
+            for message_id in 1..=MESSAGE_COUNT {
+                insert
+                    .execute(rusqlite::params![message_id, message_id - 1, &content])
+                    .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        drop(sqlite);
+
+        let storage = SqliteStorage::open(&db_path).unwrap();
+        let plan_details: Vec<String> = storage
+            .conn
+            .query_map_collect(
+                "EXPLAIN QUERY PLAN \
+                 SELECT m.idx, COALESCE(LENGTH(CAST(m.content AS BLOB)), 0) \
+                 FROM messages m INDEXED BY sqlite_autoindex_messages_1 \
+                 WHERE m.conversation_id = ?1 AND m.idx > ?2 \
+                 ORDER BY m.idx \
+                 LIMIT ?3",
+                fparams![1_i64, -1_i64, 1_i64],
+                |row| row.get_typed(3),
+            )
+            .unwrap();
+        assert!(
+            plan_details
+                .iter()
+                .any(|detail| detail.contains("sqlite_autoindex_messages_1")),
+            "daily_stats message scan must use the conversation_id/idx autoindex: {plan_details:?}"
+        );
+        assert!(
+            !plan_details
+                .iter()
+                .any(|detail| detail.contains("TEMP B-TREE")),
+            "daily_stats message scan must not materialize a sorter: {plan_details:?}"
+        );
+
+        let rss_before = linux_rss_bytes();
+        let started = std::time::Instant::now();
+        let rebuilt = storage.rebuild_daily_stats().unwrap();
+        let elapsed = started.elapsed();
+        let rss_after = linux_rss_bytes();
+        assert_eq!(rebuilt.total_sessions, 1);
+
+        let totals: (i64, i64) = storage
+            .conn
+            .query_row_map(
+                "SELECT message_count, total_chars
+                 FROM daily_stats
+                 WHERE agent_slug = 'all' AND source_id = 'all'",
+                fparams![],
+                |row| Ok((row.get_typed(0)?, row.get_typed(1)?)),
+            )
+            .unwrap();
+        assert_eq!(totals.0, MESSAGE_COUNT);
+        assert_eq!(
+            totals.1,
+            MESSAGE_COUNT * i64::try_from(CONTENT_BYTES).unwrap()
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(60),
+            "512 prepared streaming pages took {elapsed:?}"
+        );
+        if let (Some(before), Some(after)) = (rss_before, rss_after) {
+            assert!(
+                after.saturating_sub(before) < 256 * 1024 * 1024,
+                "prepared streaming rebuild grew RSS by {} bytes",
+                after.saturating_sub(before)
+            );
+        }
+
+        // The staging/publish sequence must be idempotent, not additive.
+        let repeated = storage.rebuild_daily_stats().unwrap();
+        assert_eq!(repeated, rebuilt);
     }
 
     #[test]

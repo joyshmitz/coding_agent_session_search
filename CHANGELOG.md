@@ -17,6 +17,95 @@ Repository: <https://github.com/Dicklesworthstone/coding_agent_session_search>
 
 ## Unreleased
 
+### Added
+
+- **Grok Build (xAI's official `grok` coding CLI) is now a covered connector**
+  (#328). Detection was already scaffolded; the parser + factory land via
+  `franken-agent-detection` 0.1.10 (`6d24c532`). Sessions under
+  `$GROK_HOME/sessions/<percent-encoded-cwd>/<session-uuid>/` are read from
+  `updates.jsonl` — the ACP session-update stream the CLI's own docs call the
+  authoritative conversation log — with `summary.json` supplying title,
+  workspace (`info.cwd`), timestamps, and model, and `chat_history.jsonl`
+  serving as a fallback so real user prompts still index when every model
+  call in a session failed. Streaming chunk kinds coalesce, `tool_call` /
+  `tool_call_update` events become tool messages with structured
+  invocations, and unknown update kinds are skipped tolerantly. Registered
+  end-to-end: connector factory, watch-root `ConnectorKind` (`gk`), source
+  discovery/raw-mirror coverage, and the `capabilities --json` inventory
+  (now 23 connectors).
+
+### Fixed
+
+- **Resumed semantic candidate selection remains bounded across sparse parent
+  gaps** (#348). Resume scans now stream eligible rows once from the canonical
+  global message cursor and retain only the smallest bounded set of
+  conversation IDs. This removes thousands of per-parent probes (and their
+  multi-gigabyte allocator growth) while preserving exact ascending
+  conversation checkpoint order even when message IDs arrive out of order.
+  A 6,668-parent-gap regression proves bounded row visits, memory, and time.
+
+- **Semantic CLI searches discover an already-running embedding daemon by
+  default without eagerly loading a local model** (#347). Explicit `--daemon`
+  additionally permits auto-spawn, while `--no-daemon` keeps direct local
+  inference. The local quality embedder is lazy and only initializes on daemon
+  fallback. Every daemon response must identify the embedder that owns the
+  active vector index, and fast-only mode is pinned to the hash vector space,
+  so a same-width but incompatible vector can never silently contaminate an
+  index.
+
+- **Large-archive doctor inventory and raw-mirror accounting are streaming and
+  bounded** (#330). Source inventory aggregation now happens in bounded Rust
+  maps over one-row metadata streams instead of a FrankenSQLite
+  `GROUP BY`/`ORDER BY` materialization. Raw-mirror message counts use one
+  narrow composite-index stream (or one legacy table-scan fallback) instead of
+  a correlated full message scan per conversation. Plan regressions forbid
+  temporary sorters and verify exact counts on sparse fixtures.
+
+- **`daily_stats` recovery no longer attempts an archive-sized packet rebuild
+  before its nominal fallback** (#329). Production now has one authoritative,
+  failure-atomic staging rebuild. Canonical messages are read through one
+  prepared, row-streaming composite-index scan, with bounded pages, explicit
+  phase/cursor diagnostics, retry shrinkage on memory pressure, and exact,
+  idempotent publication. Packet projection remains test-only as an oracle.
+
+- **Canonical FTS doctor repair now scales to multi-million-message archives**
+  (#345). Exact dry-run parity is classified from canonical, indexed, and
+  intersection cardinalities using fused composite-index parent-run counts and
+  a single shadow-driven primary-key probe stream instead of repeatedly
+  rescanning 4,096-row keyset pages or retaining the complete shadow rowid
+  domain. The FrankenSQLite
+  pin is also advanced to 0.1.18, whose fused composite-index equality-run
+  counter supplies the bounded canonical count and whose bounded clean-page
+  reclamation prevents the false `OutOfMemory` failure observed while creating
+  an absent FTS shadow inside a 24 GiB cgroup. Failure-atomic publication and
+  canonical-row preservation are unchanged.
+
+- **`cass status --json` no longer synthesizes `storage_state: "ok"` from
+  openability alone** (#331). When the only probe that ran is `db_open`, the
+  lightweight readiness surfaces (`status --json`, `search --robot-meta`) now
+  report the honest `storage_state: "unchecked"` / `source_of_truth_risk:
+  "unknown"` with an explicit `checks_not_attempted: [quick_check]` entry.
+  `ok` is reserved for real structural evidence: the doctor's completed
+  integrity probe now persists a fingerprinted attestation
+  (`integrity_attestation.json`, keyed on db+WAL size/mtime, 7-day TTL) that
+  status projects with `attestation_source: "cached"` — including a cached
+  FAIL, which projects `integrity_failed`/`high`, gates top-level
+  `healthy: false`, and adds an explicit recovery warning, so a
+  quick_check-provable corrupted archive can no longer read as healthy just
+  because it still opens.
+
+- **`cass index --full` no longer emits false `stall_detected` events during
+  active parsing, and progress ETAs no longer regress as discovery expands
+  the total** (#332). The stall watchdog now watches a monotonic
+  work-liveness tick (`activity`: parsed conversations on the producer side,
+  received/persisted batches and chunks on the consumer side) in addition to
+  the published `current` counter, so a long parse of one large source
+  artifact between coarse batch publications is forward progress, not a
+  stall. Progress snapshots additionally carry `unit` (connectors /
+  conversations / messages / vectors per phase) and `total_is_final`;
+  `eta_seconds` is suppressed while `total` is still a lazily expanding
+  "discovered so far" count instead of regressing by hours.
+
 ## [v0.6.20] -- 2026-06-30
 
 **Linux x86-64 reliability release: a pure-Rust embedder backend (no more

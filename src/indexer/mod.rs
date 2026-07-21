@@ -36,9 +36,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use crossbeam_channel::{Receiver, Sender, TrySendError, bounded, never, select};
 use frankensearch::index::VectorIndex as FsVectorIndex;
+use frankensqlite::compat::{ConnectionExt, ParamValue, RowExt};
+#[cfg(test)]
 use frankensqlite::compat::{
-    ConnectionExt, ParamValue, RowExt, Transaction as FrankenTransaction,
-    TransactionExt as FrankenTransactionExt,
+    Transaction as FrankenTransaction, TransactionExt as FrankenTransactionExt,
 };
 use fs2::FileExt;
 use notify::event::{AccessKind, AccessMode, MetadataKind, ModifyKind};
@@ -54,7 +55,7 @@ use crate::connectors::{
     antigravity::AntigravityConnector, chatgpt::ChatGptConnector, claude_code::ClaudeCodeConnector,
     clawdbot::ClawdbotConnector, cline::ClineConnector, codex::CodexConnector,
     copilot::CopilotConnector, copilot_cli::CopilotCliConnector, cursor::CursorConnector,
-    factory::FactoryConnector, gemini::GeminiConnector, kimi::KimiConnector,
+    factory::FactoryConnector, gemini::GeminiConnector, grok::GrokConnector, kimi::KimiConnector,
     openclaw::OpenClawConnector, opencode::OpenCodeConnector, pi_agent::PiAgentConnector,
     qwen::QwenConnector, vibe::VibeConnector,
 };
@@ -74,9 +75,11 @@ use crate::search::vector_index::{
 use crate::sources::config::{Platform, SourcesConfig};
 use crate::sources::provenance::{LOCAL_SOURCE_ID, Origin, Source, SourceKind};
 use crate::sources::sync::path_to_safe_dirname;
+#[cfg(test)]
+use crate::storage::sqlite::{DailyStatsRebuildResult, StatsAggregator, StatsDelta};
 use crate::storage::sqlite::{
-    DailyStatsRebuildResult, FrankenStorage, FtsConsistencyRepair, HistoricalSalvageOutcome,
-    LEXICAL_REBUILD_PLANNER_ESTIMATED_BYTES_PER_MESSAGE, StatsAggregator, StatsDelta,
+    FrankenStorage, FtsConsistencyRepair, HistoricalSalvageOutcome,
+    LEXICAL_REBUILD_PLANNER_ESTIMATED_BYTES_PER_MESSAGE,
     seed_canonical_from_best_historical_bundle,
 };
 use semantic::{
@@ -10751,30 +10754,19 @@ fn repair_daily_stats_if_drifted(
         "daily_stats is missing or drifted; rebuilding from canonical conversations"
     );
 
-    let rebuilt = match rebuild_daily_stats_from_conversation_packets(storage, db_path) {
-        Ok(rebuilt) => rebuilt,
-        Err(error) if error_is_out_of_memory(&error) => {
-            tracing::warn!(
-                db_path = %db_path.display(),
-                error = %error,
-                "packet daily_stats rebuild ran out of memory; falling back to bounded storage rebuild"
-            );
-            storage.rebuild_daily_stats().with_context(|| {
-                format!(
-                    "rebuilding daily_stats with bounded fallback before index planning for {}",
-                    db_path.display()
-                )
-            })?
-        }
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "rebuilding daily_stats before index planning for {}",
-                    db_path.display()
-                )
-            });
-        }
-    };
+    // #329: the packet projection rebuild held one write transaction for the
+    // entire archive and materialized canonical message batches before the
+    // nominally bounded fallback even started. On the 967k-message field
+    // corpus that first path reached an internal OOM, then the fallback did the
+    // same. Production now has one authoritative implementation: the
+    // failure-atomic staging rebuild whose canonical message pages are driven
+    // by one prepared, row-streaming `(conversation_id, idx)` statement.
+    let rebuilt = storage.rebuild_daily_stats().with_context(|| {
+        format!(
+            "rebuilding daily_stats with streaming canonical scan before index planning for {}",
+            db_path.display()
+        )
+    })?;
 
     tracing::info!(
         db_path = %db_path.display(),
@@ -10793,8 +10785,10 @@ fn repair_daily_stats_if_drifted(
     })
 }
 
+#[cfg(test)]
 const PACKET_DAILY_STATS_REBUILD_BATCH_SIZE: i64 = 256;
 
+#[cfg(test)]
 fn packet_daily_stats_provenance(
     conversation: &crate::storage::sqlite::LexicalRebuildConversationRow,
 ) -> LexicalRebuildPacketProvenance {
@@ -10810,6 +10804,7 @@ fn packet_daily_stats_provenance(
     }
 }
 
+#[cfg(test)]
 fn packet_daily_stats_message_count(projections: &ConversationPacketSinkProjections) -> i64 {
     let analytics = &projections.analytics;
     i64::try_from(
@@ -10822,10 +10817,12 @@ fn packet_daily_stats_message_count(projections: &ConversationPacketSinkProjecti
     .unwrap_or(i64::MAX)
 }
 
+#[cfg(test)]
 fn packet_daily_stats_total_chars(projections: &ConversationPacketSinkProjections) -> i64 {
     i64::try_from(projections.lexical.total_content_bytes).unwrap_or(i64::MAX)
 }
 
+#[cfg(test)]
 fn packet_update_daily_stats_batched_in_tx(
     tx: &FrankenTransaction<'_>,
     entries: &[(i64, String, String, StatsDelta)],
@@ -10860,6 +10857,7 @@ fn packet_update_daily_stats_batched_in_tx(
     Ok(total_affected)
 }
 
+#[cfg(test)]
 fn rebuild_daily_stats_from_conversation_packets(
     storage: &FrankenStorage,
     db_path: &Path,
@@ -23028,6 +23026,7 @@ impl ConnectorKind {
             "kimi" => Some(Self::Kimi),
             "copilot_cli" => Some(Self::CopilotCli),
             "qwen" => Some(Self::Qwen),
+            "grok" => Some(Self::Grok),
             _ => None,
         }
     }
@@ -23053,6 +23052,7 @@ impl ConnectorKind {
             Self::Kimi => "kimi",
             Self::CopilotCli => "copilot_cli",
             Self::Qwen => "qwen",
+            Self::Grok => "grok",
         }
     }
 
@@ -23079,6 +23079,7 @@ impl ConnectorKind {
             Self::Kimi => Box::new(KimiConnector::new()),
             Self::CopilotCli => Box::new(CopilotCliConnector::new()),
             Self::Qwen => Box::new(QwenConnector::new()),
+            Self::Grok => Box::new(GrokConnector::new()),
         }
     }
 }
@@ -23830,6 +23831,8 @@ enum ConnectorKind {
     CopilotCli,
     #[serde(rename = "qw", alias = "Qwen")]
     Qwen,
+    #[serde(rename = "gk", alias = "Grok")]
+    Grok,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Default)]
@@ -41125,7 +41128,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn repair_daily_stats_if_drifted_falls_back_after_packet_rebuild_oom() {
+    fn repair_daily_stats_if_drifted_bypasses_the_unbounded_packet_rebuild() {
         let tmp = TempDir::new().unwrap();
         let db_path = tmp.path().join("db.sqlite");
         let storage = FrankenStorage::open(&db_path).unwrap();
@@ -41176,6 +41179,8 @@ mod tests {
             .unwrap();
 
         let _oom_guard = set_env("CASS_TEST_PACKET_DAILY_STATS_REBUILD_OOM", "1");
+        // #329: this fault injection would fail the legacy packet path. The
+        // production repair must no longer enter it at all.
         assert_eq!(
             repair_daily_stats_if_drifted(&storage, &db_path, None).unwrap(),
             DailyStatsRepairOutcome::Rebuilt {
@@ -41189,7 +41194,7 @@ mod tests {
     }
 
     #[test]
-    fn repair_daily_stats_if_drifted_packet_rebuild_matches_legacy_storage_rebuild() {
+    fn packet_daily_stats_projection_matches_streaming_storage_rebuild() {
         fn load_daily_stats_rows(
             storage: &FrankenStorage,
         ) -> Vec<(i64, String, String, i64, i64, i64)> {
@@ -41342,11 +41347,8 @@ mod tests {
 
         storage.raw().execute("DELETE FROM daily_stats").unwrap();
         assert_eq!(
-            repair_daily_stats_if_drifted(&storage, &db_path, None).unwrap(),
-            DailyStatsRepairOutcome::Rebuilt {
-                rows_created: expected_rebuild.rows_created,
-                total_sessions: expected_rebuild.total_sessions,
-            }
+            rebuild_daily_stats_from_conversation_packets(&storage, &db_path).unwrap(),
+            expected_rebuild
         );
         assert_eq!(load_daily_stats_rows(&storage), expected_rows);
     }
@@ -46643,12 +46645,29 @@ mod tests {
         let mut state = HashMap::new();
         state.insert(ConnectorKind::Codex, 123);
         state.insert(ConnectorKind::Gemini, 456);
+        state.insert(ConnectorKind::Grok, 789);
 
         save_watch_state(&data_dir, &state).unwrap();
 
         let loaded = load_watch_state(&data_dir);
         assert_eq!(loaded.get(&ConnectorKind::Codex), Some(&123));
         assert_eq!(loaded.get(&ConnectorKind::Gemini), Some(&456));
+        assert_eq!(loaded.get(&ConnectorKind::Grok), Some(&789));
+    }
+
+    #[test]
+    fn grok_connector_kind_maps_runtime_slug_and_compact_wire_key() {
+        assert_eq!(ConnectorKind::from_slug("grok"), Some(ConnectorKind::Grok));
+        assert_eq!(ConnectorKind::Grok.slug(), "grok");
+        assert_eq!(
+            serde_json::to_string(&ConnectorKind::Grok).unwrap(),
+            "\"gk\""
+        );
+        assert_eq!(
+            serde_json::from_str::<ConnectorKind>("\"Grok\"").unwrap(),
+            ConnectorKind::Grok,
+            "legacy human-readable watch-state keys remain accepted"
+        );
     }
 
     #[test]

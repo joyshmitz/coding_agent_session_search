@@ -458,6 +458,7 @@ coding_agent_session_search/
 │   │   ├── codex.rs              # Codex sessions
 │   │   ├── cursor.rs             # Cursor sessions
 │   │   ├── gemini.rs             # Gemini sessions
+│   │   ├── grok.rs               # Grok Build sessions
 │   │   ├── aider.rs              # Aider sessions
 │   │   ├── amp.rs                # Amp sessions
 │   │   ├── chatgpt.rs            # ChatGPT sessions (encrypted)
@@ -465,10 +466,17 @@ coding_agent_session_search/
 │   │   ├── opencode.rs           # OpenCode sessions
 │   │   ├── pi_agent.rs           # Pi Agent sessions
 │   │   ├── copilot.rs            # Copilot sessions
+│   │   ├── copilot_cli.rs        # Copilot CLI sessions
 │   │   ├── openclaw.rs           # OpenClaw sessions
 │   │   ├── clawdbot.rs           # ClawdBot sessions
 │   │   ├── vibe.rs               # Vibe sessions
-│   │   └── factory.rs            # Connector factory
+│   │   ├── crush.rs               # Crush sessions
+│   │   ├── hermes.rs              # Hermes sessions
+│   │   ├── kimi.rs                # Kimi Code sessions
+│   │   ├── qwen.rs                # Qwen Code sessions
+│   │   ├── openhands.rs           # OpenHands sessions
+│   │   ├── antigravity.rs         # Antigravity sessions
+│   │   └── factory.rs             # Factory (Droid) sessions
 │   ├── search/                   # Search engine (delegates to frankensearch)
 │   │   ├── query.rs              # Query parsing and execution
 │   │   ├── tantivy.rs            # BM25 full-text search (via frankensearch)
@@ -548,9 +556,18 @@ cass robot-docs guide         # LLM-optimized docs
 | OpenCode | `opencode.rs` | JSONL |
 | Pi Agent | `pi_agent.rs` | JSONL |
 | Copilot | `copilot.rs` | JSONL |
+| Copilot CLI | `copilot_cli.rs` | JSONL |
 | OpenClaw | `openclaw.rs` | JSONL |
 | ClawdBot | `clawdbot.rs` | JSONL |
 | Vibe | `vibe.rs` | JSONL |
+| Crush | `crush.rs` | JSONL |
+| Hermes | `hermes.rs` | JSONL |
+| Kimi Code | `kimi.rs` | JSONL |
+| Qwen Code | `qwen.rs` | JSONL |
+| Factory (Droid) | `factory.rs` | JSONL |
+| OpenHands | `openhands.rs` | JSON event stream |
+| Antigravity | `antigravity.rs` | JSONL / SQLite |
+| Grok Build | `grok.rs` | ACP updates JSONL |
 
 ### HTML Export (Robot Mode)
 

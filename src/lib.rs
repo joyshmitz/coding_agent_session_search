@@ -1035,9 +1035,11 @@ pub enum Commands {
         #[arg(long, value_name = "DIR", value_hint = ValueHint::DirPath)]
         recover_from_archive: Option<PathBuf>,
 
-        /// Safely inspect or repair the canonical FTS5 shadow. Partial shadows
-        /// resume in bounded batches; recreation is failure-atomic. Supports
-        /// `--dry-run`; mutation requires `--yes` and never modifies canonical rows.
+        /// Safely inspect or repair the canonical FTS5 shadow. Exact dry-run
+        /// parity uses fused covering-index parent-run counts plus bounded
+        /// primary-key probes; partial shadows resume in bounded batches and
+        /// recreation is failure-atomic. Supports `--dry-run`; mutation
+        /// requires `--yes` and never modifies canonical rows.
         #[arg(long, default_value_t = false)]
         rebuild_canonical_fts: bool,
 
@@ -20207,7 +20209,7 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "  (global) --verbose/-v  Enable debug logs (overrides auto-quiet)".to_string(),
             "  Tip: `--robot-docs=<topic>` is normalized to `robot-docs <topic>`; globals can appear before/after subcommands.".to_string(),
             "  cass search <query> [OPTIONS]".to_string(),
-            "    --agent A         Filter by agent (e.g. codex, claude_code, gemini, opencode, antigravity; run `cass capabilities --json | jq .connectors` for the full 22-connector inventory)".to_string(),
+            "    --agent A         Filter by agent (e.g. codex, claude_code, gemini, opencode, antigravity; run `cass capabilities --json | jq .connectors` for the full 23-connector inventory)".to_string(),
             "    --workspace W     Filter by workspace path".to_string(),
             "    --limit N         Max results (default: 0 = no limit)".to_string(),
             "    --offset N        Pagination offset (default: 0)".to_string(),

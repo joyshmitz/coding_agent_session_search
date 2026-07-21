@@ -23,7 +23,7 @@ anyhow = "1.0.102"
 thiserror = "2.0.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "ansi"] }
-asupersync = { version = "=0.3.6", features = ["test-internals", "tls-native-roots"] }
+asupersync = { version = "=0.3.9", features = ["test-internals", "tls-native-roots"] }
 clap = { version = "4.6.1", features = ["derive", "cargo", "env", "unicode", "wrap_help"] }
 clap_complete = "4.6.5"
 clap_mangen = "0.3.0"
@@ -43,7 +43,7 @@ which = "8.0.2"
 shell-words = "1.1.1"
 dotenvy = "0.15.7"
 notify = "8.2.0"
-frankensqlite = { version = "=0.1.13", package = "fsqlite", features = ["fts5"] }
+frankensqlite = { version = "=0.1.18", package = "fsqlite", features = ["fts5"] }
 rayon = "1.12.0"
 crossbeam-channel = "0.5.15"
 parking_lot = "0.12.5"
@@ -89,7 +89,7 @@ bytemuck = "1.25.0"
 # binaries crashed pre-AVX2 CPUs at static init (#256/#307). No ONNX means no
 # AVX-static-init hazard and no separate `-baseline` artifact is needed.
 frankensearch = { version = "0.3.2", git = "https://github.com/Dicklesworthstone/frankensearch", rev = "f7fa7a020cf084ed1cc5e53926521e3a0d8743cc", default-features = false, features = ["hash", "lexical", "ann", "native"] }
-franken-agent-detection = { version = "0.1.9", git = "https://github.com/Dicklesworthstone/franken_agent_detection", rev = "9f9d54ae2eceb0d2fc05d1b2d7991f6990a2f2b7", features = ["connectors", "cursor", "chatgpt", "opencode", "crush", "hermes"] }
+franken-agent-detection = { version = "0.1.10", git = "https://github.com/Dicklesworthstone/franken_agent_detection", rev = "6d24c532667aebdf31ecac8a9ddb457bef32b3f7", features = ["connectors", "cursor", "chatgpt", "opencode", "crush", "hermes"] }
 wide = "1.4.0"  # Portable SIMD for P0 Opt 2: SIMD dot product
 arrayvec = "0.7.6"  # Stack-based arrays for P1 Opt 1.4: Edge N-gram optimization
 bloomfilter = "3.0.1"  # Probabilistic membership testing for P2 Opt 3.3: Workspace Cache
@@ -177,7 +177,7 @@ rand_chacha = "0.10"
 rusqlite = { version = "0.39.0", features = ["bundled", "modern_sqlite"] }
 # frankensqlite compat gate tests (bead 3vvqa) — fsqlite-types needed for SqliteValue
 # enum variants in test assertions. The main fsqlite dep is available as `frankensqlite`.
-fsqlite-types = { version = "=0.1.13", package = "fsqlite-types" }
+fsqlite-types = { version = "=0.1.18", package = "fsqlite-types" }
 
 [[bin]]
 name = "cass"
