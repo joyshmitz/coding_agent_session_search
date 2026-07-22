@@ -21,8 +21,12 @@
 //! the same report — safe to pin in golden tests. The report carries only
 //! **metadata**: authored query text, sanitized document refs (a stable id such
 //! as a session-file stem — never the conversation body), modes, latencies, and
-//! numeric metrics. There is no field that holds raw session/prompt/tool text,
-//! so a report cannot leak it (proven by [`tests::report_holds_no_session_body`]).
+//! numeric metrics. Document refs are sanitized again at the scoring boundary,
+//! so a caller cannot accidentally preserve raw paths, whitespace, or injection
+//! punctuation in a report. The real-binary gate additionally plants private
+//! body text in its corpus and proves that exact text is absent from both
+//! artifacts; [`tests::report_holds_no_session_body`] exercises the boundary
+//! sanitizer directly.
 //! Distributions use [`BTreeMap`] so the serialized key order is deterministic.
 //!
 //! ## Shape
@@ -44,6 +48,12 @@ pub const SEARCH_QUALITY_SCHEMA_VERSION: u32 = 1;
 /// Floating-point tolerance for treating two metric values as equal (used by the
 /// pass gate and the regression diff so exact-fraction comparisons are robust).
 const METRIC_EPS: f64 = 1e-9;
+
+/// Stable report-safe marker for an observed hit whose document reference has
+/// no identifier characters after sanitization. Keeping the slot (instead of
+/// dropping it) ensures malformed hits still reduce precision and fail the
+/// unexpected-ref gate.
+const INVALID_DOC_REF: &str = "__invalid_doc_ref__";
 
 /// One checked-in relevance judgment: a query and the set of document refs that
 /// *should* be retrieved within its top-`k`. Authored, reviewable data — the
@@ -119,8 +129,8 @@ pub struct QueryEvaluation {
     pub expected_refs: Vec<String>,
     /// Observed refs in rank order.
     pub observed_refs: Vec<String>,
-    /// `|expected ∩ observed[..k]| / |expected|` (vacuously `1.0` when nothing
-    /// is expected).
+    /// `|expected ∩ observed[..k]| / |expected|` (`0.0` when nothing is
+    /// expected, because an empty judgment is not a meaningful quality gate).
     pub recall_at_k: f64,
     /// `|expected ∩ observed[..k]| / min(k, |observed|)` (`0.0` when no results).
     pub precision_at_k: f64,
@@ -132,7 +142,8 @@ pub struct QueryEvaluation {
     pub missing_refs: Vec<String>,
     /// Top-`k` observed refs that were not expected.
     pub unexpected_refs: Vec<String>,
-    /// True when every expected ref was retrieved within the top-`k`.
+    /// True only when the judgment is non-empty and the top-`k` contains every
+    /// expected ref with no unexpected refs.
     pub passed: bool,
 }
 
@@ -239,11 +250,12 @@ fn relevant_in_topk(expected: &BTreeSet<&str>, observed_ranked: &[String], k: us
 }
 
 /// `recall@k = |expected ∩ observed[..k]| / |expected|`. An empty `expected`
-/// is vacuously satisfied (`1.0`).
+/// returns `0.0`: a relevance gate with no authored judgment must not pass
+/// vacuously.
 pub fn recall_at_k(expected: &[String], observed_ranked: &[String], k: usize) -> f64 {
     let exp = distinct(expected);
     if exp.is_empty() {
-        return 1.0;
+        return 0.0;
     }
     relevant_in_topk(&exp, observed_ranked, k) as f64 / exp.len() as f64
 }
@@ -277,21 +289,36 @@ pub fn reciprocal_rank(expected: &[String], observed_ranked: &[String]) -> f64 {
 fn observed_refs_ranked(observed: &[ObservedHit]) -> Vec<String> {
     let mut hits: Vec<&ObservedHit> = observed.iter().collect();
     hits.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.doc_ref.cmp(&b.doc_ref)));
-    hits.into_iter().map(|h| h.doc_ref.clone()).collect()
+    hits.into_iter()
+        .map(|hit| {
+            let sanitized = sanitize_doc_ref(&hit.doc_ref);
+            if sanitized.is_empty() {
+                INVALID_DOC_REF.to_string()
+            } else {
+                sanitized
+            }
+        })
+        .collect()
 }
 
 /// Score one query run against its judgment. Pure and deterministic.
 pub fn evaluate(run: &QueryRun) -> QueryEvaluation {
     let qrel = &run.qrel;
+    let expected_refs: Vec<String> = qrel
+        .expected_refs
+        .iter()
+        .map(|doc_ref| sanitize_doc_ref(doc_ref))
+        .filter(|doc_ref| !doc_ref.is_empty())
+        .collect();
     let observed_refs = observed_refs_ranked(&run.observed);
 
-    let recall = recall_at_k(&qrel.expected_refs, &observed_refs, qrel.k);
-    let precision = precision_at_k(&qrel.expected_refs, &observed_refs, qrel.k);
-    let mrr = reciprocal_rank(&qrel.expected_refs, &observed_refs);
+    let recall = recall_at_k(&expected_refs, &observed_refs, qrel.k);
+    let precision = precision_at_k(&expected_refs, &observed_refs, qrel.k);
+    let mrr = reciprocal_rank(&expected_refs, &observed_refs);
 
     // Distinct, sorted expected refs (BTreeSet iteration is sorted) and the
     // top-k observed set, for a stable per-query diff.
-    let exp_set: BTreeSet<&str> = qrel.expected_refs.iter().map(String::as_str).collect();
+    let exp_set: BTreeSet<&str> = expected_refs.iter().map(String::as_str).collect();
     let topk: BTreeSet<&str> = observed_refs
         .iter()
         .take(qrel.k)
@@ -308,7 +335,11 @@ pub fn evaluate(run: &QueryRun) -> QueryEvaluation {
         .map(|r| (*r).to_string())
         .collect();
 
-    let passed = (recall - 1.0).abs() < METRIC_EPS;
+    let passed = !expected_sorted.is_empty()
+        && qrel.k > 0
+        && (recall - 1.0).abs() < METRIC_EPS
+        && (precision - 1.0).abs() < METRIC_EPS
+        && unexpected_refs.is_empty();
 
     QueryEvaluation {
         id: qrel.id.clone(),
@@ -660,7 +691,7 @@ mod tests {
     // ---- metric math --------------------------------------------------------
 
     #[test]
-    fn recall_perfect_partial_zero_and_vacuous() {
+    fn recall_perfect_partial_zero_and_empty_judgment() {
         assert!(approx(
             recall_at_k(&refs(&["a", "b"]), &refs(&["a", "b", "c"]), 5),
             1.0
@@ -673,8 +704,8 @@ mod tests {
             recall_at_k(&refs(&["x"]), &refs(&["a", "b"]), 5),
             0.0
         ));
-        // No expectation is vacuously satisfied.
-        assert!(approx(recall_at_k(&[], &refs(&["a"]), 5), 1.0));
+        // No authored expectation is an invalid gate, not a free pass.
+        assert!(approx(recall_at_k(&[], &refs(&["a"]), 5), 0.0));
     }
 
     #[test]
@@ -745,6 +776,54 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_rejects_unexpected_refs_despite_full_recall() {
+        let run = QueryRun {
+            qrel: qrel("q-precision", "bar", &["a"], 5),
+            observed: vec![hit(1, "a", None), hit(2, "spurious", None)],
+            realized_mode: None,
+            fallback_tier: None,
+            latency_ms: 3,
+        };
+        let evaluation = evaluate(&run);
+        assert!(approx(evaluation.recall_at_k, 1.0));
+        assert!(evaluation.precision_at_k < 1.0);
+        assert_eq!(evaluation.unexpected_refs, refs(&["spurious"]));
+        assert!(
+            !evaluation.passed,
+            "full recall must not hide false positives"
+        );
+    }
+
+    #[test]
+    fn evaluate_keeps_invalid_observed_ref_as_unexpected_slot() {
+        let run = QueryRun {
+            qrel: qrel("q-invalid-ref", "bar", &["a"], 5),
+            observed: vec![hit(1, "a", None), hit(2, "///", None)],
+            realized_mode: None,
+            fallback_tier: None,
+            latency_ms: 3,
+        };
+        let evaluation = evaluate(&run);
+        assert_eq!(evaluation.unexpected_refs, refs(&[INVALID_DOC_REF]));
+        assert!(evaluation.precision_at_k < 1.0);
+        assert!(!evaluation.passed);
+    }
+
+    #[test]
+    fn evaluate_rejects_empty_expected_refs() {
+        let run = QueryRun {
+            qrel: qrel("q-empty", "bar", &[], 5),
+            observed: Vec::new(),
+            realized_mode: None,
+            fallback_tier: None,
+            latency_ms: 3,
+        };
+        let evaluation = evaluate(&run);
+        assert!(approx(evaluation.recall_at_k, 0.0));
+        assert!(!evaluation.passed, "empty qrels must never pass vacuously");
+    }
+
+    #[test]
     fn evaluate_sorts_observed_by_rank() {
         // Hits supplied out of order are scored in rank order.
         let run = QueryRun {
@@ -774,7 +853,7 @@ mod tests {
                 latency_ms: 10,
             },
             QueryRun {
-                qrel: qrel("b", "qb", &["d2"], 5),
+                qrel: qrel("b", "qb", &["d2", "d3"], 5),
                 observed: vec![
                     hit(1, "d3", Some("stale")),
                     hit(2, "d2", Some("unverified")),
@@ -788,6 +867,7 @@ mod tests {
         assert_eq!(report.aggregate.query_count, 2);
         assert_eq!(report.aggregate.passed_count, 2);
         assert!(approx(report.aggregate.mean_recall_at_k, 1.0));
+        assert!(approx(report.aggregate.mean_precision_at_k, 1.0));
         assert!(approx(report.aggregate.mean_latency_ms, 15.0));
         // Trust tiers counted across all observed hits.
         assert_eq!(
@@ -937,16 +1017,21 @@ mod tests {
         assert!(a.contains("## Per-query"));
     }
 
-    /// A report assembled from runs whose *fixtures* contained private text must
-    /// not echo that text — the report holds refs + metrics only, never bodies.
+    /// Even a caller that violates the metadata contract cannot preserve a raw
+    /// path/email-shaped value in the report's document-ref fields.
     #[test]
     fn report_holds_no_session_body() {
-        // The harness reduces a hit to a sanitized ref; a private email that
-        // lived in the conversation body never reaches the report.
         let private = "private.user@example.invalid";
         let runs = vec![QueryRun {
             qrel: qrel("p", "privacytopic", &["privacydoc"], 5),
-            observed: vec![hit(1, "privacydoc", Some("unverified"))],
+            // Deliberately violate the harness contract by passing a path-like
+            // raw value at the metadata boundary. The scoring core must still
+            // sanitize it before the report is assembled.
+            observed: vec![hit(
+                1,
+                &format!("/private/session/{private}"),
+                Some("unverified"),
+            )],
             realized_mode: Some("hybrid".to_string()),
             fallback_tier: None,
             latency_ms: 4,
@@ -954,6 +1039,11 @@ mod tests {
         let report = build_report(&runs);
         let json = serde_json::to_string(&report).unwrap();
         let md = render_markdown(&report);
+        assert_eq!(
+            report.queries[0].observed_refs,
+            refs(&["privatesessionprivate.userexample.invalid"]),
+            "the report must contain only the sanitized metadata projection"
+        );
         assert!(
             !json.contains(private),
             "JSON report must not leak body text"

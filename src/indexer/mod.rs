@@ -28856,7 +28856,7 @@ pub mod persist {
             // Joined at compile time from two literals (no contiguous source literal)
             // so the value still exercises redaction without tripping secret scanners.
             let secret = concat!("sk_live_", "ABCdef0123456789AAAAbbbb0007");
-            let secret_tail = "ABCdef0123456789AAAAbbbb0007";
+            let secret_tail = secret.trim_start_matches("sk_live_");
             let safe_canary = "canary0007";
             let conv = NormalizedConversation {
                 agent_slug: "codex".to_string(),

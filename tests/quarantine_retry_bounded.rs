@@ -78,7 +78,8 @@ fn seed(dir: &std::path::Path, n: usize) -> anyhow::Result<()> {
     for i in 0..n {
         state.entries.insert(conv_key(i), legacy_oom(1)?);
     }
-    state.save(dir)
+    state.save(dir)?;
+    Ok(())
 }
 
 #[test]
@@ -100,13 +101,15 @@ fn repeated_oom_retry_never_grows_durable_state_and_converges_to_suppression() -
         |_key| AttemptResult::OutOfMemory,
     );
     state.save(dir.path())?;
-    assert_eq!(r1.attempted, n, "all eligible entries attempted");
-    assert_eq!(r1.cleared, 0);
-    assert_eq!(r1.re_quarantined_oom, n);
-    assert!(r1.stalled, "attempted-but-nothing-cleared is a stall");
-    assert_eq!(
-        QuarantineState::load(dir.path()).len(),
-        n,
+    ensure!(r1.attempted == n, "all eligible entries attempted");
+    ensure!(r1.cleared == 0, "an OOM retry must not clear entries");
+    ensure!(
+        r1.re_quarantined_oom == n,
+        "every OOM must re-quarantine in place"
+    );
+    ensure!(r1.stalled, "attempted-but-nothing-cleared is a stall");
+    ensure!(
+        QuarantineState::load(dir.path()).len() == n,
         "no unbounded growth: still exactly N entries after re-quarantine"
     );
 
@@ -123,14 +126,16 @@ fn repeated_oom_retry_never_grows_durable_state_and_converges_to_suppression() -
         |_key| AttemptResult::OutOfMemory,
     );
     state2.save(dir.path())?;
-    assert_eq!(
-        r2.attempted, 0,
+    ensure!(
+        r2.attempted == 0,
         "same-version entries are suppressed on resume"
     );
-    assert_eq!(r2.skipped_irreducible, n);
-    assert_eq!(
-        QuarantineState::load(dir.path()).len(),
-        n,
+    ensure!(
+        r2.skipped_irreducible == n,
+        "all same-version entries must be classified irreducible"
+    );
+    ensure!(
+        QuarantineState::load(dir.path()).len() == n,
         "no unbounded growth across resumes"
     );
     Ok(())
@@ -148,14 +153,17 @@ fn bounded_budget_drains_eligible_backlog_across_resumes_each_attempted_once() -
         eligible_only: true,
     };
 
-    let mut attempted: Vec<String> = Vec::new();
+    let mut attempted_ids = vec![false; n];
+    let mut attempted_count = 0usize;
+    let mut duplicate_attempt = false;
+    let mut invalid_attempt_key = false;
     let mut passes = 0usize;
 
     // Resume until the durable backlog is drained. A safety cap keeps the test
     // from hanging if convergence ever regresses.
     loop {
         passes += 1;
-        assert!(passes <= n + 2, "bounded retry must converge");
+        ensure!(passes <= n + 2, "bounded retry must converge");
         let mut state = QuarantineState::load(dir.path());
         if state.is_empty() {
             break;
@@ -167,27 +175,44 @@ fn bounded_budget_drains_eligible_backlog_across_resumes_each_attempted_once() -
             &no_missing(),
             ts(1_800_000_000)?,
             |key| {
-                attempted.push(key.conversation_id.clone());
+                attempted_count = attempted_count.saturating_add(1);
+                match key
+                    .conversation_id
+                    .strip_prefix("conv-")
+                    .and_then(|raw| raw.parse::<usize>().ok())
+                    .filter(|index| *index < attempted_ids.len())
+                {
+                    Some(index) => {
+                        if let Some(attempted) = attempted_ids.get_mut(index) {
+                            duplicate_attempt |= *attempted;
+                            *attempted = true;
+                        } else {
+                            invalid_attempt_key = true;
+                        }
+                    }
+                    None => invalid_attempt_key = true,
+                }
                 AttemptResult::Reindexed
             },
         );
         state.save(dir.path())?;
-        assert!(report.attempted <= 2, "budget caps attempts per pass");
+        ensure!(report.attempted <= 2, "budget caps attempts per pass");
     }
 
-    assert_eq!(
-        QuarantineState::load(dir.path()).len(),
-        0,
+    ensure!(
+        QuarantineState::load(dir.path()).is_empty(),
         "backlog fully drained across bounded resumes"
     );
-    attempted.sort();
-    let unique = {
-        let mut u = attempted.clone();
-        u.dedup();
-        u
-    };
-    assert_eq!(attempted.len(), n, "every entry attempted");
-    assert_eq!(unique.len(), n, "no entry attempted twice across resumes");
+    ensure!(attempted_count == n, "every entry attempted");
+    ensure!(!duplicate_attempt, "an entry must not be attempted twice");
+    ensure!(
+        !invalid_attempt_key,
+        "every attempt key must match the fixture"
+    );
+    ensure!(
+        attempted_ids.iter().all(|attempted| *attempted),
+        "every entry attempted exactly once"
+    );
     Ok(())
 }
 
@@ -439,19 +464,26 @@ fn cli_dry_run_plans_then_apply_reingests_exact_quarantine_key() -> anyhow::Resu
             .context("missing structured proof record")?,
     )?;
     ensure!(
-        verified["outcome"] == "passed",
+        verified["outcome"]
+            .as_str()
+            .is_some_and(|value| matches!(value, "passed")),
         "proof outcome must be passed"
     );
     ensure!(
-        verified["execution"]["timed_out"] == false,
+        matches!(verified["execution"]["timed_out"].as_bool(), Some(false)),
         "proof must distinguish a completed command from a timeout"
     );
     ensure!(
-        verified["artifacts"]["robot_contract_ok"] == true,
+        matches!(
+            verified["artifacts"]["robot_contract_ok"].as_bool(),
+            Some(true)
+        ),
         "proof must record parsed robot JSON"
     );
     ensure!(
-        verified["redaction_status"] == "safe",
+        verified["redaction_status"]
+            .as_str()
+            .is_some_and(|value| matches!(value, "safe")),
         "proof manifest must pass its redaction review"
     );
     Ok(())

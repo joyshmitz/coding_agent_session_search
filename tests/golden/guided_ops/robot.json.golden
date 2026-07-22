@@ -41,8 +41,8 @@
         "name": "empty.inputs.json"
       },
       {
-        "blake3": "389e6f2e4f9551ad6223ee08baba085ac7347bd230642f157460792466646aed",
-        "bytes": 6333,
+        "blake3": "be10f68be1fcd277c78a41f641658edb64b0d36831a04bcee9307891ec6899e9",
+        "bytes": 6343,
         "name": "integrated.inputs.json"
       },
       {

@@ -575,7 +575,8 @@ pub struct MatrixReport {
     pub subsystems: Vec<SubsystemCoverage>,
 }
 
-/// Build the robot-readable matrix report (consumed by the `.11.5` integrated gate).
+/// Build the robot-readable matrix report consumed by the `.11.5` integrated
+/// gate and published by `cass introspect --json` as `subsystem_coverage`.
 pub fn matrix_report() -> MatrixReport {
     let subsystems = subsystem_coverage_matrix();
     MatrixReport {

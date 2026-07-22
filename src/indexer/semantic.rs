@@ -4127,7 +4127,7 @@ mod tests {
         let mut writer = FsVectorIndex::create_with_revision(
             &index_path,
             indexer.embedder_id(),
-            indexer.vector_space_revision().unwrap(),
+            HASH_VECTOR_SPACE_REVISION,
             indexer.embedder_dimension(),
             FsQuantization::F16,
         )

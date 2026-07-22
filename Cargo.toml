@@ -44,6 +44,9 @@ shell-words = "1.1.1"
 dotenvy = "0.15.7"
 notify = "8.2.0"
 frankensqlite = { version = "=0.1.19", package = "fsqlite", features = ["fts5"] }
+# The production storage-integrity probe calls FrankenSQLite's public VFS API
+# directly so it can inspect native writer locks without opening the pager.
+fsqlite-types = { version = "=0.1.19", package = "fsqlite-types" }
 rayon = "1.12.0"
 crossbeam-channel = "0.5.15"
 parking_lot = "0.12.5"
@@ -175,8 +178,8 @@ rand_chacha = "0.10"
 # rusqlite is retained only for C-SQLite interop fixtures in tests; production
 # storage and historical salvage paths use frankensqlite.
 rusqlite = { version = "0.39.0", features = ["bundled", "modern_sqlite"] }
-# frankensqlite compat gate tests (bead 3vvqa) — fsqlite-types needed for SqliteValue
-# enum variants in test assertions. The main fsqlite dep is available as `frankensqlite`.
+# The manifest-policy build gate requires this explicit dev entry for compat
+# fixture assertions, even though production also uses the same pinned crate.
 fsqlite-types = { version = "=0.1.19", package = "fsqlite-types" }
 
 [[bin]]

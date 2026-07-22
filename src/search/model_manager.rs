@@ -1174,7 +1174,7 @@ mod tests {
         let mut writer = VectorIndex::create_with_revision(
             path,
             embedder.id(),
-            expected_vector_space_revision(embedder.id()).unwrap(),
+            crate::indexer::semantic::HASH_VECTOR_SPACE_REVISION,
             embedder.dimension(),
             frankensearch::index::Quantization::F16,
         )
@@ -1190,10 +1190,13 @@ mod tests {
     }
 
     #[test]
-    fn same_id_and_dimension_with_legacy_revision_requires_rebuild() {
-        let tmp = tempdir().unwrap();
+    fn same_id_and_dimension_with_legacy_revision_requires_rebuild() -> anyhow::Result<()> {
+        let tmp = tempdir()?;
         let index_path = vector_index_path(tmp.path(), FastEmbedder::embedder_id_static());
-        std::fs::create_dir_all(index_path.parent().unwrap()).unwrap();
+        let Some(parent) = index_path.parent() else {
+            anyhow::bail!("vector index path has no parent");
+        };
+        std::fs::create_dir_all(parent)?;
 
         let writer = VectorIndex::create_with_revision(
             &index_path,
@@ -1201,21 +1204,22 @@ mod tests {
             "1.0",
             384,
             frankensearch::index::Quantization::F16,
-        )
-        .unwrap();
-        writer.finish().unwrap();
+        )?;
+        writer.finish()?;
         assert!(needs_index_rebuild(tmp.path()));
 
+        let expected_revision = expected_vector_space_revision(FastEmbedder::embedder_id_static())
+            .ok_or_else(|| anyhow::anyhow!("MiniLM vector-space revision is not registered"))?;
         let writer = VectorIndex::create_with_revision(
             &index_path,
             FastEmbedder::embedder_id_static(),
-            expected_vector_space_revision(FastEmbedder::embedder_id_static()).unwrap(),
+            expected_revision,
             384,
             frankensearch::index::Quantization::F16,
-        )
-        .unwrap();
-        writer.finish().unwrap();
+        )?;
+        writer.finish()?;
         assert!(!needs_index_rebuild(tmp.path()));
+        Ok(())
     }
 
     fn semantic_shard_record(

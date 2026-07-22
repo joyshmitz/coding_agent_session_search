@@ -2066,12 +2066,27 @@ fn park_fixture_wal_and_create_orphan_shm(data_dir: &Path) -> Result<(), String>
 }
 
 fn hold_probe_fixture_exclusive_writer(db: &Path) -> Result<frankensqlite::Connection, String> {
+    use frankensqlite::compat::{ConnectionExt as _, ParamValue};
+
     let conn = frankensqlite::Connection::open(db.display().to_string())
         .map_err(|err| format!("open exclusive-writer fixture DB: {err}"))?;
     conn.execute("PRAGMA journal_mode = DELETE;")
         .map_err(|err| format!("select rollback-journal mode for busy fixture: {err}"))?;
     conn.execute("BEGIN EXCLUSIVE TRANSACTION;")
         .map_err(|err| format!("hold exclusive writer transaction: {err}"))?;
+    // BEGIN alone may defer physical lock acquisition. An uncommitted bound
+    // write forces the rollback-journal lock while preserving the canonical
+    // bytes once the fixture rolls back.
+    conn.execute_compat(
+        "UPDATE meta SET value = ?1 WHERE key = ?2",
+        &[
+            ParamValue::from(
+                coding_agent_search::storage::sqlite::CURRENT_SCHEMA_VERSION.to_string(),
+            ),
+            ParamValue::from("schema_version"),
+        ],
+    )
+    .map_err(|err| format!("force exclusive-writer fixture lock: {err}"))?;
     Ok(conn)
 }
 
@@ -2211,7 +2226,6 @@ fn prove_dedicated_fixture_surfaces(
     retarget_fixture_lexical_checkpoint(&data_dir)?;
     let db = db_path(&data_dir);
 
-    let mut exclusive_writer = None;
     match fixture.setup {
         DedicatedFixtureSetup::FutureSchemaVersion => {
             set_probe_fixture_schema_version(&db, false)?;
@@ -2222,14 +2236,16 @@ fn prove_dedicated_fixture_surfaces(
         DedicatedFixtureSetup::OrphanShmOnly => {
             park_fixture_wal_and_create_orphan_shm(&data_dir)?;
         }
-        DedicatedFixtureSetup::ExclusiveWriter => {
-            exclusive_writer = Some(hold_probe_fixture_exclusive_writer(&db)?);
-        }
+        DedicatedFixtureSetup::ExclusiveWriter => {}
     }
 
     let hash_before = sha256_hex(
         &std::fs::read(&db).map_err(|err| format!("{}: read fixture DB: {err}", fixture.id))?,
     );
+    let exclusive_writer = match fixture.setup {
+        DedicatedFixtureSetup::ExclusiveWriter => Some(hold_probe_fixture_exclusive_writer(&db)?),
+        _ => None,
+    };
     let dd = data_dir
         .to_str()
         .ok_or_else(|| format!("{}: fixture path not UTF-8", fixture.id))?;
@@ -2282,6 +2298,7 @@ fn prove_dedicated_fixture_surfaces(
         }
     }
     check_db_preserved(&data_dir, &hash_before, true)
+        .map_err(|why| format!("{}: {why}", fixture.id))
 }
 
 /// The four probe-dependent states have dedicated, openable fixtures and are

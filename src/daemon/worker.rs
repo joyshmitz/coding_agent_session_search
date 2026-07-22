@@ -744,12 +744,15 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_embedder_kind_rejects_unverified_native_topologies() {
+    fn test_resolve_embedder_kind_rejects_unverified_native_topologies() -> anyhow::Result<()> {
         for model in ["snowflake-arctic-s", "nomic-embed-text-v1.5"] {
-            let error = resolve_embedder_kind(model, true).unwrap_err();
+            let Err(error) = resolve_embedder_kind(model, true) else {
+                anyhow::bail!("unverified model topology {model} was accepted");
+            };
             let message = format!("{error:#}");
             assert!(message.contains("supports only minilm"), "{message}");
         }
+        Ok(())
     }
 
     #[test]

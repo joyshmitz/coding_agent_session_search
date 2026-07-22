@@ -318,7 +318,7 @@ fn robot_safe(command: &str) -> bool {
     if command == "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-resource-plan-target" {
         return true;
     }
-    if command.starts_with("rch exec -- env CARGO_TARGET_DIR=/tmp/") {
+    if command.starts_with("rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-") {
         return command.contains(" cargo ")
             && [" check", " test", " clippy", " bench", " fmt"]
                 .iter()

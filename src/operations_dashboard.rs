@@ -428,9 +428,11 @@ fn is_robot_safe_command(command: &str) -> bool {
 
     if tokens.get(0..3) != Some(&["rch", "exec", "--"])
         || tokens.get(3) != Some(&"env")
-        || !tokens
-            .get(4)
-            .is_some_and(|token| token.starts_with("CARGO_TARGET_DIR=/tmp/") && token.len() > 22)
+        || !tokens.get(4).is_some_and(|token| {
+            token
+                .strip_prefix("CARGO_TARGET_DIR=/data/tmp/cass-")
+                .is_some_and(|suffix| !suffix.is_empty())
+        })
         || tokens.get(5) != Some(&"cargo")
         || !matches!(
             tokens.get(6).copied(),

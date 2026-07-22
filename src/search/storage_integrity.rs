@@ -464,20 +464,23 @@ pub(crate) fn build_readiness_storage_integrity(
     StorageIntegrityReport::derive(state, readability, checks)
 }
 
-/// Run the dedicated, bounded, read-only probes that distinguish contention,
+/// Run the dedicated, bounded, non-mutating probes that distinguish contention,
 /// schema drift, legacy interoperability, and suspect WAL/SHM sidecars.
 ///
-/// The probe intentionally opens the raw database read-only instead of a
-/// migration-aware storage wrapper. That preserves the archive and lets an old
-/// but structurally openable schema be classified without upgrading it. Any
-/// open/query error is inspected by concrete `FrankenError` type; text and the
-/// generic CLI retryability flag never imply contention.
+/// The schema leg queries a capped isolated snapshot instead of opening the
+/// canonical pager or a migration-aware storage wrapper. Main DB plus present
+/// sidecars must total at most 16 MiB; larger archives defer schema/legacy
+/// classification with an explicit skip reason. The contention leg inspects
+/// the native VFS reservation state without opening the pager or acquiring a
+/// transaction; neither leg changes canonical rows.
+/// That preserves the archive and lets an old but structurally openable schema
+/// be classified without upgrading it. Any open/query error is inspected by
+/// concrete `FrankenError` type; text and the generic CLI retryability flag
+/// never imply contention.
 pub(crate) fn probe_dedicated_storage_state(
     db_path: &std::path::Path,
     timeout: std::time::Duration,
 ) -> DedicatedStorageProbe {
-    use frankensqlite::compat::{ConnectionExt as _, RowExt as _};
-
     let mut probe = DedicatedStorageProbe::default();
     if !db_path.is_file() {
         probe.checks_attempted.push(StorageCheck::skipped(
@@ -496,88 +499,395 @@ pub(crate) fn probe_dedicated_storage_state(
     }
     probe.main_db_header_plausible = sqlite_main_db_header_is_plausible(db_path);
 
-    let open_started = std::time::Instant::now();
-    match crate::storage::sqlite::open_franken_raw_readonly_connection_with_timeout(
-        db_path, timeout,
-    ) {
-        Ok(mut conn) => {
-            probe.checks_attempted.push(StorageCheck::ran(
-                "contention_classification",
-                elapsed_millis(open_started),
-            ));
-            let schema_started = std::time::Instant::now();
-            let table_count = conn.query_row_map(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'",
-                &[],
-                |row: &frankensqlite::Row| row.get_typed::<i64>(0),
-            );
-            let meta_count = conn.query_row_map(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'meta'",
-                &[],
-                |row: &frankensqlite::Row| row.get_typed::<i64>(0),
-            );
-
-            match (table_count, meta_count) {
-                (Ok(table_count), Ok(0)) if table_count > 0 => {
-                    // A populated SQLite archive with no cass schema marker is
-                    // a pre-migration/legacy layout, not arbitrary drift.
-                    probe.legacy_interop_failed = true;
-                }
-                (Ok(_), Ok(_)) => {
-                    match conn.query_row_map(
-                        "SELECT value FROM meta WHERE key = 'schema_version'",
-                        &[],
-                        |row: &frankensqlite::Row| row.get_typed::<String>(0),
-                    ) {
-                        Ok(raw_version) => match raw_version.trim().parse::<i64>() {
-                            Ok(version)
-                                if (1..crate::storage::sqlite::MIN_IN_PLACE_MIGRATION_SCHEMA_VERSION)
-                                    .contains(&version) =>
-                            {
-                                probe.legacy_interop_failed = true;
-                            }
-                            Ok(version)
-                                if version != crate::storage::sqlite::CURRENT_SCHEMA_VERSION =>
-                            {
-                                probe.schema_drift = true;
-                            }
-                            Ok(_) => {}
-                            Err(_) => probe.legacy_interop_failed = true,
-                        },
-                        Err(err) => observe_typed_contention(&err, &mut probe),
-                    }
-                }
-                (Err(err), _) | (_, Err(err)) => observe_typed_contention(&err, &mut probe),
-            }
-            probe.checks_attempted.push(StorageCheck::ran(
-                "schema_version",
-                elapsed_millis(schema_started),
-            ));
-
-            if conn.close_without_checkpoint_in_place().is_err() {
-                conn.close_best_effort_in_place();
-            }
-        }
-        Err(err) => {
-            observe_anyhow_contention(&err, &mut probe);
-            probe.checks_attempted.push(StorageCheck::ran(
-                "contention_classification",
-                elapsed_millis(open_started),
-            ));
-            probe.checks_attempted.push(StorageCheck::skipped(
-                "schema_version",
-                "raw read-only open did not succeed",
-            ));
-        }
-    }
-
     let sidecar_started = std::time::Instant::now();
     probe.wal_sidecar_suspect = wal_sidecars_are_structurally_suspect(db_path);
     probe.checks_attempted.push(StorageCheck::ran(
         "wal_sidecar_shape",
         elapsed_millis(sidecar_started),
     ));
+
+    if probe.wal_sidecar_suspect {
+        // The sidecar verdict already explains why the archive is deferred.
+        // Avoid any additional database handle so this diagnostic preserves
+        // the orphan/malformed evidence byte-for-byte.
+        probe.checks_attempted.push(StorageCheck::skipped(
+            "contention_classification",
+            "structurally suspect sidecar already explains the deferred archive",
+        ));
+    } else {
+        let contention_started = std::time::Instant::now();
+        let contention_timed_out = match probe_writer_lock_state(db_path, timeout) {
+            LockAdmissionProbe::Available => false,
+            LockAdmissionProbe::BusyOrLocked => {
+                probe.busy_or_locked = true;
+                false
+            }
+            LockAdmissionProbe::TimedOut => {
+                probe.checks_attempted.push(StorageCheck::timed_out(
+                    "contention_classification",
+                    elapsed_millis(contention_started),
+                ));
+                true
+            }
+            LockAdmissionProbe::Unclassified => false,
+        };
+        if !contention_timed_out {
+            probe.checks_attempted.push(StorageCheck::ran(
+                "contention_classification",
+                elapsed_millis(contention_started),
+            ));
+        }
+    }
+
+    if probe.wal_sidecar_suspect || probe.busy_or_locked {
+        probe.checks_attempted.push(StorageCheck::skipped(
+            "schema_version",
+            "sidecar or writer evidence already requires deferring canonical schema reads",
+        ));
+    } else {
+        let schema_started = std::time::Instant::now();
+        match probe_schema_state_from_isolated_snapshot(db_path, timeout) {
+            SchemaSnapshotProbe::Observed(observation) => {
+                probe.schema_drift = observation.schema_drift;
+                probe.legacy_interop_failed = observation.legacy_interop_failed;
+                probe.checks_attempted.push(StorageCheck::ran(
+                    "schema_version",
+                    elapsed_millis(schema_started),
+                ));
+            }
+            SchemaSnapshotProbe::TimedOut => {
+                probe.checks_attempted.push(StorageCheck::timed_out(
+                    "schema_version",
+                    elapsed_millis(schema_started),
+                ));
+            }
+            SchemaSnapshotProbe::SkippedOversized => {
+                probe.checks_attempted.push(StorageCheck::skipped(
+                    "schema_version",
+                    SCHEMA_SNAPSHOT_OVERSIZED_REASON,
+                ));
+            }
+            SchemaSnapshotProbe::Unclassified => {
+                probe.checks_attempted.push(StorageCheck::skipped(
+                    "schema_version",
+                    "isolated snapshot could not be opened or queried",
+                ));
+            }
+        }
+    }
+
     probe
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockAdmissionProbe {
+    Available,
+    BusyOrLocked,
+    TimedOut,
+    Unclassified,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SchemaSnapshotObservation {
+    schema_drift: bool,
+    legacy_interop_failed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchemaSnapshotProbe {
+    Observed(SchemaSnapshotObservation),
+    TimedOut,
+    SkippedOversized,
+    Unclassified,
+}
+
+const SCHEMA_SNAPSHOT_MAX_BYTES: u64 = 16 * 1024 * 1024;
+const SCHEMA_SNAPSHOT_OVERSIZED_REASON: &str = "isolated_snapshot_exceeds_16_mib_budget";
+
+/// Query schema metadata only on an isolated copy. FrankenSQLite's current
+/// pager-backed read-only open can perform WAL recovery while establishing a
+/// readable view, so opening the canonical pathname would violate the
+/// diagnostic contract even when the SQL itself is read-only.
+///
+/// Copying costs O(main DB + present sidecars) I/O. The caller's wait is
+/// bounded; a worker that reaches the deadline finishes and removes its temp
+/// snapshot in the background without ever opening the canonical pager.
+fn probe_schema_state_from_isolated_snapshot(
+    db_path: &std::path::Path,
+    timeout: std::time::Duration,
+) -> SchemaSnapshotProbe {
+    match isolated_snapshot_preflight_bytes(db_path) {
+        Ok(total) if total <= SCHEMA_SNAPSHOT_MAX_BYTES => {}
+        Ok(_) => return SchemaSnapshotProbe::SkippedOversized,
+        Err(()) => return SchemaSnapshotProbe::Unclassified,
+    }
+
+    let path = db_path.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _worker = std::thread::spawn(move || {
+        let outcome = inspect_schema_state_from_isolated_snapshot(&path, timeout);
+        let _ = tx.send(outcome);
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(outcome) => outcome,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => SchemaSnapshotProbe::TimedOut,
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => SchemaSnapshotProbe::Unclassified,
+    }
+}
+
+fn inspect_schema_state_from_isolated_snapshot(
+    db_path: &std::path::Path,
+    timeout: std::time::Duration,
+) -> SchemaSnapshotProbe {
+    use frankensqlite::compat::{ConnectionExt as _, RowExt as _};
+
+    let snapshot_dir = match tempfile::Builder::new()
+        .prefix("cass-storage-schema-probe-")
+        .tempdir()
+    {
+        Ok(dir) => dir,
+        Err(_) => return SchemaSnapshotProbe::Unclassified,
+    };
+    let file_name = match db_path.file_name() {
+        Some(name) => name,
+        None => return SchemaSnapshotProbe::Unclassified,
+    };
+    let snapshot_db = snapshot_dir.path().join(file_name);
+    let mut copied_bytes = 0_u64;
+    match copy_snapshot_file_bounded(db_path, &snapshot_db, &mut copied_bytes) {
+        SnapshotCopyOutcome::Copied => {}
+        SnapshotCopyOutcome::Oversized => return SchemaSnapshotProbe::SkippedOversized,
+        SnapshotCopyOutcome::Failed => return SchemaSnapshotProbe::Unclassified,
+    }
+    for source in isolated_snapshot_sidecar_paths(db_path) {
+        let Ok(metadata) = std::fs::symlink_metadata(&source) else {
+            continue;
+        };
+        if !metadata.file_type().is_file() {
+            return SchemaSnapshotProbe::Unclassified;
+        }
+        let Some(name) = source.file_name() else {
+            return SchemaSnapshotProbe::Unclassified;
+        };
+        match copy_snapshot_file_bounded(
+            &source,
+            &snapshot_dir.path().join(name),
+            &mut copied_bytes,
+        ) {
+            SnapshotCopyOutcome::Copied => {}
+            SnapshotCopyOutcome::Oversized => return SchemaSnapshotProbe::SkippedOversized,
+            SnapshotCopyOutcome::Failed => return SchemaSnapshotProbe::Unclassified,
+        }
+    }
+
+    let mut conn = match crate::storage::sqlite::open_franken_raw_readonly_connection_with_timeout(
+        &snapshot_db,
+        timeout,
+    ) {
+        Ok(conn) => conn,
+        Err(_) => return SchemaSnapshotProbe::Unclassified,
+    };
+    let table_count = conn.query_row_map(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'",
+        &[],
+        |row: &frankensqlite::Row| row.get_typed::<i64>(0),
+    );
+    let meta_count = conn.query_row_map(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'meta'",
+        &[],
+        |row: &frankensqlite::Row| row.get_typed::<i64>(0),
+    );
+
+    let outcome = match (table_count, meta_count) {
+        (Ok(table_count), Ok(0)) if table_count > 0 => {
+            SchemaSnapshotProbe::Observed(SchemaSnapshotObservation {
+                legacy_interop_failed: true,
+                ..SchemaSnapshotObservation::default()
+            })
+        }
+        (Ok(_), Ok(_)) => match conn.query_row_map(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            &[],
+            |row: &frankensqlite::Row| row.get_typed::<String>(0),
+        ) {
+            Ok(raw_version) => match raw_version.trim().parse::<i64>() {
+                Ok(version)
+                    if (1..crate::storage::sqlite::MIN_IN_PLACE_MIGRATION_SCHEMA_VERSION)
+                        .contains(&version) =>
+                {
+                    SchemaSnapshotProbe::Observed(SchemaSnapshotObservation {
+                        legacy_interop_failed: true,
+                        ..SchemaSnapshotObservation::default()
+                    })
+                }
+                Ok(version) => SchemaSnapshotProbe::Observed(SchemaSnapshotObservation {
+                    schema_drift: version != crate::storage::sqlite::CURRENT_SCHEMA_VERSION,
+                    legacy_interop_failed: false,
+                }),
+                Err(_) => SchemaSnapshotProbe::Observed(SchemaSnapshotObservation {
+                    legacy_interop_failed: true,
+                    ..SchemaSnapshotObservation::default()
+                }),
+            },
+            Err(_) => SchemaSnapshotProbe::Unclassified,
+        },
+        (Err(_), _) | (_, Err(_)) => SchemaSnapshotProbe::Unclassified,
+    };
+    if conn.close_without_checkpoint_in_place().is_err() {
+        conn.close_best_effort_in_place();
+    }
+    outcome
+}
+
+fn isolated_snapshot_sidecar_paths(db_path: &std::path::Path) -> [std::path::PathBuf; 3] {
+    [
+        wal_sidecar_path(db_path),
+        shm_sidecar_path(db_path),
+        suffixed_db_path(db_path, "-journal"),
+    ]
+}
+
+fn isolated_snapshot_preflight_bytes(db_path: &std::path::Path) -> Result<u64, ()> {
+    let main = std::fs::symlink_metadata(db_path).map_err(|_| ())?;
+    if !main.file_type().is_file() {
+        return Err(());
+    }
+    let mut total = main.len();
+    for sidecar in isolated_snapshot_sidecar_paths(db_path) {
+        match std::fs::symlink_metadata(sidecar) {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                total = total.checked_add(metadata.len()).ok_or(())?;
+            }
+            Ok(_) => return Err(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(()),
+        }
+    }
+    Ok(total)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotCopyOutcome {
+    Copied,
+    Oversized,
+    Failed,
+}
+
+fn copy_snapshot_file_bounded(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+    copied_bytes: &mut u64,
+) -> SnapshotCopyOutcome {
+    use std::io::{Read as _, Write as _};
+
+    let mut input = match std::fs::File::open(source) {
+        Ok(file) => file,
+        Err(_) => return SnapshotCopyOutcome::Failed,
+    };
+    let mut output = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+    {
+        Ok(file) => file,
+        Err(_) => return SnapshotCopyOutcome::Failed,
+    };
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = match input.read(&mut buffer) {
+            Ok(0) => return SnapshotCopyOutcome::Copied,
+            Ok(read) => read,
+            Err(_) => return SnapshotCopyOutcome::Failed,
+        };
+        let Ok(read_u64) = u64::try_from(read) else {
+            return SnapshotCopyOutcome::Failed;
+        };
+        let Some(next_total) = copied_bytes.checked_add(read_u64) else {
+            return SnapshotCopyOutcome::Oversized;
+        };
+        if next_total > SCHEMA_SNAPSHOT_MAX_BYTES {
+            return SnapshotCopyOutcome::Oversized;
+        }
+        if output.write_all(&buffer[..read]).is_err() {
+            return SnapshotCopyOutcome::Failed;
+        }
+        *copied_bytes = next_total;
+    }
+}
+
+/// Inspect the native VFS reservation state without acquiring a transaction or
+/// opening the pager. On Unix, `check_reserved_lock` delegates to `F_GETLK` on
+/// SQLite's reserved byte, so it neither changes the main file nor recovers or
+/// checkpoints sidecars. The work runs on a bounded thread because a storage
+/// diagnosis must never inherit an engine-level wait indefinitely.
+fn probe_writer_lock_state(
+    db_path: &std::path::Path,
+    timeout: std::time::Duration,
+) -> LockAdmissionProbe {
+    let path = db_path.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _worker = std::thread::spawn(move || {
+        let outcome = inspect_native_writer_lock(&path);
+        let _ = tx.send(outcome);
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(outcome) => outcome,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => LockAdmissionProbe::TimedOut,
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => LockAdmissionProbe::Unclassified,
+    }
+}
+
+#[cfg(unix)]
+fn inspect_native_writer_lock(db_path: &std::path::Path) -> LockAdmissionProbe {
+    use frankensqlite::fsqlite_vfs::{UnixVfs, Vfs as _, VfsFile as _};
+    use fsqlite_types::cx::Cx;
+    use fsqlite_types::flags::VfsOpenFlags;
+
+    let cx = Cx::new();
+    let vfs = UnixVfs::new();
+    let flags = VfsOpenFlags::MAIN_DB | VfsOpenFlags::READONLY;
+    let (mut file, _) = match vfs.open(&cx, Some(db_path), flags) {
+        Ok(opened) => opened,
+        Err(err) => return lock_admission_outcome_from_error(&err),
+    };
+    let outcome = match file.check_reserved_lock(&cx) {
+        Ok(true) => LockAdmissionProbe::BusyOrLocked,
+        Ok(false) => LockAdmissionProbe::Available,
+        Err(err) => lock_admission_outcome_from_error(&err),
+    };
+    if file.close(&cx).is_err() && outcome == LockAdmissionProbe::Available {
+        LockAdmissionProbe::Unclassified
+    } else {
+        outcome
+    }
+}
+
+#[cfg(not(unix))]
+fn inspect_native_writer_lock(_db_path: &std::path::Path) -> LockAdmissionProbe {
+    // The Windows VFS materializes advisory-lock sidecars when opened. Keep
+    // this diagnostic non-mutating there and rely on the typed raw read/query
+    // errors below until a side-effect-free lock-inspection API is available.
+    LockAdmissionProbe::Unclassified
+}
+
+#[cfg(unix)]
+fn lock_admission_outcome_from_error(err: &frankensqlite::FrankenError) -> LockAdmissionProbe {
+    use crate::search::contention_diagnostics::{ContentionClass, classify_franken_error};
+
+    if classify_franken_error(err).is_some_and(|class| {
+        matches!(
+            class,
+            ContentionClass::BusyLocked
+                | ContentionClass::BusyRecovery
+                | ContentionClass::SnapshotConflict
+        )
+    }) {
+        LockAdmissionProbe::BusyOrLocked
+    } else {
+        LockAdmissionProbe::Unclassified
+    }
 }
 
 fn elapsed_millis(started: std::time::Instant) -> i64 {
@@ -611,6 +921,15 @@ fn shm_sidecar_path(db_path: &std::path::Path) -> std::path::PathBuf {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
     name.push_str("-shm");
+    db_path.with_file_name(name)
+}
+
+fn suffixed_db_path(db_path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+    let mut name = db_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    name.push_str(suffix);
     db_path.with_file_name(name)
 }
 
@@ -1639,6 +1958,40 @@ mod tests {
         assert!(legacy.legacy_interop_failed);
         assert!(!legacy.schema_drift);
         assert!(!legacy.busy_or_locked);
+        Ok(())
+    }
+
+    #[test]
+    fn dedicated_probe_skips_oversized_snapshot_without_mutating_canonical_bytes()
+    -> anyhow::Result<()> {
+        use std::io::{Seek as _, SeekFrom, Write as _};
+
+        let dir = tempfile::tempdir()?;
+        let db_path = dir.path().join("agent_search.db");
+        let mut db = std::fs::File::create(&db_path)?;
+        db.write_all(b"SQLite format 3\0")?;
+        db.seek(SeekFrom::Start(16))?;
+        db.write_all(&4096_u16.to_be_bytes())?;
+        db.set_len(SCHEMA_SNAPSHOT_MAX_BYTES + 1)?;
+        drop(db);
+
+        let before = blake3::hash(&std::fs::read(&db_path)?);
+        let probe = probe_dedicated_storage_state(&db_path, std::time::Duration::from_secs(1));
+        let after = blake3::hash(&std::fs::read(&db_path)?);
+
+        assert_eq!(before, after, "oversized preflight must not rewrite the DB");
+        assert!(!probe.schema_drift);
+        assert!(!probe.legacy_interop_failed);
+        let schema_check = probe
+            .checks_attempted
+            .iter()
+            .find(|check| check.name == "schema_version")
+            .expect("schema check must report why it was skipped");
+        assert_eq!(
+            schema_check.skipped_reason.as_deref(),
+            Some(SCHEMA_SNAPSHOT_OVERSIZED_REASON)
+        );
+        assert!(!schema_check.timed_out);
         Ok(())
     }
 

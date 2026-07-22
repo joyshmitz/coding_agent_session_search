@@ -345,6 +345,23 @@ fn search_quality_suite_meets_qrels_and_emits_clean_artifacts() -> TestResult {
     // 3) Run every checked-in judgment against the live index.
     let qrels = load_qrels()?;
     ensure(!qrels.is_empty(), || "no qrels loaded".to_string())?;
+    for qrel in &qrels {
+        ensure(!qrel.expected_refs.is_empty(), || {
+            format!("qrel `{}` has no expected_refs", qrel.id)
+        })?;
+        ensure(qrel.k > 0, || format!("qrel `{}` has k=0", qrel.id))?;
+        let sanitized: Vec<String> = qrel
+            .expected_refs
+            .iter()
+            .map(|doc_ref| sanitize_doc_ref(doc_ref))
+            .collect();
+        ensure(sanitized == qrel.expected_refs, || {
+            format!(
+                "qrel `{}` contains a non-canonical document ref: {:?}",
+                qrel.id, qrel.expected_refs
+            )
+        })?;
+    }
     let mut runs: Vec<QueryRun> = Vec::new();
     for qrel in &qrels {
         runs.push(run_qrel(&home, &codex_home, &data_dir, qrel)?);
@@ -353,8 +370,8 @@ fn search_quality_suite_meets_qrels_and_emits_clean_artifacts() -> TestResult {
     // 4) Assemble the report via the pure core.
     let report = build_report_labeled(&runs, Some("search-quality-e2e".to_string()));
 
-    // 5) Every judgment must be satisfied on a real index. A miss surfaces the
-    //    actionable per-query diff (which expected ref was not retrieved).
+    // 5) Every judgment must be satisfied on a real index. Both false negatives
+    //    and false positives fail the gate and surface an actionable diff.
     ensure(report.aggregate.query_count == qrels.len(), || {
         format!(
             "evaluated {} queries, expected {}",
@@ -365,8 +382,14 @@ fn search_quality_suite_meets_qrels_and_emits_clean_artifacts() -> TestResult {
     for q in &report.queries {
         ensure(q.passed, || {
             format!(
-                "qrel `{}` (query `{}`) missed expected refs {:?}; observed {:?}",
-                q.id, q.query, q.missing_refs, q.observed_refs
+                "qrel `{}` (query `{}`) failed quality: recall={:.3}, precision={:.3}, missing={:?}, unexpected={:?}, observed={:?}",
+                q.id,
+                q.query,
+                q.recall_at_k,
+                q.precision_at_k,
+                q.missing_refs,
+                q.unexpected_refs,
+                q.observed_refs
             )
         })?;
     }
@@ -382,6 +405,19 @@ fn search_quality_suite_meets_qrels_and_emits_clean_artifacts() -> TestResult {
             report.aggregate.mean_recall_at_k
         )
     })?;
+    ensure(report.aggregate.mean_precision_at_k >= 1.0 - 1e-9, || {
+        format!(
+            "mean precision@k below 1.0: {}",
+            report.aggregate.mean_precision_at_k
+        )
+    })?;
+    ensure(
+        report
+            .queries
+            .iter()
+            .all(|query| query.unexpected_refs.is_empty()),
+        || "one or more qrels returned unexpected refs".to_string(),
+    )?;
 
     // 6) The live trust verdict feeds the distribution: the aged advice session
     //    is `stale`; fresh sessions are `unverified`. This proves the trust-tier

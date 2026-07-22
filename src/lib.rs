@@ -77702,6 +77702,8 @@ pub struct IntrospectResponse {
     pub api_version: u32,
     /// Contract version (human-visible)
     pub contract_version: String,
+    /// Executable proof-coverage inventory for every report subsystem.
+    pub subsystem_coverage: crate::subsystem_coverage_matrix::MatrixReport,
     /// Global flags (apply to all commands)
     pub global_flags: Vec<ArgumentSchema>,
     /// All available commands with arguments
@@ -78710,19 +78712,20 @@ fn run_capabilities(output_format: Option<RobotFormat>) -> CliResult<()> {
     Ok(())
 }
 
-/// Full API schema introspection - commands, arguments, and response schemas.
-fn run_introspect(output_format: Option<RobotFormat>) -> CliResult<()> {
-    let global_flags = build_global_flag_schemas();
-    let commands = build_command_schemas();
-    let response_schemas = build_response_schemas();
-
-    let response = IntrospectResponse {
+fn build_introspect_response() -> IntrospectResponse {
+    IntrospectResponse {
         api_version: 1,
         contract_version: CONTRACT_VERSION.to_string(),
-        global_flags,
-        commands,
-        response_schemas,
-    };
+        subsystem_coverage: crate::subsystem_coverage_matrix::matrix_report(),
+        global_flags: build_global_flag_schemas(),
+        commands: build_command_schemas(),
+        response_schemas: build_response_schemas(),
+    }
+}
+
+/// Full API schema introspection - commands, arguments, and response schemas.
+fn run_introspect(output_format: Option<RobotFormat>) -> CliResult<()> {
+    let response = build_introspect_response();
 
     let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
         if matches!(fmt, RobotFormat::Sessions) {
@@ -78760,6 +78763,10 @@ fn run_introspect(output_format: Option<RobotFormat>) -> CliResult<()> {
     println!();
     println!("API Version: {}", response.api_version);
     println!("Contract Version: {}", response.contract_version);
+    println!(
+        "Subsystem Coverage: {} subsystems (complete: {})",
+        response.subsystem_coverage.subsystem_count, response.subsystem_coverage.complete
+    );
     println!();
     println!("Global Flags:");
     println!("-------------");
@@ -82962,6 +82969,69 @@ fn response_schema_pack() -> serde_json::Value {
     ])
 }
 
+fn response_schema_subsystem_coverage_matrix() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "schema_version": { "type": "integer" },
+            "subsystem_count": { "type": "integer" },
+            "complete": { "type": "boolean" },
+            "subsystems": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "subsystem": { "type": "string" },
+                        "owning_beads": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "failure_modes": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "mandatory_proofs": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": ["unit", "integration", "golden", "e2e", "logs"]
+                            }
+                        },
+                        "proof_artifacts": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "optional_diagnostics": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "fixture_provenance": { "type": "string" },
+                        "log_expectation": { "type": "string" },
+                        "redaction": {
+                            "type": "string",
+                            "enum": ["no-user-content", "local-only", "redact-required"]
+                        },
+                        "closure_evidence": { "type": "string" }
+                    },
+                    "required": [
+                        "subsystem",
+                        "owning_beads",
+                        "failure_modes",
+                        "mandatory_proofs",
+                        "proof_artifacts",
+                        "optional_diagnostics",
+                        "fixture_provenance",
+                        "log_expectation",
+                        "redaction",
+                        "closure_evidence"
+                    ]
+                }
+            }
+        },
+        "required": ["schema_version", "subsystem_count", "complete", "subsystems"]
+    })
+}
+
 /// Build response schemas for commands that support JSON output.
 ///
 /// Returns a `BTreeMap` so the serialized JSON object has deterministic
@@ -83312,6 +83382,7 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
             "properties": {
                 "api_version": { "type": "integer" },
                 "contract_version": { "type": "string" },
+                "subsystem_coverage": response_schema_subsystem_coverage_matrix(),
                 "global_flags": {
                     "type": "array",
                     "items": {
@@ -84372,6 +84443,54 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
 #[cfg(test)]
 mod response_schema_tests {
     use super::*;
+
+    #[test]
+    fn introspect_embeds_the_executable_subsystem_coverage_report() -> Result<(), String> {
+        let response = build_introspect_response();
+        let embedded = serde_json::to_value(&response.subsystem_coverage)
+            .map_err(|error| error.to_string())?;
+        let expected = serde_json::to_value(crate::subsystem_coverage_matrix::matrix_report())
+            .map_err(|error| error.to_string())?;
+
+        if !embedded.eq(&expected) {
+            return Err("introspect subsystem coverage drifted from matrix_report()".to_string());
+        }
+        if !response
+            .subsystem_coverage
+            .subsystem_count
+            .eq(&crate::subsystem_coverage_matrix::REPORT_SUBSYSTEM_FILES.len())
+            || !response.subsystem_coverage.complete
+        {
+            return Err("introspect published an incomplete subsystem coverage report".to_string());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn introspect_schema_describes_subsystem_coverage_contract() -> Result<(), String> {
+        let schemas = build_response_schemas();
+        let published = schemas
+            .get("introspect")
+            .and_then(|schema| schema.pointer("/properties/subsystem_coverage"))
+            .ok_or_else(|| "introspect schema omits subsystem_coverage".to_string())?;
+        if !published.eq(&response_schema_subsystem_coverage_matrix()) {
+            return Err("published subsystem coverage schema drifted from its source".to_string());
+        }
+
+        let proof_levels = published
+            .pointer("/properties/subsystems/items/properties/mandatory_proofs/items/enum")
+            .ok_or_else(|| "subsystem coverage schema omits proof-level enum".to_string())?;
+        if !proof_levels.eq(&serde_json::json!([
+            "unit",
+            "integration",
+            "golden",
+            "e2e",
+            "logs"
+        ])) {
+            return Err("subsystem coverage proof-level enum drifted".to_string());
+        }
+        Ok(())
+    }
 
     #[test]
     fn b7tb0_runtime_and_cache_outcome_schemas_are_discoverable() {
@@ -100610,7 +100729,7 @@ mod cli_models_resolution_tests {
     use super::*;
 
     #[test]
-    fn resolve_cli_model_name_accepts_only_native_minilm_embedder_aliases() {
+    fn resolve_cli_model_name_accepts_only_native_minilm_embedder_aliases() -> Result<(), String> {
         for alias in [
             ("all-minilm-l6-v2", "minilm"),
             ("minilm", "minilm"),
@@ -100618,62 +100737,77 @@ mod cli_models_resolution_tests {
             ("fastembed", "minilm"),
             ("MINILM", "minilm"),
         ] {
-            assert_eq!(
-                resolve_cli_model_name(alias.0).expect("MiniLM alias must resolve"),
-                alias.1
-            );
+            let resolved = resolve_cli_model_name(alias.0).map_err(|error| error.message)?;
+            assert_eq!(resolved, alias.1);
         }
+        Ok(())
     }
 
     #[test]
-    fn resolve_cli_model_name_rejects_unimplemented_embedder_topologies() {
+    fn resolve_cli_model_name_rejects_unimplemented_embedder_topologies() -> Result<(), &'static str>
+    {
         for alias in ["snowflake-arctic-s", "nomic-embed-text-v1.5"] {
-            let error = resolve_cli_model_name(alias).expect_err("topology is not implemented");
-            assert_eq!(error.code, 20);
-            assert!(error.message.contains("supports only all-MiniLM-L6-v2"));
-            assert!(!error.message.contains("install --model snowflake"));
-            assert!(!error.message.contains("install --model nomic"));
+            let error = match resolve_cli_model_name(alias) {
+                Err(error) => error,
+                Ok(_) => return Err("unimplemented embedder topology unexpectedly resolved"),
+            };
+            if error.code != 20 {
+                return Err("unimplemented embedder topology returned the wrong error code");
+            }
+            if !error.message.contains("supports only all-MiniLM-L6-v2") {
+                return Err("unimplemented embedder topology returned the wrong error message");
+            }
+            for forbidden in ["install --model snowflake", "install --model nomic"] {
+                if error.message.contains(forbidden) {
+                    return Err("embedder topology error advertised an unavailable route");
+                }
+            }
         }
+        Ok(())
     }
 
     #[test]
-    fn resolve_cli_model_name_rejects_unimplemented_reranker_topology() {
-        let error = resolve_cli_model_name("jina-reranker-v1-turbo-en")
-            .expect_err("Jina topology is not implemented by the native reranker");
-        assert_eq!(error.code, 20);
-        assert!(
-            error
+    fn resolve_cli_model_name_rejects_unimplemented_reranker_topology() -> Result<(), String> {
+        let error = match resolve_cli_model_name("jina-reranker-v1-turbo-en") {
+            Err(error) => error,
+            Ok(canonical) => {
+                return Err(format!(
+                    "unimplemented Jina topology resolved to {canonical}"
+                ));
+            }
+        };
+        if error.code != 20
+            || !error
                 .message
                 .contains("supports only ms-marco-MiniLM-L-6-v2")
-        );
-        assert_eq!(
-            error.hint.as_deref(),
-            Some("Use --model ms-marco, or omit reranking")
-        );
+            || error.hint.as_deref() != Some("Use --model ms-marco, or omit reranking")
+        {
+            return Err(format!("unexpected Jina topology error: {error:?}"));
+        }
+        Ok(())
     }
 
     /// `coding_agent_session_search-v3of1`: unknown names must be rejected
     /// with code=20, kind="model", and a hint pointing at `cass models status`.
     #[test]
-    fn resolve_cli_model_name_rejects_unknown_with_useful_hint() {
-        let err =
-            resolve_cli_model_name("e5-large-v2").expect_err("unknown model must be rejected");
-        assert_eq!(err.code, 20);
-        assert_eq!(err.kind, "model");
-        assert!(
-            err.message.contains("Unknown model 'e5-large-v2'"),
-            "error must name the rejected input; got {message:?}",
-            message = err.message
-        );
-        assert!(err.message.contains("all-minilm-l6-v2"));
-        assert!(!err.message.contains("snowflake-arctic-s"));
-        assert!(!err.message.contains("nomic-embed"));
-        assert!(!err.message.contains("jina-reranker"));
-        assert_eq!(
-            err.hint.as_deref(),
-            Some("Use 'cass models status' to see available models")
-        );
-        assert!(!err.retryable);
+    fn resolve_cli_model_name_rejects_unknown_with_useful_hint() -> Result<(), String> {
+        let err = match resolve_cli_model_name("e5-large-v2") {
+            Err(error) => error,
+            Ok(canonical) => return Err(format!("unknown model resolved to {canonical}")),
+        };
+        if err.code != 20
+            || err.kind != "model"
+            || !err.message.contains("Unknown model 'e5-large-v2'")
+            || !err.message.contains("all-minilm-l6-v2")
+            || err.message.contains("snowflake-arctic-s")
+            || err.message.contains("nomic-embed")
+            || err.message.contains("jina-reranker")
+            || err.hint.as_deref() != Some("Use 'cass models status' to see available models")
+            || err.retryable
+        {
+            return Err(format!("unexpected unknown-model error: {err:?}"));
+        }
+        Ok(())
     }
 
     /// `coding_agent_session_search-v3of1`: every name that
@@ -100684,7 +100818,7 @@ mod cli_models_resolution_tests {
     /// contract that the original hardcoded `all-minilm-l6-v2` check
     /// silently maintained — making it explicit prevents drift.
     #[test]
-    fn every_resolved_canonical_name_has_manifest_and_dir_mapping() {
+    fn every_resolved_canonical_name_has_manifest_and_dir_mapping() -> Result<(), String> {
         use crate::search::fastembed_embedder::FastEmbedder;
         use crate::search::model_download::ModelManifest;
 
@@ -100701,6 +100835,7 @@ mod cli_models_resolution_tests {
                  FastEmbedder::model_dir_for mapping"
             );
         }
+        Ok(())
     }
 
     /// Reranker aliases must round-trip through `resolve_cli_model_name`
@@ -100711,7 +100846,7 @@ mod cli_models_resolution_tests {
     /// "reranker model directory not found" because the manifest `id`
     /// drifted from the loader's hard-coded directory name.
     #[test]
-    fn reranker_aliases_resolve_and_install_path_matches_loader_dir() {
+    fn reranker_aliases_resolve_and_install_path_matches_loader_dir() -> Result<(), String> {
         use crate::search::model_download::ModelManifest;
         use crate::search::reranker_registry::RERANKERS;
 
@@ -100722,9 +100857,9 @@ mod cli_models_resolution_tests {
             ("ms-marco-minilm-l6-v2", "ms-marco"),
             ("MS-MARCO", "ms-marco"),
         ] {
+            let resolved = resolve_cli_model_name(alias).map_err(|error| error.message)?;
             assert_eq!(
-                resolve_cli_model_name(alias).expect("reranker alias must resolve"),
-                canonical,
+                resolved, canonical,
                 "reranker alias {alias:?} must resolve to {canonical:?}"
             );
             assert!(
@@ -100740,25 +100875,25 @@ mod cli_models_resolution_tests {
         // the exact bug that left "WARN Failed to load reranker" on
         // every fresh daemon start (cass#242).
         let probe = std::path::Path::new("/tmp/cass-reranker-probe");
-        for canonical in ["ms-marco"] {
-            let manifest = ModelManifest::for_reranker(canonical)
-                .unwrap_or_else(|| panic!("{canonical} manifest must be registered"));
-            let registered = RERANKERS
-                .iter()
-                .find(|r| r.name == canonical)
-                .unwrap_or_else(|| panic!("{canonical} must be in RERANKERS"));
-            let loader_dir = registered
-                .model_dir(probe)
-                .unwrap_or_else(|| panic!("{canonical} must have a model_dir"));
-            let loader_dir_name = loader_dir
-                .file_name()
-                .and_then(|s| s.to_str())
-                .unwrap_or_else(|| panic!("{canonical} model_dir must have a final segment"));
-            assert_eq!(
-                manifest.id, loader_dir_name,
-                "{canonical} manifest.id must match the loader's model_dir name so install and \
-                 loader agree on the on-disk directory"
-            );
-        }
+        let canonical = "ms-marco";
+        let manifest = ModelManifest::for_reranker(canonical)
+            .ok_or_else(|| format!("{canonical} manifest must be registered"))?;
+        let registered = RERANKERS
+            .iter()
+            .find(|r| r.name == canonical)
+            .ok_or_else(|| format!("{canonical} must be in RERANKERS"))?;
+        let loader_dir = registered
+            .model_dir(probe)
+            .ok_or_else(|| format!("{canonical} must have a model_dir"))?;
+        let loader_dir_name = loader_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| format!("{canonical} model_dir must have a final segment"))?;
+        assert_eq!(
+            manifest.id, loader_dir_name,
+            "{canonical} manifest.id must match the loader's model_dir name so install and loader \
+             agree on the on-disk directory"
+        );
+        Ok(())
     }
 }

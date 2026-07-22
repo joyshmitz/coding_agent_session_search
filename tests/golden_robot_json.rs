@@ -25,6 +25,7 @@
 
 use assert_cmd::Command;
 use coding_agent_search::search::tantivy::expected_index_dir;
+use coding_agent_search::subsystem_coverage_matrix::matrix_report;
 use serde_json::{Value, json};
 use std::error::Error;
 use std::fs;
@@ -1667,6 +1668,24 @@ fn introspect_shape_matches_golden() {
     let canonical =
         serde_json::to_string_pretty(&json_value_schema(&introspect)).expect("pretty-print JSON");
     assert_golden("robot/introspect_shape.json.golden", &canonical);
+}
+
+#[test]
+fn introspect_subsystem_coverage_matches_executable_matrix() -> Result<(), String> {
+    let test_home = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let introspect = capture_robot_json_value(
+        test_home.path(),
+        &["introspect", "--json"],
+        ExpectStatus::ExitOk,
+    );
+    let published = introspect
+        .get("subsystem_coverage")
+        .ok_or_else(|| "introspect output omits subsystem_coverage".to_string())?;
+    let expected = serde_json::to_value(matrix_report()).map_err(|error| error.to_string())?;
+    if !published.eq(&expected) {
+        return Err("introspect subsystem_coverage drifted from matrix_report()".to_string());
+    }
+    Ok(())
 }
 
 #[derive(Debug)]

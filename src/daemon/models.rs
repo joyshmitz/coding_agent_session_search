@@ -241,8 +241,9 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_model_is_reported_without_hash_substitution() {
-        let empty_data_dir = tempfile::tempdir().expect("empty data dir");
+    fn test_missing_model_is_reported_without_hash_substitution()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let empty_data_dir = tempfile::tempdir()?;
         let manager = ModelManager::new(empty_data_dir.path());
 
         let result = manager.warm_embedder();
@@ -250,6 +251,7 @@ mod tests {
         assert!(!manager.embedder_loaded());
         assert_eq!(manager.embedder_id(), "not-loaded");
         assert_eq!(manager.embedder_name(), "load-failed");
+        Ok(())
     }
 
     #[test]
@@ -273,12 +275,13 @@ mod tests {
     }
 
     #[test]
-    fn test_embed_reports_missing_model() {
-        let empty_data_dir = tempfile::tempdir().expect("empty data dir");
+    fn test_embed_reports_missing_model() -> Result<(), Box<dyn std::error::Error>> {
+        let empty_data_dir = tempfile::tempdir()?;
         let manager = ModelManager::new(empty_data_dir.path());
 
         let result = manager.embed("test text");
         assert!(result.is_err());
         assert!(!manager.embedder_loaded());
+        Ok(())
     }
 }
