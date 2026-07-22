@@ -40,25 +40,35 @@ fn install_sh_command(tmp_root: &tempfile::TempDir) -> Command {
 }
 
 #[test]
-fn install_sh_has_no_baseline_artifact_selection() {
+fn install_sh_has_no_baseline_artifact_selection() -> Result<(), String> {
     // cass#308 / bead tg5o9: the ONNX runtime is gone, so the installer must
     // never select a `-baseline` asset (they are not published anymore) and
     // the source fallback builds default features on every CPU.
-    let script = fs::read_to_string("install.sh").expect("read install.sh");
+    let script = fs::read_to_string("install.sh").map_err(|err| err.to_string())?;
+    let powershell = fs::read_to_string("install.ps1").map_err(|err| err.to_string())?;
 
-    assert!(
-        !script.contains("TARGET=\"linux-amd64-baseline\"")
-            && !script.contains("TARGET=\"windows-amd64-baseline\""),
-        "installer must not select retired -baseline assets"
-    );
-    assert!(
-        !script.contains("host_has_avx2()"),
-        "the AVX2 runtime probe was retired with the ONNX runtime (cass#308)"
-    );
-    assert!(
-        script.contains("cargo build --locked --release \"${SOURCE_CARGO_ARGS[@]}\""),
-        "source fallback must keep the (now always-default) cargo build invocation"
-    );
+    if script.contains("TARGET=\"linux-amd64-baseline\"")
+        || script.contains("TARGET=\"windows-amd64-baseline\"")
+    {
+        return Err("installer must not select retired -baseline assets".to_string());
+    }
+    if script.contains("host_has_avx2()") || powershell.contains("Test-HostHasAvx2") {
+        return Err(
+            "the Unix and PowerShell AVX2 probes were retired with ONNX (cass#308)".to_string(),
+        );
+    }
+    if script.contains("SOURCE_CARGO_ARGS")
+        || script.contains("CASS_FORCE_BASELINE")
+        || powershell.contains("CASS_FORCE_BASELINE")
+    {
+        return Err("installers must not retain dead baseline feature-selection controls".into());
+    }
+    if !script.contains("cargo build --locked --release)") {
+        return Err(
+            "source fallback must use the ordinary release feature set on every CPU".to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn file_sha256_hex(path: &std::path::Path) -> String {

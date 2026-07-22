@@ -231,13 +231,10 @@ function Assert-ZipLayoutSafe {
   }
 }
 
-# cass#308 retired the prebuilt Microsoft ONNX Runtime: since v0.6.21 every
-# artifact uses a pure-Rust inference backend (the Windows binary is also
-# codegen-pinned to x86-64-v2), so there is no AVX2 static-init hazard
-# (cass#256), no runtime CPU probe, and no separate `-baseline` artifact.
-# Releases v0.6.20 and older still carried ONNX; installing one of those on a
-# pre-AVX2 CPU requires -Version <tag> with the matching `-baseline` asset
-# via -ArtifactUrl.
+# cass#308 retired the prebuilt Microsoft ONNX Runtime. Every supported release
+# artifact now uses pure-Rust inference (the Windows binary is also codegen-pinned
+# to x86-64-v2), so this installer has no AVX2 probe and never selects a separate
+# `-baseline` asset. -ArtifactUrl remains an explicit custom-artifact override.
 
 # Map architecture to the naming convention used by release.yml
 $arch = "amd64"

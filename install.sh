@@ -302,18 +302,14 @@ case "$ARCH" in
   *) warn "Unknown arch $ARCH, using as-is" ;;
 esac
 
-# cass#308 retired the prebuilt Microsoft ONNX Runtime: since v0.6.21 every
-# artifact uses a pure-Rust inference backend with runtime-dispatched SIMD,
-# so there is no AVX2 static-init hazard (cass#256), no runtime CPU probe,
-# and no separate `-baseline` artifact. Releases v0.6.20 and older still
-# carried ONNX; installing one of those on a pre-AVX2 CPU requires
-# `--version <tag>` with the matching `-baseline` asset via --artifact-url,
-# or `--from-source`.
+# cass#308 retired the prebuilt Microsoft ONNX Runtime. Every supported release
+# artifact now uses pure-Rust inference with runtime-dispatched SIMD, so this
+# installer has no AVX2 probe and never selects a separate `-baseline` asset.
+# `--artifact-url` remains an explicit custom-artifact override only.
 
 TARGET=""
 EXT="tar.gz"
 NO_PREBUILT_REASON=""
-SOURCE_CARGO_ARGS=()
 case "${OS}-${ARCH}" in
   linux-amd64) TARGET="linux-amd64" ;;
   linux-arm64) TARGET="linux-arm64" ;;
@@ -397,10 +393,7 @@ if [ "$FROM_SOURCE" -eq 1 ]; then
   info "Building from source (requires git and a working Rust stable toolchain)"
   ensure_rust
   git clone --depth 1 --branch "$VERSION" "https://github.com/${OWNER}/${REPO}.git" "$TMP/src"
-  if [ "${#SOURCE_CARGO_ARGS[@]}" -gt 0 ]; then
-    info "Using baseline cargo flags for source build: ${SOURCE_CARGO_ARGS[*]}"
-  fi
-  (cd "$TMP/src" && cargo build --locked --release "${SOURCE_CARGO_ARGS[@]}")
+  (cd "$TMP/src" && cargo build --locked --release)
   BIN="$TMP/src/target/release/$INSTALL_BASENAME"
   if [ ! -x "$BIN" ]; then
     BIN="$TMP/src/target/release/cass"
