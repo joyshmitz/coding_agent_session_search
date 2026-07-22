@@ -762,18 +762,24 @@ impl ModelManifest {
         }
     }
 
-    /// Get all bake-off eligible embedder manifests.
+    /// Get runnable bake-off embedder manifests for the current native backend.
     ///
-    /// All models are verified with pinned revisions and SHA256 checksums.
+    /// Historical Snowflake and Nomic manifests remain available for cache
+    /// diagnostics, but neither topology is implemented by the MiniLM-only
+    /// native inference engine, so advertising them here would create an
+    /// installable-looking candidate that cannot execute (cass #308).
     pub fn bakeoff_embedder_candidates() -> Vec<Self> {
-        vec![Self::snowflake_arctic_s(), Self::nomic_embed()]
+        Vec::new()
     }
 
-    /// Get all bake-off eligible reranker manifests.
+    /// Get runnable bake-off reranker manifests for the current native backend.
     ///
-    /// All models are verified with pinned revisions and SHA256 checksums.
+    /// The historical Jina manifest remains available for cache diagnostics,
+    /// but the native reranker currently implements only the ms-marco topology;
+    /// advertising Jina here would produce an installable-looking candidate
+    /// that `models install` correctly rejects (cass #308).
     pub fn bakeoff_reranker_candidates() -> Vec<Self> {
-        vec![Self::jina_reranker_turbo()]
+        Vec::new()
     }
 
     /// Get all bake-off eligible model manifests (embedders + rerankers).
@@ -2969,8 +2975,9 @@ mod tests {
         // All bake-off candidates should be production-ready (verified checksums)
         let candidates = ModelManifest::bakeoff_candidates();
 
-        // Should have 3 verified models: snowflake, nomic, jina-turbo
-        assert_eq!(candidates.len(), 3, "Expected 3 bake-off candidates");
+        // The only native embedder/reranker topologies are baselines, so no
+        // non-baseline bake-off candidate is currently runnable.
+        assert!(candidates.is_empty());
 
         // All should be production-ready
         for manifest in &candidates {
@@ -2991,23 +2998,8 @@ mod tests {
             );
         }
 
-        // Verify specific models are present
-        assert!(
-            candidates
-                .iter()
-                .any(|m| m.id == "snowflake-arctic-embed-s"),
-            "Snowflake should be in candidates"
-        );
-        assert!(
-            candidates.iter().any(|m| m.id == "nomic-embed-text-v1.5"),
-            "Nomic should be in candidates"
-        );
-        assert!(
-            candidates
-                .iter()
-                .any(|m| m.id == "jina-reranker-v1-turbo-en"),
-            "Jina Turbo should be in candidates"
-        );
+        assert!(ModelManifest::bakeoff_embedder_candidates().is_empty());
+        assert!(ModelManifest::bakeoff_reranker_candidates().is_empty());
     }
 
     #[test]

@@ -196,7 +196,9 @@ impl ContentionClass {
 pub(crate) fn classify_franken_error(err: &frankensqlite::FrankenError) -> Option<ContentionClass> {
     use frankensqlite::FrankenError as E;
     match err {
-        E::Busy => Some(ContentionClass::BusyLocked),
+        E::Busy | E::DatabaseLocked { .. } | E::LockFailed { .. } => {
+            Some(ContentionClass::BusyLocked)
+        }
         E::BusyRecovery => Some(ContentionClass::BusyRecovery),
         E::BusySnapshot { .. } | E::WriteConflict { .. } | E::SerializationFailure { .. } => {
             Some(ContentionClass::SnapshotConflict)
@@ -596,6 +598,18 @@ mod tests {
         assert_eq!(
             classify_franken_error(&E::BusyRecovery),
             Some(ContentionClass::BusyRecovery)
+        );
+        assert_eq!(
+            classify_franken_error(&E::DatabaseLocked {
+                path: std::path::PathBuf::from("/tmp/locked.db"),
+            }),
+            Some(ContentionClass::BusyLocked)
+        );
+        assert_eq!(
+            classify_franken_error(&E::LockFailed {
+                detail: "reserved lock held".to_string(),
+            }),
+            Some(ContentionClass::BusyLocked)
         );
         assert!(is_retryable_contention(&E::Busy));
         assert!(is_retryable_contention(&E::BusyRecovery));

@@ -6,11 +6,11 @@
 //! - **[`tantivy`]**: Tantivy index creation, schema management, and document indexing.
 //! - **[`embedder`]**: Embedder trait for semantic search (hash and ML implementations).
 //! - **[`embedder_registry`]**: Embedder registry for model selection (bd-2mbe).
-//! - **[`hash_embedder`]**: FNV-1a feature hashing embedder (deterministic fallback).
-//! - **[`fastembed_embedder`]**: FastEmbed-backed ML embedder (MiniLM).
+//! - **[`hash_embedder`]**: FNV-1a feature hashing embedder (explicit degraded mode).
+//! - **[`fastembed_embedder`]**: Pure-Rust native MiniLM embedder (historical module name).
 //! - **[`reranker`]**: Reranker trait for cross-encoder reranking of search results.
 //! - **[`reranker_registry`]**: Reranker registry for model selection with bake-off support.
-//! - **[`fastembed_reranker`]**: FastEmbed-backed cross-encoder reranker (ms-marco-MiniLM-L-6-v2).
+//! - **[`fastembed_reranker`]**: Pure-Rust native cross-encoder reranker (historical module name).
 //! - **[`daemon_client`]**: Daemon client wrappers for warm embedder/reranker (bd-1lps).
 //! - **[`model_manager`]**: Semantic model detection + context wiring (no downloads).
 //! - **[`model_download`]**: Model download system with consent, verification, and atomic install.

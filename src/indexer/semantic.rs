@@ -29,7 +29,7 @@ use crate::model::conversation_packet::{ConversationPacket, ConversationPacketPr
 use crate::model::types::{Conversation, Message};
 use crate::search::canonicalize::{canonicalize_for_embedding, content_hash};
 use crate::search::embedder::Embedder;
-use crate::search::fastembed_embedder::FastEmbedder;
+use crate::search::fastembed_embedder::{FastEmbedder, MINILM_VECTOR_SPACE_REVISION};
 use crate::search::hash_embedder::HashEmbedder;
 use crate::search::policy::{CHUNKING_STRATEGY_VERSION, SEMANTIC_SCHEMA_VERSION, SemanticPolicy};
 use crate::search::semantic_manifest::{
@@ -70,6 +70,18 @@ const DEFAULT_SEMANTIC_MAX_BYTES_PER_CHECKPOINT: u64 = 8 * 1024 * 1024;
 const DEFAULT_SEMANTIC_RECONCILIATION_SCAN_CONVERSATIONS: usize = 64;
 const SEMANTIC_PREP_MEMO_ALGORITHM: &str = "semantic_prepare_window";
 const SEMANTIC_PREP_MEMO_VERSION: &str = "canonicalize_for_embedding:v2:stable-content-hash";
+pub const HASH_VECTOR_SPACE_REVISION: &str = "hash-fnv1a-modular-v1";
+
+/// Return the exact vector-space revision that is safe for a current embedder.
+/// ID and dimension alone are insufficient because inference-engine changes
+/// can preserve both while changing vector values.
+pub fn expected_vector_space_revision(embedder_id: &str) -> Option<&'static str> {
+    match embedder_id {
+        "minilm-384" => Some(MINILM_VECTOR_SPACE_REVISION),
+        "fnv1a-384" => Some(HASH_VECTOR_SPACE_REVISION),
+        _ => None,
+    }
+}
 
 fn resolved_env_usize(key: &str, default: usize) -> usize {
     dotenvy::var(key)
@@ -1987,13 +1999,7 @@ fn flush_prepared_batch(
     }
 
     for (prepared, vector) in batch.iter().zip(vectors) {
-        if vector.len() != embedder.dimension() {
-            bail!(
-                "embedding dimension mismatch: expected {}, got {}",
-                embedder.dimension(),
-                vector.len()
-            );
-        }
+        validate_embedding_vector(&vector, embedder.dimension(), prepared.msg.message_id)?;
         embeddings.push(EmbeddedMessage {
             message_id: prepared.msg.message_id,
             created_at_ms: prepared.msg.created_at_ms,
@@ -2011,6 +2017,24 @@ fn flush_prepared_batch(
     Ok(())
 }
 
+fn validate_embedding_vector(
+    vector: &[f32],
+    expected_dimension: usize,
+    message_id: u64,
+) -> Result<()> {
+    if vector.len() != expected_dimension {
+        bail!(
+            "embedding dimension mismatch: expected {}, got {}",
+            expected_dimension,
+            vector.len()
+        );
+    }
+    if vector.iter().any(|value| !value.is_finite()) {
+        bail!("embedding for message {message_id} contains a non-finite value");
+    }
+    Ok(())
+}
+
 pub struct SemanticIndexer {
     embedder: Box<dyn Embedder>,
     batch_size: usize,
@@ -2019,7 +2043,7 @@ pub struct SemanticIndexer {
 impl SemanticIndexer {
     pub fn new(embedder_type: &str, data_dir: Option<&Path>) -> Result<Self> {
         let embedder: Box<dyn Embedder> = match embedder_type {
-            "fastembed" | "minilm" | "snowflake-arctic-s" | "nomic-embed" => {
+            "fastembed" | "minilm" => {
                 let dir = data_dir
                     .ok_or_else(|| anyhow::anyhow!("data_dir required for fastembed embedder"))?;
                 let embedder_name = if embedder_type == "fastembed" {
@@ -2060,6 +2084,15 @@ impl SemanticIndexer {
 
     pub fn embedder_dimension(&self) -> usize {
         self.embedder.dimension()
+    }
+
+    fn vector_space_revision(&self) -> Result<&'static str> {
+        expected_vector_space_revision(self.embedder_id()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no vector-space revision registered for embedder {}",
+                self.embedder_id()
+            )
+        })
     }
 
     pub fn embed_messages(&self, messages: &[EmbeddingInput]) -> Result<Vec<EmbeddedMessage>> {
@@ -2489,11 +2522,12 @@ impl SemanticIndexer {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Store as f16 by default (smaller, faster I/O). Embeddings are validated by the writer.
+        // Store as f16 by default (smaller, faster I/O). Validate before the
+        // writer so NaN/Inf never reaches a persisted or staged artifact.
         let mut writer: FsVectorIndexWriter = FsVectorIndex::create_with_revision(
             index_path,
             self.embedder_id(),
-            "1.0",
+            self.vector_space_revision()?,
             self.embedder_dimension(),
             FsQuantization::F16,
         )
@@ -2502,13 +2536,11 @@ impl SemanticIndexer {
         let mut records_written = 0_usize;
         let write_result: Result<()> = (|| {
             for embedded in embedded_messages {
-                if embedded.embedding.len() != self.embedder_dimension() {
-                    bail!(
-                        "embedding dimension mismatch: expected {}, got {}",
-                        self.embedder_dimension(),
-                        embedded.embedding.len()
-                    );
-                }
+                validate_embedding_vector(
+                    &embedded.embedding,
+                    self.embedder_dimension(),
+                    embedded.message_id,
+                )?;
                 let doc_id = semantic_doc_id_for_embedded(&embedded);
                 writer
                     .write_record(&doc_id, &embedded.embedding)
@@ -2563,13 +2595,30 @@ impl SemanticIndexer {
         let mut index = FsVectorIndex::open(index_path)
             .map_err(|err| anyhow::anyhow!("open fsvi index for append: {err}"))?;
 
+        let expected_revision = self.vector_space_revision()?;
+        if index.embedder_id() != self.embedder_id()
+            || index.dimension() != self.embedder_dimension()
+            || index.embedder_revision() != expected_revision
+        {
+            bail!(
+                "semantic index is incompatible with current vector space: expected embedder {} revision {} dimension {}, found embedder {} revision {} dimension {}; rebuild semantic vectors before appending",
+                self.embedder_id(),
+                expected_revision,
+                self.embedder_dimension(),
+                index.embedder_id(),
+                index.embedder_revision(),
+                index.dimension()
+            );
+        }
+
         let entries: Vec<(String, Vec<f32>)> = embedded_messages
             .into_iter()
             .map(|em| {
+                validate_embedding_vector(&em.embedding, self.embedder_dimension(), em.message_id)?;
                 let doc_id = semantic_doc_id_for_embedded(&em);
-                (doc_id, em.embedding)
+                Ok((doc_id, em.embedding))
             })
-            .collect();
+            .collect::<Result<_>>()?;
 
         let count = entries.len();
         if count == 0 {
@@ -2688,10 +2737,12 @@ impl SemanticIndexer {
         })?;
         if staged.embedder_id() != self.embedder_id()
             || staged.dimension() != self.embedder_dimension()
+            || staged.embedder_revision() != self.vector_space_revision()?
         {
             bail!(
-                "semantic reconciliation snapshot is incompatible with embedder {} dimension {}",
+                "semantic reconciliation snapshot is incompatible with embedder {} revision {} dimension {}",
                 self.embedder_id(),
+                self.vector_space_revision()?,
                 self.embedder_dimension()
             );
         }
@@ -3751,6 +3802,110 @@ mod tests {
     }
 
     #[test]
+    fn embedding_validation_rejects_non_finite_and_wrong_dimension() -> Result<()> {
+        for (vector, expected_message) in [
+            (vec![f32::NAN; 384], "non-finite"),
+            (vec![f32::INFINITY; 384], "non-finite"),
+            (vec![0.0; 383], "dimension mismatch"),
+        ] {
+            let Err(error) = validate_embedding_vector(&vector, 384, 7) else {
+                bail!("invalid vector unexpectedly passed validation");
+            };
+            if !error.to_string().contains(expected_message) {
+                bail!("unexpected validation error: {error:#}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn append_rejects_legacy_revision_and_invalid_new_vectors_without_mutation() -> Result<()> {
+        let indexer = SemanticIndexer::new("hash", None)?;
+        let tmp = tempdir()?;
+        let index_path = vector_index_path(tmp.path(), indexer.embedder_id());
+        let Some(index_parent) = index_path.parent() else {
+            bail!("vector index path has no parent");
+        };
+        fs::create_dir_all(index_parent)?;
+
+        let mut base_vectors =
+            indexer.embed_messages(&[EmbeddingInput::new(1, "legacy vector")])?;
+        let Some(base) = base_vectors.pop() else {
+            bail!("embedding produced no vector");
+        };
+        let mut writer = FsVectorIndex::create_with_revision(
+            &index_path,
+            indexer.embedder_id(),
+            "1.0",
+            indexer.embedder_dimension(),
+            FsQuantization::F16,
+        )?;
+        writer
+            .write_record(&semantic_doc_id_for_embedded(&base), &base.embedding)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        writer.finish().map_err(|error| anyhow::anyhow!(error))?;
+
+        let candidate = indexer.embed_messages(&[EmbeddingInput::new(2, "current vector")])?;
+        let Err(error) = indexer.append_to_index(candidate, tmp.path()) else {
+            bail!("legacy revision was accepted");
+        };
+        if !error.to_string().contains("revision 1.0") {
+            bail!("unexpected legacy-revision error: {error:#}");
+        }
+        let unchanged = FsVectorIndex::open(&index_path).map_err(|error| anyhow::anyhow!(error))?;
+        if unchanged.record_count() != 1 || unchanged.wal_record_count() != 0 {
+            bail!("legacy append mutated the index");
+        }
+        drop(unchanged);
+
+        let mut current_writer = FsVectorIndex::create_with_revision(
+            &index_path,
+            indexer.embedder_id(),
+            indexer.vector_space_revision()?,
+            indexer.embedder_dimension(),
+            FsQuantization::F16,
+        )?;
+        current_writer
+            .write_record(&semantic_doc_id_for_embedded(&base), &base.embedding)
+            .map_err(|error| anyhow::anyhow!(error))?;
+        current_writer
+            .finish()
+            .map_err(|error| anyhow::anyhow!(error))?;
+
+        let mut non_finite_vectors =
+            indexer.embed_messages(&[EmbeddingInput::new(3, "invalid append")])?;
+        let Some(mut non_finite) = non_finite_vectors.pop() else {
+            bail!("embedding produced no vector");
+        };
+        non_finite.embedding.fill(f32::NAN);
+        let Err(error) = indexer.append_to_index([non_finite], tmp.path()) else {
+            bail!("non-finite append was accepted");
+        };
+        if !error.to_string().contains("non-finite") {
+            bail!("unexpected non-finite error: {error:#}");
+        }
+
+        let mut wrong_dimension_vectors =
+            indexer.embed_messages(&[EmbeddingInput::new(4, "wrong dimension")])?;
+        let Some(mut wrong_dimension) = wrong_dimension_vectors.pop() else {
+            bail!("embedding produced no vector");
+        };
+        wrong_dimension.embedding.pop();
+        let Err(error) = indexer.append_to_index([wrong_dimension], tmp.path()) else {
+            bail!("wrong-dimension append was accepted");
+        };
+        if !error.to_string().contains("dimension mismatch") {
+            bail!("unexpected dimension error: {error:#}");
+        }
+
+        let unchanged = FsVectorIndex::open(&index_path).map_err(|error| anyhow::anyhow!(error))?;
+        if unchanged.record_count() != 1 || unchanged.wal_record_count() != 0 {
+            bail!("invalid append mutated the current index");
+        }
+        Ok(())
+    }
+
+    #[test]
     fn issue_342_direct_semantic_progress_callbacks_reach_exact_totals() {
         let indexer = SemanticIndexer::new("hash", None).unwrap();
         let messages = vec![
@@ -3972,7 +4127,7 @@ mod tests {
         let mut writer = FsVectorIndex::create_with_revision(
             &index_path,
             indexer.embedder_id(),
-            "1.0",
+            indexer.vector_space_revision().unwrap(),
             indexer.embedder_dimension(),
             FsQuantization::F16,
         )

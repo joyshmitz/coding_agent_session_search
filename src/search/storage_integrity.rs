@@ -1,7 +1,5 @@
-// Dead-code tolerated module-wide: this storage-integrity diagnostic
-// contract lands ahead of the probes that populate it (.14.3 concurrency /
-// busy-lock / WAL diagnostics) and the backup-first repair planner (.14.2),
-// and the health/status/doctor/fleet/support-bundle surfaces that project it.
+// Some contract helpers are projected only by fleet/support-bundle follow-ons;
+// retain them while the live doctor/status/search probes share this module.
 #![allow(dead_code)]
 
 //! Storage-integrity diagnostic taxonomy and JSON contract (bead
@@ -22,15 +20,37 @@
 //! [`StorageIntegrityReport::derive`] computes the source-of-truth risk from
 //! the state so robot JSON and human summaries agree.
 //!
-//! This is the schema/contract only. The probes that populate it must use
-//! bound parameters for variable SQL values and add no new rusqlite code —
-//! that is the `.14.2`/`.14.3` implementation. All enums serialize as
-//! snake_case, matching the readiness vocabulary; the associated root-cause
-//! family reuses [`crate::root_cause_taxonomy::RootCauseFamily`].
+//! The schema and its dedicated read-only refinements live together here so
+//! doctor/status/search cannot drift into different classifications. Probe SQL
+//! uses bound parameters for variable values and adds no new rusqlite code.
+//! All enums serialize as snake_case, matching the readiness vocabulary; the
+//! associated root-cause family reuses
+//! [`crate::root_cause_taxonomy::RootCauseFamily`].
 
 use serde::{Deserialize, Serialize};
 
 use crate::root_cause_taxonomy::RootCauseFamily;
+
+/// Results from the dedicated, read-only probes required to distinguish the
+/// four storage states that db-open/index-readiness signals alone cannot prove.
+///
+/// In particular, `busy_or_locked` is set only after observing a typed
+/// `FrankenError` classified by `contention_diagnostics`; a generic CLI
+/// `retryable` hint is deliberately not an input. Likewise, sidecar presence
+/// is not enough for `wal_sidecar_suspect`: the probe requires an orphaned SHM
+/// or a structurally malformed non-empty WAL.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DedicatedStorageProbe {
+    pub busy_or_locked: bool,
+    pub schema_drift: bool,
+    pub legacy_interop_failed: bool,
+    pub wal_sidecar_suspect: bool,
+    /// The main file has a structurally plausible SQLite header. This is not
+    /// an integrity verdict; it only prevents a broken arbitrary file from
+    /// being relabeled when a malformed sidecar happens to coexist with it.
+    pub main_db_header_plausible: bool,
+    pub checks_attempted: Vec<StorageCheck>,
+}
 
 /// The storage-engine integrity state. `Ok` and the failure modes the report
 /// enumerated; `UnknownDeferred` is the explicit fallback when a check could
@@ -254,18 +274,14 @@ impl StorageIntegrityReport {
     }
 }
 
-/// The read-only signals `cass doctor --check` already gathers about the
-/// canonical archive, from which a *subset* of [`StorageState`]s can be derived
-/// today — without the schema-version / WAL / busy-lock probes that `.14.2`
-/// (salvage planner) and `.14.3` (contention classifier) still owe. Every field
-/// is observed by `run_doctor_impl`'s existing database + lexical-index checks
-/// (db-open result, the bounded integrity probe, and the Tantivy index-vs-DB
-/// drift check); nothing new is probed here.
+/// The common read-only signals `cass doctor --check` gathers about the
+/// canonical archive. This base classifier covers db-open, integrity, and
+/// derived-index drift; [`probe_dedicated_storage_state`] supplies the four
+/// probe-dependent refinements and [`apply_dedicated_storage_probe`] overlays
+/// them with explicit precedence.
 ///
-/// The five states that need probes doctor does not yet run — `SchemaDrift`,
-/// `LegacyInteropFailed`, `WalSidecarSuspect`, `BusyOrLocked`, and
-/// `FtsMetadataFailed` — are NOT derived from these signals. A doctor run that
-/// only sees a generic open/integrity failure honestly reports the coarser
+/// `FtsMetadataFailed` is not derived from these signals. A doctor run that
+/// only sees a generic open/integrity failure still honestly reports the coarser
 /// [`StorageState::OpenreadFailed`] / [`StorageState::IntegrityFailed`] rather
 /// than over-claiming a precise cause it cannot prove. (`FtsMetadataFailed` is
 /// deferred because doctor's `fts_table` probe cannot distinguish a *benign*
@@ -446,6 +462,298 @@ pub(crate) fn build_readiness_storage_integrity(
         return report;
     }
     StorageIntegrityReport::derive(state, readability, checks)
+}
+
+/// Run the dedicated, bounded, read-only probes that distinguish contention,
+/// schema drift, legacy interoperability, and suspect WAL/SHM sidecars.
+///
+/// The probe intentionally opens the raw database read-only instead of a
+/// migration-aware storage wrapper. That preserves the archive and lets an old
+/// but structurally openable schema be classified without upgrading it. Any
+/// open/query error is inspected by concrete `FrankenError` type; text and the
+/// generic CLI retryability flag never imply contention.
+pub(crate) fn probe_dedicated_storage_state(
+    db_path: &std::path::Path,
+    timeout: std::time::Duration,
+) -> DedicatedStorageProbe {
+    use frankensqlite::compat::{ConnectionExt as _, RowExt as _};
+
+    let mut probe = DedicatedStorageProbe::default();
+    if !db_path.is_file() {
+        probe.checks_attempted.push(StorageCheck::skipped(
+            "contention_classification",
+            "database file absent",
+        ));
+        probe.checks_attempted.push(StorageCheck::skipped(
+            "schema_version",
+            "database file absent",
+        ));
+        probe.checks_attempted.push(StorageCheck::skipped(
+            "wal_sidecar_shape",
+            "database file absent",
+        ));
+        return probe;
+    }
+    probe.main_db_header_plausible = sqlite_main_db_header_is_plausible(db_path);
+
+    let open_started = std::time::Instant::now();
+    match crate::storage::sqlite::open_franken_raw_readonly_connection_with_timeout(
+        db_path, timeout,
+    ) {
+        Ok(mut conn) => {
+            probe.checks_attempted.push(StorageCheck::ran(
+                "contention_classification",
+                elapsed_millis(open_started),
+            ));
+            let schema_started = std::time::Instant::now();
+            let table_count = conn.query_row_map(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'",
+                &[],
+                |row: &frankensqlite::Row| row.get_typed::<i64>(0),
+            );
+            let meta_count = conn.query_row_map(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'meta'",
+                &[],
+                |row: &frankensqlite::Row| row.get_typed::<i64>(0),
+            );
+
+            match (table_count, meta_count) {
+                (Ok(table_count), Ok(0)) if table_count > 0 => {
+                    // A populated SQLite archive with no cass schema marker is
+                    // a pre-migration/legacy layout, not arbitrary drift.
+                    probe.legacy_interop_failed = true;
+                }
+                (Ok(_), Ok(_)) => {
+                    match conn.query_row_map(
+                        "SELECT value FROM meta WHERE key = 'schema_version'",
+                        &[],
+                        |row: &frankensqlite::Row| row.get_typed::<String>(0),
+                    ) {
+                        Ok(raw_version) => match raw_version.trim().parse::<i64>() {
+                            Ok(version)
+                                if (1..crate::storage::sqlite::MIN_IN_PLACE_MIGRATION_SCHEMA_VERSION)
+                                    .contains(&version) =>
+                            {
+                                probe.legacy_interop_failed = true;
+                            }
+                            Ok(version)
+                                if version != crate::storage::sqlite::CURRENT_SCHEMA_VERSION =>
+                            {
+                                probe.schema_drift = true;
+                            }
+                            Ok(_) => {}
+                            Err(_) => probe.legacy_interop_failed = true,
+                        },
+                        Err(err) => observe_typed_contention(&err, &mut probe),
+                    }
+                }
+                (Err(err), _) | (_, Err(err)) => observe_typed_contention(&err, &mut probe),
+            }
+            probe.checks_attempted.push(StorageCheck::ran(
+                "schema_version",
+                elapsed_millis(schema_started),
+            ));
+
+            if conn.close_without_checkpoint_in_place().is_err() {
+                conn.close_best_effort_in_place();
+            }
+        }
+        Err(err) => {
+            observe_anyhow_contention(&err, &mut probe);
+            probe.checks_attempted.push(StorageCheck::ran(
+                "contention_classification",
+                elapsed_millis(open_started),
+            ));
+            probe.checks_attempted.push(StorageCheck::skipped(
+                "schema_version",
+                "raw read-only open did not succeed",
+            ));
+        }
+    }
+
+    let sidecar_started = std::time::Instant::now();
+    probe.wal_sidecar_suspect = wal_sidecars_are_structurally_suspect(db_path);
+    probe.checks_attempted.push(StorageCheck::ran(
+        "wal_sidecar_shape",
+        elapsed_millis(sidecar_started),
+    ));
+    probe
+}
+
+fn elapsed_millis(started: std::time::Instant) -> i64 {
+    i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX)
+}
+
+fn observe_anyhow_contention(err: &anyhow::Error, probe: &mut DedicatedStorageProbe) {
+    for cause in err.chain() {
+        if let Some(franken) = cause.downcast_ref::<frankensqlite::FrankenError>() {
+            observe_typed_contention(franken, probe);
+        }
+    }
+}
+
+fn observe_typed_contention(err: &frankensqlite::FrankenError, probe: &mut DedicatedStorageProbe) {
+    use crate::search::contention_diagnostics::{ContentionClass, classify_franken_error};
+
+    probe.busy_or_locked |= classify_franken_error(err).is_some_and(|class| {
+        matches!(
+            class,
+            ContentionClass::BusyLocked
+                | ContentionClass::BusyRecovery
+                | ContentionClass::SnapshotConflict
+        )
+    });
+}
+
+fn shm_sidecar_path(db_path: &std::path::Path) -> std::path::PathBuf {
+    let mut name = db_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    name.push_str("-shm");
+    db_path.with_file_name(name)
+}
+
+/// Check only the immutable SQLite file-header signature needed for sidecar
+/// attribution. This deliberately does not claim that the database is
+/// readable or passes integrity checks.
+fn sqlite_main_db_header_is_plausible(db_path: &std::path::Path) -> bool {
+    use std::io::Read as _;
+
+    let mut header = [0_u8; 18];
+    let mut file = match std::fs::File::open(db_path) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    if file.read_exact(&mut header).is_err() || !header.starts_with(b"SQLite format 3\0") {
+        return false;
+    }
+    let raw_page_size = u16::from_be_bytes([header[16], header[17]]);
+    raw_page_size == 1
+        || ((512..=32_768).contains(&raw_page_size) && raw_page_size.is_power_of_two())
+}
+
+/// Require structural evidence before calling a WAL/SHM sidecar suspect.
+/// Healthy WAL-mode databases routinely have sidecars while open, so presence
+/// alone is deliberately a non-signal.
+fn wal_sidecars_are_structurally_suspect(db_path: &std::path::Path) -> bool {
+    use std::io::Read as _;
+
+    let wal_path = wal_sidecar_path(db_path);
+    let shm_path = shm_sidecar_path(db_path);
+    let wal_meta = std::fs::symlink_metadata(&wal_path).ok();
+    let shm_meta = std::fs::symlink_metadata(&shm_path).ok();
+
+    // SHM is derived from a WAL. SHM with no WAL is therefore orphaned. A
+    // symlink/non-file sidecar is also off-contract and must not be followed.
+    if shm_meta.is_some() && wal_meta.is_none() {
+        return true;
+    }
+    if wal_meta
+        .as_ref()
+        .is_some_and(|meta| !meta.file_type().is_file())
+        || shm_meta
+            .as_ref()
+            .is_some_and(|meta| !meta.file_type().is_file())
+    {
+        return true;
+    }
+
+    let Some(wal_meta) = wal_meta else {
+        return false;
+    };
+    let wal_len = wal_meta.len();
+    // A zero-length WAL may be a freshly created healthy sidecar. Non-empty
+    // WALs must carry the 32-byte header plus whole page frames.
+    if wal_len == 0 {
+        return false;
+    }
+    if wal_len < 32 {
+        return true;
+    }
+
+    let mut header = [0_u8; 12];
+    let mut file = match std::fs::File::open(&wal_path) {
+        Ok(file) => file,
+        Err(_) => return true,
+    };
+    if file.read_exact(&mut header).is_err() {
+        return true;
+    }
+    let [
+        magic_0,
+        magic_1,
+        magic_2,
+        magic_3,
+        _,
+        _,
+        _,
+        _,
+        page_0,
+        page_1,
+        page_2,
+        page_3,
+    ] = header;
+    let magic = u32::from_be_bytes([magic_0, magic_1, magic_2, magic_3]);
+    if !matches!(magic, 0x377f_0682 | 0x377f_0683) {
+        return true;
+    }
+    let raw_page_size = u32::from_be_bytes([page_0, page_1, page_2, page_3]);
+    let page_size = if raw_page_size == 1 {
+        65_536_u64
+    } else {
+        u64::from(raw_page_size)
+    };
+    if !(512..=65_536).contains(&page_size) || !page_size.is_power_of_two() {
+        return true;
+    }
+    let frame_size = 24_u64.saturating_add(page_size);
+    !(wal_len - 32).is_multiple_of(frame_size)
+}
+
+/// Overlay the dedicated-probe verdict on the report derived from the common
+/// db-open/index/integrity signals. Busy is checked before generic open failure
+/// because it is typed, low-risk contention. Generic open/integrity failures
+/// otherwise retain precedence so broken headers are never relabeled merely
+/// because a sidecar happens to exist. A structurally suspect sidecar may
+/// explain an open failure only when the main file still has a plausible
+/// SQLite header; this preserves open-failure precedence for arbitrary broken
+/// canonical files while making an orphaned/malformed sidecar diagnosable.
+pub(crate) fn apply_dedicated_storage_probe(
+    mut report: StorageIntegrityReport,
+    dedicated: DedicatedStorageProbe,
+) -> StorageIntegrityReport {
+    let state = if dedicated.busy_or_locked {
+        Some(StorageState::BusyOrLocked)
+    } else if report.storage_state == StorageState::OpenreadFailed
+        && dedicated.wal_sidecar_suspect
+        && dedicated.main_db_header_plausible
+    {
+        Some(StorageState::WalSidecarSuspect)
+    } else if matches!(
+        report.storage_state,
+        StorageState::OpenreadFailed | StorageState::IntegrityFailed
+    ) {
+        None
+    } else if dedicated.legacy_interop_failed {
+        Some(StorageState::LegacyInteropFailed)
+    } else if dedicated.schema_drift {
+        Some(StorageState::SchemaDrift)
+    } else if dedicated.wal_sidecar_suspect {
+        Some(StorageState::WalSidecarSuspect)
+    } else {
+        None
+    };
+
+    if let Some(state) = state {
+        report.storage_state = state;
+        report.source_of_truth_risk = state.default_risk();
+        if state == StorageState::BusyOrLocked {
+            report.archive_readability = ArchiveReadability::NotChecked;
+        }
+    }
+    report.checks_attempted.extend(dedicated.checks_attempted);
+    report
 }
 
 /// Verdict of a persisted structural-integrity attestation.
@@ -1226,5 +1534,133 @@ mod tests {
         assert_eq!(r.source_of_truth_risk, SourceOfTruthRisk::Unknown);
         assert!(r.checks_attempted[0].timed_out);
         assert_eq!(r.archive_readability, ArchiveReadability::TimedOut);
+    }
+
+    #[test]
+    fn dedicated_probe_precedence_keeps_typed_busy_above_generic_open_failure() {
+        let open_failed = StorageIntegrityReport::derive(
+            StorageState::OpenreadFailed,
+            ArchiveReadability::Unreadable,
+            Vec::new(),
+        );
+        let busy = apply_dedicated_storage_probe(
+            open_failed,
+            DedicatedStorageProbe {
+                busy_or_locked: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(busy.storage_state, StorageState::BusyOrLocked);
+        assert_eq!(busy.source_of_truth_risk, SourceOfTruthRisk::Low);
+        assert_eq!(busy.archive_readability, ArchiveReadability::NotChecked);
+
+        let open_failed = StorageIntegrityReport::derive(
+            StorageState::OpenreadFailed,
+            ArchiveReadability::Unreadable,
+            Vec::new(),
+        );
+        let schema = apply_dedicated_storage_probe(
+            open_failed,
+            DedicatedStorageProbe {
+                schema_drift: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(schema.storage_state, StorageState::OpenreadFailed);
+
+        let plausible_main_with_orphan = apply_dedicated_storage_probe(
+            StorageIntegrityReport::derive(
+                StorageState::OpenreadFailed,
+                ArchiveReadability::Unreadable,
+                Vec::new(),
+            ),
+            DedicatedStorageProbe {
+                wal_sidecar_suspect: true,
+                main_db_header_plausible: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            plausible_main_with_orphan.storage_state,
+            StorageState::WalSidecarSuspect
+        );
+
+        let broken_main_with_sidecar = apply_dedicated_storage_probe(
+            StorageIntegrityReport::derive(
+                StorageState::OpenreadFailed,
+                ArchiveReadability::Unreadable,
+                Vec::new(),
+            ),
+            DedicatedStorageProbe {
+                wal_sidecar_suspect: true,
+                main_db_header_plausible: false,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            broken_main_with_sidecar.storage_state,
+            StorageState::OpenreadFailed
+        );
+    }
+
+    fn seed_schema_version(path: &std::path::Path, version: i64) -> anyhow::Result<()> {
+        use frankensqlite::compat::{ConnectionExt as _, ParamValue};
+
+        let storage = crate::storage::sqlite::FrankenStorage::open(path)?;
+        storage.raw().execute_compat(
+            "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+            &[ParamValue::from(version.to_string())],
+        )?;
+        storage.close_without_checkpoint()?;
+        Ok(())
+    }
+
+    #[test]
+    fn dedicated_probe_distinguishes_openable_schema_drift_from_legacy_layout() -> anyhow::Result<()>
+    {
+        let schema_dir = tempfile::tempdir()?;
+        let schema_db = schema_dir.path().join("agent_search.db");
+        seed_schema_version(
+            &schema_db,
+            crate::storage::sqlite::CURRENT_SCHEMA_VERSION + 1,
+        )?;
+        let schema = probe_dedicated_storage_state(&schema_db, std::time::Duration::from_secs(1));
+        assert!(schema.schema_drift);
+        assert!(!schema.legacy_interop_failed);
+        assert!(!schema.busy_or_locked);
+
+        let legacy_dir = tempfile::tempdir()?;
+        let legacy_db = legacy_dir.path().join("agent_search.db");
+        seed_schema_version(
+            &legacy_db,
+            crate::storage::sqlite::MIN_IN_PLACE_MIGRATION_SCHEMA_VERSION - 1,
+        )?;
+        let legacy = probe_dedicated_storage_state(&legacy_db, std::time::Duration::from_secs(1));
+        assert!(legacy.legacy_interop_failed);
+        assert!(!legacy.schema_drift);
+        assert!(!legacy.busy_or_locked);
+        Ok(())
+    }
+
+    #[test]
+    fn dedicated_probe_requires_orphan_or_malformed_sidecar_evidence() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let db_path = dir.path().join("agent_search.db");
+        std::fs::write(&db_path, b"SQLite format 3\0diagnostic")?;
+        let wal_path = wal_sidecar_path(&db_path);
+        let shm_path = shm_sidecar_path(&db_path);
+
+        std::fs::write(&wal_path, [])?;
+        assert!(
+            !wal_sidecars_are_structurally_suspect(&db_path),
+            "mere WAL presence is not suspect"
+        );
+
+        // An SHM without its source WAL is an actual orphan signal.
+        std::fs::write(&shm_path, [0_u8; 32])?;
+        let renamed_wal = dir.path().join("retained-wal-fixture");
+        std::fs::rename(&wal_path, renamed_wal)?;
+        assert!(wal_sidecars_are_structurally_suspect(&db_path));
+        Ok(())
     }
 }

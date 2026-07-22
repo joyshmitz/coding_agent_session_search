@@ -996,6 +996,7 @@ fn hard_omission_reason(
             .ranges
             .iter()
             .any(|(source_path, start, end)| {
+                // ubs:ignore — compares public citation paths, never secret material.
                 source_path == &candidate.source_path
                     && line_ranges_overlap(*start, *end, candidate.line_start, candidate.line_end)
             })
@@ -1232,6 +1233,7 @@ fn duplicate_penalty(candidate: &PackCandidate, selected_state: &SelectedState) 
         .ranges
         .iter()
         .any(|(source_path, start, end)| {
+            // ubs:ignore — compares public citation paths, never secret material.
             source_path == &candidate.source_path
                 && line_ranges_overlap(*start, *end, candidate.line_start, candidate.line_end)
         })
@@ -1423,6 +1425,7 @@ fn rendered_answer_pack(
     let redacted_count = plan
         .omitted
         .iter()
+        // ubs:ignore — compares a public omission enum, not secret material.
         .filter(|omitted| omitted.reason == PackOmittedReason::RedactedToEmpty)
         .count();
     let (omitted_items, omitted_redactions) = rendered_omitted_items(&plan.omitted);
@@ -1866,6 +1869,7 @@ fn pack_trust_assessment(
         if !link.is_empty() {
             ctx.outcome = link.outcome;
             ctx.linked_closed_bead = link.linked_closed_bead;
+            ctx.linked_lessons = link.linked_lessons;
             if let Some(commit) = link.linked_commit {
                 ctx.release_tag = correlation.release_tag_for_commit(&commit);
                 ctx.linked_commit = Some(commit);
@@ -2277,6 +2281,7 @@ fn render_answer_pack_markdown(envelope: &RenderedAnswerPack) -> String {
             if let Some(line_start) = item.citation.line_start {
                 out.push(':');
                 out.push_str(&line_start.to_string());
+                // ubs:ignore — compares public citation line numbers, not secret material.
                 if item.citation.line_end != item.citation.line_start
                     && let Some(line_end) = item.citation.line_end
                 {
@@ -2445,6 +2450,7 @@ mod tests {
             candidate_id: id.to_string(),
             source_path: source_path.to_string(),
             source_id: source_id.to_string(),
+            // ubs:ignore — compares a public source-kind fixture label, not a secret.
             origin_kind: if source_id == "local" {
                 "local".to_string()
             } else {
@@ -2672,6 +2678,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
+                // ubs:ignore — compares a public readiness wire label, not a secret.
                 .any(|source| source["readiness"] == "stale_readable")
         );
     }
@@ -2860,6 +2867,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
+                // ubs:ignore — compares a public diagnostic fixture string, not a secret.
                 .any(|warning| warning == "source_sync_gap:[REDACTED_SOURCE]:source_pruned")
         );
         assert_eq!(
@@ -3365,6 +3373,7 @@ mod tests {
         assert!(
             plan.omitted
                 .iter()
+                // ubs:ignore — compares a public omission enum, not secret material.
                 .all(|omitted| omitted.reason == PackOmittedReason::StaleUnderStrictPolicy)
         );
     }

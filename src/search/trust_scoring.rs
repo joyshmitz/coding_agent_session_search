@@ -145,6 +145,10 @@ pub struct TrustSignals {
     /// Linked closed bead id, if any.
     #[serde(default)]
     pub linked_closed_bead: Option<String>,
+    /// Content-stable lesson ids corroborated through the linked commit/Bead.
+    /// Citation-only: these never strengthen the tier on their own.
+    #[serde(default)]
+    pub linked_lessons: Vec<String>,
     /// Recorded outcome marker.
     pub outcome: OutcomeMarker,
     /// Proof status of the linked work.
@@ -165,6 +169,7 @@ impl Default for TrustSignals {
             workspace_match: true,
             linked_commit: None,
             linked_closed_bead: None,
+            linked_lessons: Vec::new(),
             outcome: OutcomeMarker::Unknown,
             proof: ProofStatus::Unknown,
             release_tag: None,
@@ -185,7 +190,8 @@ pub struct TrustAssessment {
     /// Confidence in the verdict.
     pub confidence: TrustConfidence,
     /// Sanitized provenance identifiers (e.g. `commit:ab0d12ef90ab`, `bead:xyz`,
-    /// `release:v0.6.15`). Deterministic order; never raw text or paths.
+    /// `lesson:lsn-0123456789abcdef`, `release:v0.6.15`). Deterministic order;
+    /// never raw text or paths.
     pub provenance_refs: Vec<String>,
     /// Stable snake_case code for the dominant reason trust is reduced, when the
     /// result is not fully trusted (e.g. `failed_attempt`, `superseded_by_newer`,
@@ -234,6 +240,21 @@ fn build_provenance_refs(signals: &TrustSignals) -> Vec<String> {
             refs.push(format!("bead:{id}"));
         }
     }
+    let mut lessons = signals
+        .linked_lessons
+        .iter()
+        .filter_map(|lesson| {
+            let id = sanitize_ref_value(lesson);
+            let suffix = id.strip_prefix("lsn-")?;
+            (id == lesson.trim()
+                && suffix.len() == 16
+                && suffix.chars().all(|c| c.is_ascii_hexdigit()))
+            .then(|| format!("lesson:{id}"))
+        })
+        .collect::<Vec<_>>();
+    lessons.sort();
+    lessons.dedup();
+    refs.extend(lessons);
     if let Some(tag) = &signals.release_tag {
         let tag = sanitize_ref_value(tag);
         if !tag.is_empty() {
@@ -398,6 +419,8 @@ pub struct HitTrustContext {
     pub linked_commit: Option<String>,
     /// Linked closed bead id (correlation layer; None until available).
     pub linked_closed_bead: Option<String>,
+    /// Content-stable lessons corroborated by the linked commit/Bead.
+    pub linked_lessons: Vec<String>,
     /// Outcome marker (correlation layer; Unknown until available).
     pub outcome: OutcomeMarker,
     /// Proof status (correlation layer; Unknown until available).
@@ -417,6 +440,7 @@ impl Default for HitTrustContext {
             realized_mode: RealizedMode::Hybrid,
             linked_commit: None,
             linked_closed_bead: None,
+            linked_lessons: Vec::new(),
             outcome: OutcomeMarker::Unknown,
             proof: ProofStatus::Unknown,
             release_tag: None,
@@ -453,6 +477,7 @@ pub fn derive_trust_signals(ctx: &HitTrustContext) -> TrustSignals {
         workspace_match,
         linked_commit: ctx.linked_commit.clone(),
         linked_closed_bead: ctx.linked_closed_bead.clone(),
+        linked_lessons: ctx.linked_lessons.clone(),
         outcome: ctx.outcome,
         proof: ctx.proof,
         release_tag: ctx.release_tag.clone(),
@@ -471,6 +496,7 @@ mod tests {
             workspace_match: true,
             linked_commit: Some("ab0d12ef90abcdef1234567890abcdef12345678".to_string()),
             linked_closed_bead: Some("xyz123".to_string()),
+            linked_lessons: vec!["lsn-0123456789abcdef".to_string()],
             outcome: OutcomeMarker::Landed,
             proof: ProofStatus::Proven,
             release_tag: Some("v0.6.15".to_string()),
@@ -493,6 +519,10 @@ mod tests {
         );
         assert!(a.provenance_refs.contains(&"release:v0.6.15".to_string()));
         assert!(a.provenance_refs.contains(&"bead:xyz123".to_string()));
+        assert!(
+            a.provenance_refs
+                .contains(&"lesson:lsn-0123456789abcdef".to_string())
+        );
     }
 
     #[test]
@@ -639,6 +669,26 @@ mod tests {
         assert!(
             !joined.contains("table users"),
             "injection phrase broken: {joined}"
+        );
+    }
+
+    #[test]
+    fn lesson_refs_are_validated_and_citation_only() {
+        let signals = TrustSignals {
+            linked_lessons: vec![
+                "lsn-0123456789abcdef".to_string(),
+                "lsn-0123456789abcdef".to_string(),
+                "lsn-0123456789abcdeg".to_string(),
+                "lsn-0123456789abcdef /home/private".to_string(),
+            ],
+            ..TrustSignals::default()
+        };
+        let assessment = assess_trust(&signals);
+
+        assert_eq!(assessment.trust_tier, TrustTier::Unverified);
+        assert_eq!(
+            assessment.provenance_refs,
+            vec!["lesson:lsn-0123456789abcdef".to_string()]
         );
     }
 

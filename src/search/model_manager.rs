@@ -1,6 +1,6 @@
 //! Semantic model management (local-only detection).
 //!
-//! This module wires the FastEmbed MiniLM embedder into semantic search by:
+//! This module wires the pure-Rust native MiniLM embedder into semantic search by:
 //! - validating the local model files
 //! - loading the vector index
 //! - building filter maps from the SQLite database
@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::indexer::semantic::expected_vector_space_revision;
 use crate::search::embedder::Embedder;
 use crate::search::fastembed_embedder::{FastEmbedder, LazyFastEmbedder};
 use crate::search::hash_embedder::HashEmbedder;
@@ -34,7 +35,7 @@ use crate::storage::sqlite::FrankenStorage;
 /// This enum tracks the full lifecycle of semantic search from the user's perspective:
 /// - Model installation flow (NotInstalled → NeedsConsent → Downloading → Verifying → Ready)
 /// - Index building flow (Ready → IndexBuilding → Ready)
-/// - User preferences (HashFallback, Disabled)
+/// - Explicit user preferences (HashFallback, Disabled)
 /// - Error states (LoadFailed, ModelMissing, etc.)
 #[derive(Debug, Clone)]
 pub enum SemanticAvailability {
@@ -45,7 +46,7 @@ pub enum SemanticAvailability {
     // TUI-centric states for user flow
     // =========================================================================
     /// Model not installed - semantic not available.
-    /// TUI should show option to download or use hash fallback.
+    /// TUI should show an option to download or explicitly choose hash mode.
     NotInstalled,
 
     /// User needs to consent before downloading model.
@@ -76,7 +77,7 @@ pub enum SemanticAvailability {
         total_items: u64,
     },
 
-    /// User opted for hash-based fallback (no ML model).
+    /// User explicitly opted for hash-based degraded mode (no ML model).
     HashFallback,
 
     /// Semantic search disabled by policy or user.
@@ -134,7 +135,7 @@ impl SemanticAvailability {
         matches!(self, SemanticAvailability::NeedsConsent)
     }
 
-    /// Check if hash fallback is active.
+    /// Check if explicit hash mode is active.
     pub fn is_hash_fallback(&self) -> bool {
         matches!(self, SemanticAvailability::HashFallback)
     }
@@ -161,7 +162,7 @@ impl SemanticAvailability {
         )
     }
 
-    /// Check if semantic can be used (ready or hash fallback).
+    /// Check if vector search can be used (native semantic or explicit hash mode).
     pub fn can_search(&self) -> bool {
         matches!(
             self,
@@ -243,7 +244,7 @@ impl SemanticAvailability {
                     format!("building index: {items_indexed}/{total_items}")
                 }
             }
-            SemanticAvailability::HashFallback => "using hash-based fallback".to_string(),
+            SemanticAvailability::HashFallback => "using explicit hash mode".to_string(),
             SemanticAvailability::Disabled { reason } => {
                 format!("semantic disabled: {reason}")
             }
@@ -285,6 +286,29 @@ pub struct SemanticSetup {
 
 fn semantic_sidecar_path(data_dir: &Path, recorded_path: &str) -> Option<PathBuf> {
     semantic_shard_artifact_path_is_safe(recorded_path).then(|| data_dir.join(recorded_path))
+}
+
+fn validate_vector_index_contract(
+    index: &VectorIndex,
+    expected_embedder_id: &str,
+    expected_dimension: usize,
+) -> Result<(), String> {
+    let expected_revision =
+        expected_vector_space_revision(expected_embedder_id).ok_or_else(|| {
+            format!("no current vector-space revision for embedder {expected_embedder_id}")
+        })?;
+    if index.embedder_id() != expected_embedder_id
+        || index.dimension() != expected_dimension
+        || index.embedder_revision() != expected_revision
+    {
+        return Err(format!(
+            "incompatible vector index: expected embedder {expected_embedder_id} revision {expected_revision} dimension {expected_dimension}, found embedder {} revision {} dimension {}; rebuild semantic vectors",
+            index.embedder_id(),
+            index.embedder_revision(),
+            index.dimension()
+        ));
+    }
+    Ok(())
 }
 
 fn matching_complete_shard_records(
@@ -343,6 +367,7 @@ fn matching_complete_shard_records(
 fn load_complete_shard_indexes(
     data_dir: &Path,
     embedder_id: &str,
+    expected_dimension: usize,
     db_fingerprint: &str,
 ) -> Result<Option<Vec<VectorIndex>>, String> {
     for tier in [TierKind::Quality, TierKind::Fast] {
@@ -359,12 +384,16 @@ fn load_complete_shard_indexes(
             };
             let index = VectorIndex::open(&path)
                 .map_err(|err| format!("semantic shard vector index {}: {err}", path.display()))?;
-            if index.embedder_id() != embedder_id || index.dimension() != shard.dimension {
+            if shard.dimension != expected_dimension {
                 return Err(format!(
-                    "semantic shard vector index {} metadata mismatch",
-                    path.display()
+                    "semantic shard manifest {} declares dimension {}, expected {expected_dimension}",
+                    path.display(),
+                    shard.dimension
                 ));
             }
+            validate_vector_index_contract(&index, embedder_id, expected_dimension).map_err(
+                |error| format!("semantic shard vector index {}: {error}", path.display()),
+            )?;
             indexes.push(index);
         }
         if !indexes.is_empty() {
@@ -413,6 +442,7 @@ fn load_complete_shard_indexes_for_current_db(
     data_dir: &Path,
     db_path: &Path,
     embedder_id: &str,
+    expected_dimension: usize,
     context_label: &'static str,
 ) -> Option<Vec<VectorIndex>> {
     let db_fingerprint = match crate::indexer::lexical_storage_fingerprint_for_db(db_path) {
@@ -428,7 +458,7 @@ fn load_complete_shard_indexes_for_current_db(
         }
     };
 
-    match load_complete_shard_indexes(data_dir, embedder_id, &db_fingerprint) {
+    match load_complete_shard_indexes(data_dir, embedder_id, expected_dimension, &db_fingerprint) {
         Ok(indexes) => indexes,
         Err(err) => {
             tracing::debug!(
@@ -487,7 +517,11 @@ pub(crate) fn probe_semantic_availability_for_embedder(
     data_dir: &Path,
     embedder_name: &str,
 ) -> SemanticAvailability {
-    let canonical_name = FastEmbedder::canonical_name(embedder_name).unwrap_or("minilm");
+    let Some(canonical_name) = FastEmbedder::canonical_name(embedder_name) else {
+        return SemanticAvailability::LoadFailed {
+            context: format!("unsupported semantic embedder: {embedder_name}; supported: minilm"),
+        };
+    };
     let Some(config) = FastEmbedder::config_for(canonical_name) else {
         return SemanticAvailability::LoadFailed {
             context: format!("unknown semantic embedder: {embedder_name}"),
@@ -515,6 +549,21 @@ pub(crate) fn probe_semantic_availability_for_embedder(
         return SemanticAvailability::IndexMissing { index_path };
     }
 
+    match VectorIndex::open(&index_path) {
+        Ok(index) => {
+            if let Err(context) =
+                validate_vector_index_contract(&index, &config.embedder_id, config.dimension)
+            {
+                return SemanticAvailability::LoadFailed { context };
+            }
+        }
+        Err(error) => {
+            return SemanticAvailability::LoadFailed {
+                context: format!("vector index: {error}"),
+            };
+        }
+    }
+
     SemanticAvailability::Ready {
         embedder_id: config.embedder_id,
     }
@@ -527,7 +576,18 @@ pub(crate) fn probe_hash_semantic_availability(data_dir: &Path) -> SemanticAvail
     if !index_path.is_file() {
         SemanticAvailability::IndexMissing { index_path }
     } else {
-        SemanticAvailability::HashFallback
+        match VectorIndex::open(&index_path) {
+            Ok(index) => {
+                validate_vector_index_contract(&index, embedder.id(), embedder.dimension())
+                    .map_or_else(
+                        |context| SemanticAvailability::LoadFailed { context },
+                        |()| SemanticAvailability::HashFallback,
+                    )
+            }
+            Err(error) => SemanticAvailability::LoadFailed {
+                context: format!("vector index: {error}"),
+            },
+        }
     }
 }
 
@@ -543,6 +603,7 @@ pub fn load_hash_semantic_context(data_dir: &Path, db_path: &Path) -> SemanticSe
             data_dir,
             db_path,
             embedder.id(),
+            embedder.dimension(),
             "hash semantic",
         )
     } else {
@@ -585,7 +646,17 @@ pub fn load_hash_semantic_context(data_dir: &Path, db_path: &Path) -> SemanticSe
         (index, indexes)
     } else {
         match VectorIndex::open(&index_path) {
-            Ok(index) => (index, Vec::new()),
+            Ok(index) => {
+                if let Err(context) =
+                    validate_vector_index_contract(&index, embedder.id(), embedder.dimension())
+                {
+                    return SemanticSetup {
+                        availability: SemanticAvailability::LoadFailed { context },
+                        context: None,
+                    };
+                }
+                (index, Vec::new())
+            }
             Err(err) => {
                 return SemanticSetup {
                     availability: SemanticAvailability::LoadFailed {
@@ -633,7 +704,16 @@ fn load_semantic_context_inner(
     embedder_name: &str,
     defer_embedder_load: bool,
 ) -> SemanticSetup {
-    let canonical_name = FastEmbedder::canonical_name(embedder_name).unwrap_or("minilm");
+    let Some(canonical_name) = FastEmbedder::canonical_name(embedder_name) else {
+        return SemanticSetup {
+            availability: SemanticAvailability::LoadFailed {
+                context: format!(
+                    "unsupported semantic embedder: {embedder_name}; supported: minilm"
+                ),
+            },
+            context: None,
+        };
+    };
     let Some(config) = FastEmbedder::config_for(canonical_name) else {
         return SemanticSetup {
             availability: SemanticAvailability::LoadFailed {
@@ -676,6 +756,7 @@ fn load_semantic_context_inner(
             data_dir,
             db_path,
             &config.embedder_id,
+            config.dimension,
             "semantic",
         )
     } else {
@@ -718,7 +799,17 @@ fn load_semantic_context_inner(
         (index, indexes)
     } else {
         match VectorIndex::open(&index_path) {
-            Ok(index) => (index, Vec::new()),
+            Ok(index) => {
+                if let Err(context) =
+                    validate_vector_index_contract(&index, &config.embedder_id, config.dimension)
+                {
+                    return SemanticSetup {
+                        availability: SemanticAvailability::LoadFailed { context },
+                        context: None,
+                    };
+                }
+                (index, Vec::new())
+            }
             Err(err) => {
                 return SemanticSetup {
                     availability: SemanticAvailability::LoadFailed {
@@ -766,7 +857,7 @@ fn load_semantic_context_inner(
 
 fn active_policy_embedder_name() -> &'static str {
     let semantic_policy = SemanticPolicy::resolve(&CliSemanticOverrides::default());
-    FastEmbedder::canonical_name(&semantic_policy.quality_tier_embedder).unwrap_or("minilm")
+    FastEmbedder::canonical_name(&semantic_policy.quality_tier_embedder).unwrap_or("unsupported")
 }
 
 fn semantic_availability_from_cache_state(
@@ -856,9 +947,9 @@ fn semantic_availability_from_cache_state(
 
 /// Check if the vector index needs rebuilding after a model upgrade.
 ///
-/// This compares the embedder ID in the vector index header with the expected
-/// embedder ID. If they differ, the index was built with a different model
-/// and needs to be rebuilt.
+/// This compares the embedder ID, vector-space revision, and dimension in the
+/// vector index header with the current native MiniLM contract. Shape equality
+/// alone cannot prove compatibility across inference-engine generations.
 ///
 /// Returns `true` if rebuild is needed, `false` otherwise.
 pub fn needs_index_rebuild(data_dir: &Path) -> bool {
@@ -872,10 +963,7 @@ pub fn needs_index_rebuild(data_dir: &Path) -> bool {
     // Try to load the index and check its embedder ID
     match VectorIndex::open(&index_path) {
         Ok(index) => {
-            // Check if the index was built with a different embedder
-            // The vector index stores the embedder ID in its header
-            let expected_id = FastEmbedder::embedder_id_static();
-            index.embedder_id() != expected_id
+            validate_vector_index_contract(&index, FastEmbedder::embedder_id_static(), 384).is_err()
         }
         Err(_) => {
             // Index is corrupted or unreadable, needs rebuild
@@ -1086,7 +1174,7 @@ mod tests {
         let mut writer = VectorIndex::create_with_revision(
             path,
             embedder.id(),
-            "hash",
+            expected_vector_space_revision(embedder.id()).unwrap(),
             embedder.dimension(),
             frankensearch::index::Quantization::F16,
         )
@@ -1099,6 +1187,35 @@ mod tests {
                 .expect("write hash vector record");
         }
         writer.finish().expect("finish hash vector index");
+    }
+
+    #[test]
+    fn same_id_and_dimension_with_legacy_revision_requires_rebuild() {
+        let tmp = tempdir().unwrap();
+        let index_path = vector_index_path(tmp.path(), FastEmbedder::embedder_id_static());
+        std::fs::create_dir_all(index_path.parent().unwrap()).unwrap();
+
+        let writer = VectorIndex::create_with_revision(
+            &index_path,
+            FastEmbedder::embedder_id_static(),
+            "1.0",
+            384,
+            frankensearch::index::Quantization::F16,
+        )
+        .unwrap();
+        writer.finish().unwrap();
+        assert!(needs_index_rebuild(tmp.path()));
+
+        let writer = VectorIndex::create_with_revision(
+            &index_path,
+            FastEmbedder::embedder_id_static(),
+            expected_vector_space_revision(FastEmbedder::embedder_id_static()).unwrap(),
+            384,
+            frankensearch::index::Quantization::F16,
+        )
+        .unwrap();
+        writer.finish().unwrap();
+        assert!(!needs_index_rebuild(tmp.path()));
     }
 
     fn semantic_shard_record(

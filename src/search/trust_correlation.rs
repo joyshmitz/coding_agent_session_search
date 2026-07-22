@@ -77,6 +77,9 @@ pub struct CommitBeadLink {
     pub linked_commit: Option<String>,
     /// Linked closed bead id, if a closed bead was referenced.
     pub linked_closed_bead: Option<String>,
+    /// Content-stable lessons corroborated by the linked commit/closed Bead.
+    /// These are citation-only and never affect the outcome or trust tier.
+    pub linked_lessons: Vec<String>,
     /// Outcome marker implied by the match (`Landed` for a closed bead or a real
     /// commit, `Open` for an open bead, `Unknown` for no match).
     pub outcome: OutcomeMarker,
@@ -88,6 +91,7 @@ impl CommitBeadLink {
         CommitBeadLink {
             linked_commit: None,
             linked_closed_bead: None,
+            linked_lessons: Vec::new(),
             outcome: OutcomeMarker::Unknown,
         }
     }
@@ -111,6 +115,9 @@ pub struct CorrelationIndex {
     /// Known full commit ids, indexed by their [`COMMIT_PREFIX_LEN`]-char prefix
     /// for cheap reference matching.
     commit_by_prefix: HashMap<String, String>,
+    /// Commit/Bead `source_ref` -> content-stable lesson ids derived from the
+    /// same live repository evidence as `cass lessons`.
+    lesson_by_source: HashMap<String, Vec<String>>,
     /// The `<project>-` prefix used to recognize this project's bead ids in text
     /// (e.g. `coding_agent_session_search-`). `None` disables bead matching.
     project_prefix: Option<String>,
@@ -119,6 +126,30 @@ pub struct CorrelationIndex {
     repo_root: Option<PathBuf>,
     /// Cache of commit id → containing release tag (`None` = resolved, no tag).
     release_cache: Mutex<HashMap<String, Option<String>>>,
+}
+
+/// Return deterministic lesson ids whose source provenance was already
+/// corroborated by the existing commit/closed-Bead correlation.
+fn corroborated_lesson_ids(
+    index: &CorrelationIndex,
+    bead: Option<&str>,
+    commit: Option<&str>,
+) -> Vec<String> {
+    let mut lessons = Vec::new();
+    for source_ref in [
+        bead.map(|id| format!("bead:{id}")),
+        commit.map(|sha| format!("commit:{sha}")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Some(ids) = index.lesson_by_source.get(&source_ref) {
+            lessons.extend(ids.iter().cloned());
+        }
+    }
+    lessons.sort();
+    lessons.dedup();
+    lessons
 }
 
 impl CorrelationIndex {
@@ -350,17 +381,21 @@ pub fn correlate(index: &CorrelationIndex, text: &str) -> CommitBeadLink {
             .get(chosen)
             .cloned()
             .or(direct_commit.clone());
+        let linked_lessons = corroborated_lesson_ids(index, Some(chosen), linked_commit.as_deref());
         return CommitBeadLink {
             linked_commit,
             linked_closed_bead: Some(chosen.to_string()),
+            linked_lessons,
             outcome: OutcomeMarker::Landed,
         };
     }
     if let Some(commit) = direct_commit {
         // A real commit in project history is landed work.
+        let linked_lessons = corroborated_lesson_ids(index, None, Some(&commit));
         return CommitBeadLink {
             linked_commit: Some(commit),
             linked_closed_bead: None,
+            linked_lessons,
             outcome: OutcomeMarker::Landed,
         };
     }
@@ -368,6 +403,7 @@ pub fn correlate(index: &CorrelationIndex, text: &str) -> CommitBeadLink {
         return CommitBeadLink {
             linked_commit: index.bead_commit.get(*open).cloned(),
             linked_closed_bead: None,
+            linked_lessons: Vec::new(),
             outcome: OutcomeMarker::Open,
         };
     }
@@ -397,15 +433,41 @@ fn build_for_repo(start: &Path) -> Option<CorrelationIndex> {
     let (beads, project_name) = read_bead_facts(&root.join(".beads").join("issues.jsonl"));
     let project_prefix = project_name.map(|name| format!("{name}-"));
     let (bead_commit, commit_by_prefix) = read_git_links(&root, project_prefix.as_deref());
+    let lesson_by_source = build_lesson_source_index(&root);
 
     Some(CorrelationIndex {
         beads,
         bead_commit,
         commit_by_prefix,
+        lesson_by_source,
         project_prefix,
         repo_root: Some(root),
         release_cache: Mutex::new(HashMap::new()),
     })
+}
+
+/// Derive the actual current lesson ids once per live correlation index and
+/// index them by their already-sanitized commit/Bead source references. This
+/// preserves the content-stable id and supersession rules owned by the lessons
+/// core instead of reimplementing either rule in the trust layer.
+fn build_lesson_source_index(root: &Path) -> HashMap<String, Vec<String>> {
+    let evidence = crate::gather_repository_lessons_evidence(root);
+    let extraction = crate::lessons_extraction::extract(&evidence);
+    let graph = crate::lessons::LessonGraph::build(extraction.candidates);
+    let mut by_source: HashMap<String, Vec<String>> = HashMap::new();
+    for lesson in graph.lessons {
+        for source_ref in lesson.source_refs {
+            by_source
+                .entry(source_ref)
+                .or_default()
+                .push(lesson.lesson_id.clone());
+        }
+    }
+    for ids in by_source.values_mut() {
+        ids.sort();
+        ids.dedup();
+    }
+    by_source
 }
 
 /// Read bead status facts from a beads `issues.jsonl` file. Returns the per-id
@@ -554,6 +616,7 @@ mod tests {
             beads,
             bead_commit,
             commit_by_prefix,
+            lesson_by_source: HashMap::new(),
             project_prefix: Some(project_prefix.to_string()),
             repo_root: None,
             release_cache: Mutex::new(HashMap::new()),
@@ -585,6 +648,46 @@ mod tests {
         assert_eq!(link.outcome, OutcomeMarker::Landed);
         assert_eq!(link.linked_closed_bead.as_deref(), Some("proj-q4pau"));
         assert_eq!(link.linked_commit.as_deref(), Some(SHA_A));
+    }
+
+    #[test]
+    fn lesson_refs_require_corroborated_source_provenance() {
+        let mut idx = index_with(
+            "proj-",
+            &[("proj-q4pau", true), ("proj-other", true)],
+            &[("proj-q4pau", SHA_A)],
+            &[SHA_A],
+        );
+        idx.lesson_by_source.insert(
+            "bead:proj-q4pau".to_string(),
+            vec!["lsn-1111111111111111".to_string()],
+        );
+        idx.lesson_by_source.insert(
+            "commit:ab0d12ef90abcdef1234567890abcdef12345678".to_string(),
+            vec!["lsn-2222222222222222".to_string()],
+        );
+        idx.lesson_by_source.insert(
+            "bead:proj-other".to_string(),
+            vec!["lsn-3333333333333333".to_string()],
+        );
+
+        let linked = correlate(&idx, "fixed in proj-q4pau closeout");
+        assert_eq!(
+            linked.linked_lessons,
+            vec![
+                "lsn-1111111111111111".to_string(),
+                "lsn-2222222222222222".to_string()
+            ]
+        );
+        assert!(
+            !linked
+                .linked_lessons
+                .contains(&"lsn-3333333333333333".to_string()),
+            "an unrelated lesson must not be cited"
+        );
+
+        let unrelated = correlate(&idx, "no known identifier here");
+        assert!(unrelated.linked_lessons.is_empty());
     }
 
     #[test]

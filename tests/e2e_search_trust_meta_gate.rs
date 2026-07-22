@@ -364,6 +364,7 @@ fn search_robot_meta_carries_trust_and_default_paths_do_not() -> TestResult {
             head(&meta.to_string())
         )
     })?;
+    // ubs:ignore — compares a public trust-tier label, not a secret or token.
     ensure(tier_of(recent_hit) == "unverified", || {
         format!(
             "fresh unlinked session should score `unverified`, got `{}`",
@@ -500,6 +501,36 @@ fn trust_of<'a>(hit: &'a Value, label: &str) -> Result<&'a Value, Box<dyn Error>
         .ok_or_else(|| format!("{label}: hit missing trust block").into())
 }
 
+/// Whether a trust verdict carries one exact sanitized provenance reference.
+fn has_provenance_ref(trust: &Value, expected: &str) -> bool {
+    trust
+        .get("provenance_refs")
+        .and_then(Value::as_array)
+        .is_some_and(|refs| refs.iter().filter_map(Value::as_str).any(|r| r == expected))
+}
+
+/// Resolve the current content-stable lesson id carrying `source_ref` from a
+/// live `cass lessons list` payload.
+fn lesson_id_for_source(payload: &Value, source_ref: &str) -> Option<String> {
+    payload
+        .get("lessons")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|lesson| {
+            lesson
+                .get("source_refs")
+                .and_then(Value::as_array)
+                .is_some_and(|refs| {
+                    refs.iter()
+                        .filter_map(Value::as_str)
+                        .any(|candidate| candidate == source_ref)
+                })
+        })?
+        .get("lesson_id")?
+        .as_str()
+        .map(str::to_string)
+}
+
 /// The `stale_reason` string of a hit's trust verdict (empty when absent).
 fn stale_reason_of(hit: &Value) -> String {
     hit.get("trust")
@@ -596,13 +627,49 @@ fn search_on_project_correlation_links_bead() -> TestResult {
     let bead_id = "corrproj-corrbeadxyz";
     let bead_line = json!({
         "id": bead_id,
+        "title": "Preserve correlated lesson provenance",
         "status": "closed",
         "source_repo": "corrproj",
+        "issue_type": "task",
+        "labels": ["trust-correlation"],
+        "updated_at": "2026-07-20T12:00:00Z",
+        "closed_at": "2026-07-21T12:00:00Z",
+        "close_reason": "Use the corroborated closed-Bead decision in search and pack citations",
     });
     std::fs::write(
         beads_dir.join("issues.jsonl"),
         format!("{}\n", serde_json::to_string(&bead_line)?),
     )?;
+
+    // Resolve the actual lesson id from the real live lessons surface. Trust
+    // must reuse this content-stable id, not synthesize a parallel identifier.
+    let lessons_args = ["lessons", "list", "--status", "all", "--json"].map(str::to_string);
+    let lessons_cmd = cass_cmd_in(&proj, &home, &codex_home, &lessons_args);
+    let lessons_out = spawn_with_timeout_or_diag(
+        lessons_cmd,
+        "correlation_lessons",
+        Some(&data_dir),
+        SEARCH_TIMEOUT,
+    );
+    let lessons_stdout = String::from_utf8_lossy(&lessons_out.stdout);
+    let lessons_payload: Value = serde_json::from_str(lessons_stdout.trim()).map_err(|e| {
+        format!(
+            "correlation lessons stdout not JSON: {e}; head: {}",
+            head(&lessons_stdout)
+        )
+    })?;
+    let bead_source_ref = format!("bead:{bead_id}");
+    let lesson_id = lesson_id_for_source(&lessons_payload, &bead_source_ref).ok_or_else(|| {
+        format!(
+            "live lessons did not derive a lesson for `{bead_source_ref}`: {}",
+            head(&lessons_payload.to_string())
+        )
+    })?;
+    ensure(
+        lesson_id.starts_with("lsn-") && lesson_id.len() == "lsn-".len() + 16,
+        || format!("live lessons returned malformed lesson id `{lesson_id}`"),
+    )?;
+    let lesson_provenance_ref = format!("lesson:{lesson_id}");
 
     // A session whose workspace is the project root and whose body references
     // the closed bead alongside the search keyword.
@@ -660,17 +727,19 @@ fn search_on_project_correlation_links_bead() -> TestResult {
         )
     })?;
     let trust = trust_of(hit, "correlation")?;
-    let has_bead_ref = trust
-        .get("provenance_refs")
-        .and_then(Value::as_array)
-        .is_some_and(|refs| {
-            refs.iter()
-                .filter_map(Value::as_str)
-                .any(|r| r == format!("bead:{bead_id}"))
-        });
+    let has_bead_ref = has_provenance_ref(trust, &bead_source_ref);
     ensure(has_bead_ref, || {
         format!(
-            "expected provenance ref `bead:{bead_id}`, got {}",
+            "expected provenance ref `{bead_source_ref}`, got {}",
+            trust
+                .get("provenance_refs")
+                .map(ToString::to_string)
+                .unwrap_or_default()
+        )
+    })?;
+    ensure(has_provenance_ref(trust, &lesson_provenance_ref), || {
+        format!(
+            "expected live lesson provenance ref `{lesson_provenance_ref}`, got {}",
             trust
                 .get("provenance_refs")
                 .map(ToString::to_string)
@@ -681,6 +750,73 @@ fn search_on_project_correlation_links_bead() -> TestResult {
     ensure(stale_reason_of(hit) != "workspace_mismatch", || {
         "on-project hit must not report workspace_mismatch".to_string()
     })?;
+
+    // The answer-pack path must attach the exact same corroborated lesson ref
+    // while retaining the existing `likely` trust semantics.
+    let pack_args = argv(
+        &[
+            "pack", keyword, "--json", "--mode", "lexical", "--limit", "5",
+        ],
+        &data_dir,
+    );
+    let pack_cmd = cass_cmd_in(&proj, &home, &codex_home, &pack_args);
+    let pack_out = spawn_with_timeout_or_diag(
+        pack_cmd,
+        "correlation_pack",
+        Some(&data_dir),
+        SEARCH_TIMEOUT,
+    );
+    let pack_stdout = String::from_utf8_lossy(&pack_out.stdout);
+    let pack_payload: Value = serde_json::from_str(pack_stdout.trim()).map_err(|e| {
+        format!(
+            "correlation pack stdout not JSON: {e}; head: {}",
+            head(&pack_stdout)
+        )
+    })?;
+    let pack_evidence = pack_payload
+        .get("evidence")
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items.iter().find(|item| {
+                item.pointer("/citation/source_path")
+                    .and_then(Value::as_str)
+                    .is_some_and(|path| path.contains("correlation"))
+            })
+        })
+        .ok_or_else(|| {
+            format!(
+                "correlation pack evidence not found: {}",
+                head(&pack_payload.to_string())
+            )
+        })?;
+    ensure(tier_of(pack_evidence) == "likely", || {
+        format!(
+            "on-project pack evidence should remain `likely`, got `{}`",
+            tier_of(pack_evidence)
+        )
+    })?;
+    let pack_trust = trust_of(pack_evidence, "correlation pack evidence")?;
+    ensure(has_provenance_ref(pack_trust, &bead_source_ref), || {
+        format!(
+            "pack evidence missing `{bead_source_ref}`: {}",
+            pack_trust
+                .get("provenance_refs")
+                .map(ToString::to_string)
+                .unwrap_or_default()
+        )
+    })?;
+    ensure(
+        has_provenance_ref(pack_trust, &lesson_provenance_ref),
+        || {
+            format!(
+                "pack evidence missing `{lesson_provenance_ref}`: {}",
+                pack_trust
+                    .get("provenance_refs")
+                    .map(ToString::to_string)
+                    .unwrap_or_default()
+            )
+        },
+    )?;
     Ok(())
 }
 

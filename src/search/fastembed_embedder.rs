@@ -15,9 +15,9 @@
 //! pure-Rust backend has neither problem — no AVX-static-init hazard, so a single
 //! binary runs everywhere (the `-baseline` artifact is no longer needed).
 //!
-//! Only the 384-dim `all-MiniLM-L6-v2` family is supported by the native backend
-//! today (the `snowflake-arctic-s` MiniLM variant shares its architecture; the
-//! 768-dim `nomic-embed` model is rejected pending a follow-up).
+//! Only the exact 384-dim `all-MiniLM-L6-v2` topology is supported by the native
+//! backend today. Other model families are rejected rather than routed through
+//! a topology that could silently produce incompatible vectors.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -39,6 +39,15 @@ const MINILM_MODEL_ID: &str = "all-minilm-l6-v2";
 const MINILM_DIR_NAME: &str = "all-MiniLM-L6-v2";
 const MINILM_EMBEDDER_ID: &str = "minilm-384";
 const MINILM_DIMENSION: usize = 384;
+
+/// FSVI vector-space revision for the native MiniLM implementation.
+///
+/// The model revision alone is insufficient: pre-#308 ONNX and current native
+/// inference can share an embedder ID and dimension without producing an
+/// identical vector space. Persisting the engine generation prevents those
+/// same-shape vectors from being mixed silently.
+pub const MINILM_VECTOR_SPACE_REVISION: &str =
+    "native-minilm-v1:c9745ed1d9f207416be6d2e6f8de32d1f16199bf";
 
 // Safetensors model file names: prefer an explicit f32 export, fall back to the
 // standard HuggingFace `model.safetensors`. The native embedder also needs
@@ -212,8 +221,6 @@ impl FastEmbedder {
     pub fn model_dir_for(data_dir: &Path, embedder_name: &str) -> Option<PathBuf> {
         let dir_name = match Self::canonical_name(embedder_name)? {
             "minilm" => MINILM_DIR_NAME,
-            "snowflake-arctic-s" => "snowflake-arctic-embed-s",
-            "nomic-embed" => "nomic-embed-text-v1.5",
             _ => return None,
         };
         Some(data_dir.join("models").join(dir_name))
@@ -231,13 +238,6 @@ impl FastEmbedder {
     pub fn canonical_name(embedder_name: &str) -> Option<&'static str> {
         match embedder_name.trim().to_ascii_lowercase().as_str() {
             "fastembed" | "minilm" | "all-minilm-l6-v2" | "minilm-384" => Some("minilm"),
-            "snowflake"
-            | "snowflake-arctic-s"
-            | "snowflake-arctic-embed-s"
-            | "snowflake-arctic-s-384" => Some("snowflake-arctic-s"),
-            "nomic" | "nomic-embed" | "nomic-embed-text-v1.5" | "nomic-embed-768" => {
-                Some("nomic-embed")
-            }
             _ => None,
         }
     }
@@ -251,18 +251,6 @@ impl FastEmbedder {
                 dimension: 384,
                 pooling: Pooling::Mean,
             }),
-            "snowflake-arctic-s" => Some(OnnxEmbedderConfig {
-                embedder_id: "snowflake-arctic-s-384".to_string(),
-                model_id: "snowflake-arctic-embed-s".to_string(),
-                dimension: 384,
-                pooling: Pooling::Mean,
-            }),
-            "nomic-embed" => Some(OnnxEmbedderConfig {
-                embedder_id: "nomic-embed-768".to_string(),
-                model_id: "nomic-embed-text-v1.5".to_string(),
-                dimension: 768,
-                pooling: Pooling::Mean,
-            }),
             _ => None,
         }
     }
@@ -274,8 +262,8 @@ impl FastEmbedder {
 
     /// Load a native embedder with custom configuration.
     ///
-    /// Only the 384-dim all-MiniLM-L6-v2 family is supported by the pure-Rust
-    /// backend; other dimensions (e.g. nomic-embed 768) are rejected with
+    /// Only the exact 384-dim all-MiniLM-L6-v2 topology is supported by the pure-Rust
+    /// backend; all other model IDs or dimensions are rejected with
     /// [`EmbedderError::EmbedderUnavailable`].
     pub fn load_with_config(model_dir: &Path, config: OnnxEmbedderConfig) -> EmbedderResult<Self> {
         // Only all-MiniLM-L6-v2 is architecture-verified against the native
@@ -322,6 +310,15 @@ impl FastEmbedder {
 
         let inner = NativeEmbedder::load(model_dir)?;
         let dimension = inner.dimension();
+        if dimension != config.dimension {
+            return Err(Self::unavailable_error(
+                &config.embedder_id,
+                format!(
+                    "native model output dimension {dimension} does not match the registered {}-d contract",
+                    config.dimension
+                ),
+            ));
+        }
         Ok(Self {
             inner,
             id: config.embedder_id,
@@ -358,6 +355,39 @@ impl FastEmbedder {
             reason: reason.into(),
         }
     }
+
+    fn validate_output(&self, vectors: &[Vec<f32>], expected_count: usize) -> EmbedderResult<()> {
+        if vectors.len() != expected_count {
+            return Err(EmbedderError::EmbeddingFailed {
+                model: self.model_id.clone(),
+                source: Box::new(std::io::Error::other(format!(
+                    "native embedder returned {} vectors for {expected_count} inputs",
+                    vectors.len()
+                ))),
+            });
+        }
+        for (index, vector) in vectors.iter().enumerate() {
+            if vector.len() != self.dimension {
+                return Err(EmbedderError::EmbeddingFailed {
+                    model: self.model_id.clone(),
+                    source: Box::new(std::io::Error::other(format!(
+                        "native embedding {index} has dimension {}, expected {}",
+                        vector.len(),
+                        self.dimension
+                    ))),
+                });
+            }
+            if vector.iter().any(|value| !value.is_finite()) {
+                return Err(EmbedderError::EmbeddingFailed {
+                    model: self.model_id.clone(),
+                    source: Box::new(std::io::Error::other(format!(
+                        "native embedding {index} contains a non-finite value"
+                    ))),
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 pub fn model_dir_override() -> Option<PathBuf> {
@@ -391,7 +421,9 @@ impl Embedder for FastEmbedder {
                 reason: "empty text".to_string(),
             });
         }
-        self.inner.embed_sync(text)
+        let vector = self.inner.embed_sync(text)?;
+        self.validate_output(std::slice::from_ref(&vector), 1)?;
+        Ok(vector)
     }
 
     fn embed_batch_sync(&self, texts: &[&str]) -> EmbedderResult<Vec<Vec<f32>>> {
@@ -407,7 +439,9 @@ impl Embedder for FastEmbedder {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        self.inner.embed_batch_sync(texts)
+        let vectors = self.inner.embed_batch_sync(texts)?;
+        self.validate_output(&vectors, texts.len())?;
+        Ok(vectors)
     }
 
     fn dimension(&self) -> usize {
@@ -486,9 +520,14 @@ mod tests {
     }
 
     #[test]
-    fn nomic_768_is_rejected_by_native_backend() {
+    fn non_minilm_config_is_rejected_by_native_backend() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let cfg = FastEmbedder::config_for("nomic-embed").unwrap();
+        let cfg = OnnxEmbedderConfig {
+            embedder_id: "nomic-embed-768".to_string(),
+            model_id: "nomic-embed-text-v1.5".to_string(),
+            dimension: 768,
+            pooling: Pooling::Mean,
+        };
         let err = FastEmbedder::load_with_config(tmp.path(), cfg)
             .err()
             .expect("768-dim model should be rejected");
@@ -496,31 +535,18 @@ mod tests {
     }
 
     #[test]
-    fn config_for_known_models() {
+    fn config_for_only_native_supported_model() {
         assert_eq!(FastEmbedder::config_for("minilm").unwrap().dimension, 384);
-        assert_eq!(
-            FastEmbedder::config_for("snowflake-arctic-s")
-                .unwrap()
-                .dimension,
-            384
-        );
-        assert_eq!(
-            FastEmbedder::config_for("nomic-embed").unwrap().dimension,
-            768
-        );
+        assert!(FastEmbedder::config_for("snowflake-arctic-s").is_none());
+        assert!(FastEmbedder::config_for("nomic-embed").is_none());
         assert!(FastEmbedder::config_for("unknown").is_none());
     }
 
     #[test]
-    fn canonical_name_accepts_policy_and_index_aliases() {
+    fn canonical_name_accepts_only_minilm_aliases() {
         assert_eq!(FastEmbedder::canonical_name("fastembed"), Some("minilm"));
-        assert_eq!(
-            FastEmbedder::canonical_name("snowflake-arctic-s-384"),
-            Some("snowflake-arctic-s")
-        );
-        assert_eq!(
-            FastEmbedder::canonical_name("nomic-embed-text-v1.5"),
-            Some("nomic-embed")
-        );
+        assert_eq!(FastEmbedder::canonical_name("minilm-384"), Some("minilm"));
+        assert!(FastEmbedder::canonical_name("snowflake-arctic-s-384").is_none());
+        assert!(FastEmbedder::canonical_name("nomic-embed-text-v1.5").is_none());
     }
 }
