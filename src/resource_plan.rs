@@ -5,7 +5,7 @@ use std::process::Command;
 use std::thread;
 
 pub const SCHEMA_VERSION: &str = "cass.swarm.resource_plan.v1";
-pub const DEFAULT_TARGET_DIR: &str = "/tmp/cass-resource-plan-target";
+pub const DEFAULT_TARGET_DIR: &str = "/data/tmp/cass-resource-plan-target";
 pub const ACTIONS: &[&str] = &[
     "full-index",
     "semantic-backfill",

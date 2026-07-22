@@ -47,16 +47,18 @@ const CONTRACTS: &[DependencyContract] = &[
         dep_key: "frankensqlite",
         crate_package_name: "fsqlite",
         manifest_package_field: Some("fsqlite"),
-        // crates.io-only exact pin: fsqlite 0.1.18 carries the contentless-FTS5
-        // reopen/catch-up fixes, bounded clean-page reclamation (#131), and the
-        // fused composite-index equality-run counter used by CASS parity checks.
-        // Together these prevent false OutOfMemory failures and multi-hour row
-        // crossings during multi-million-row FTS rebuilds (cass#345).
+        // crates.io-only exact pin: fsqlite 0.1.19 carries the existing-only,
+        // schema-only open lane used to keep CASS archive and doctor opens
+        // bounded, in addition to the contentless-FTS5 reopen/catch-up fixes,
+        // bounded clean-page reclamation (#131), and fused composite-index
+        // equality-run counter used by CASS parity checks. Together these
+        // prevent accidental archive creation, false OutOfMemory failures, and
+        // multi-hour row crossings during multi-million-row FTS rebuilds.
         // Empty `expected_git` signals
         // `validate_manifest_dependency_spec` to skip git/rev checks.
         expected_git: "",
         expected_rev: "",
-        expected_version: "0.1.18",
+        expected_version: "0.1.19",
         expected_features: &["fts5"],
         expected_default_features: None,
         repo_rel: "../frankensqlite",
@@ -71,10 +73,10 @@ const CONTRACTS: &[DependencyContract] = &[
         dep_key: "fsqlite-types",
         crate_package_name: "fsqlite-types",
         manifest_package_field: Some("fsqlite-types"),
-        // crates.io-only exact pin aligned with the frankensqlite facade at 0.1.18.
+        // crates.io-only exact pin aligned with the frankensqlite facade at 0.1.19.
         expected_git: "",
         expected_rev: "",
-        expected_version: "0.1.18",
+        expected_version: "0.1.19",
         expected_features: &[],
         expected_default_features: None,
         repo_rel: "../frankensqlite",
@@ -144,9 +146,9 @@ const CONTRACTS: &[DependencyContract] = &[
         // cass #308: the ort/ONNX `fastembed` stack was removed; semantic
         // embedding + reranking are now pure-Rust via frankensearch's `native`
         // feature, kept always-on here (no AVX/ONNX static-init hazard, so no
-        // separate `-baseline` build is needed). The conditional cass `semantic`
-        // feature re-enables the same `native` feature and is validated by
-        // Cargo's own feature graph.
+        // separate `-baseline` build is needed). Bead tg5o9 retired the vacuous
+        // cass `semantic` feature; semantic readiness is now determined solely
+        // by runtime model/vector assets.
         expected_features: &["ann", "hash", "lexical", "native"],
         expected_default_features: Some(false),
         repo_rel: "../frankensearch",
@@ -260,8 +262,6 @@ fn main() {
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-env-changed={STRICT_PATH_DEP_ENV}");
 
-    emit_platform_link_hints();
-
     let manifest_dir = match env::var("CARGO_MANIFEST_DIR") {
         Ok(value) => PathBuf::from(value),
         Err(err) => fatal(format!(
@@ -284,14 +284,6 @@ fn main() {
     let packaged_manifest = manifest_dir.join("Cargo.toml.orig").is_file();
     validate_path_dependency_contracts(&manifest_dir, &manifest, packaged_manifest);
     emit_vergen_metadata();
-}
-
-fn emit_platform_link_hints() {
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
-        // The aarch64-apple-darwin ONNX Runtime static archive used by ort-sys
-        // references CoreML symbols, but ort-sys only emits Foundation today.
-        println!("cargo:rustc-link-lib=framework=CoreML");
-    }
 }
 
 fn validate_path_dependency_contracts(

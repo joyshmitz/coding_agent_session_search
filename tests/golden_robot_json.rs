@@ -1301,6 +1301,22 @@ fn quarantine_clear_shape_matches_golden() {
 }
 
 #[test]
+fn quarantine_retry_shape_matches_golden() {
+    // `cass quarantine retry --json` is the read-only plan by default. An
+    // isolated empty HOME yields a deterministic empty RetryPlan whose schema
+    // freezes the new xaztn robot contract without applying any mutation.
+    let test_home = tempfile::tempdir().expect("create temp home");
+    let retry = capture_robot_json_value(
+        test_home.path(),
+        &["quarantine", "retry", "--json"],
+        ExpectStatus::ExitOk,
+    );
+    let canonical =
+        serde_json::to_string_pretty(&json_value_schema(&retry)).expect("pretty-print JSON");
+    assert_golden("robot/quarantine_retry_shape.json.golden", &canonical);
+}
+
+#[test]
 fn diag_quarantine_json_matches_golden() {
     let test_home = tempfile::tempdir().expect("create temp home");
     let data_dir = seed_diag_quarantine_fixture(test_home.path());

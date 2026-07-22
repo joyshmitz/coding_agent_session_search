@@ -437,7 +437,7 @@ pub fn render_guide_plan(
     };
 
     // --- Steps: carry the macro recipe verbatim, add order + rch target dir. ---
-    let suggested_target_dir = format!("/tmp/cass-{macro_id}-target");
+    let suggested_target_dir = format!("/data/tmp/cass-{macro_id}-target");
     let mut any_offload = false;
     let steps: Vec<Value> = m
         .get("steps")
@@ -813,7 +813,7 @@ mod tests {
         let out = render_guide_plan("fix-ci", None, "live", "live");
         assert_eq!(out["plan"]["rch"]["offload_required"], json!(true));
         let dir = out["plan"]["rch"]["suggested_target_dir"].as_str().unwrap();
-        assert!(dir.starts_with("/tmp/cass-"));
+        assert!(dir.starts_with("/data/tmp/cass-"));
         let forbidden = serde_json::to_string(&out["plan"]["forbidden_shortcuts"]).unwrap();
         assert!(forbidden.contains("build-on-interactive-pane"));
     }

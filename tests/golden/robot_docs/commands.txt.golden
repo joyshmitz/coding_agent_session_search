@@ -102,7 +102,7 @@ commands:
   cass api-version [--json]        Show crate_version + api_version + contract_version.
   cass state [--json]              Alias of `cass status` (index/db/rebuild/semantic readiness).
   cass models status [--json]      Semantic model acquisition + cache state.
-  cass models install [--from-file DIR] [--model NAME]  Download + install embedder (minilm | snowflake-arctic-s | nomic-embed).
+  cass models install [--from-file DIR] [--model minilm]  Download + install the MiniLM embedder.
   cass models remove [--model NAME]  Remove an installed semantic model from disk.
   cass models verify [--json]      Per-file SHA-256 verification of the installed model.
   cass models check-update [--json]  Compare installed revision against the pinned registry revision.

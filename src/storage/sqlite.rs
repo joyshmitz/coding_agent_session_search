@@ -1119,7 +1119,7 @@ const FTS_FRANKEN_REBUILD_META_KEY: &str = "fts_frankensqlite_rebuild_generation
 const FTS_FRANKEN_REBUILD_FINGERPRINT_META_KEY: &str = "fts_frankensqlite_archive_fingerprint";
 const FTS_FRANKEN_REBUILD_GENERATION: i64 = 1;
 /// Exact canonical cardinality driven by the compact parent-rowid domain.
-/// FrankenSQLite 0.1.18 lowers this shape to `CountIndexEqRun`: each real
+/// FrankenSQLite 0.1.19 lowers this shape to `CountIndexEqRun`: each real
 /// conversation rowid counts its complete equality-prefix run in the
 /// `(conversation_id, idx)` uniqueness index without opening the message table,
 /// crossing the Rust row handler per message, or admitting orphan parent IDs.
@@ -3044,7 +3044,7 @@ fn has_db_sidecar_suffix(name: &str) -> bool {
 
 /// Public schema version constant for external checks.
 pub const CURRENT_SCHEMA_VERSION: i64 = 20;
-const MIN_IN_PLACE_MIGRATION_SCHEMA_VERSION: i64 = 13;
+pub(crate) const MIN_IN_PLACE_MIGRATION_SCHEMA_VERSION: i64 = 13;
 
 /// Result of checking schema compatibility.
 #[derive(Debug, Clone)]
@@ -26363,7 +26363,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "blocked on frankensqlite contentless-FTS fix (y8n3i / fsqlite bd-sf8dx): fsqlite 0.1.13 open-validation still demands a _content shadow for a legacy (no content= option) fts_messages schema row, so repair cannot even open; un-ignore via cljkz once fsqlite treats that as recoverable"]
     fn rebuild_fts_via_rusqlite_cleans_duplicate_legacy_schema_rows() {
         use crate::model::types::{Agent, AgentKind, Conversation, Message, MessageRole};
 
@@ -26429,7 +26428,12 @@ mod tests {
         drop(conn);
 
         let inserted = rebuild_fts_via_rusqlite(&db_path).unwrap();
-        assert_eq!(inserted, 1);
+        // The frankensqlite loader now discards the stale rootpage-zero
+        // duplicate while retaining the independently reloadable canonical
+        // FTS5 table. The explicit rebuild therefore observes exact parity
+        // and is a no-op instead of destructively recreating an already
+        // healthy shadow.
+        assert_eq!(inserted, 0);
 
         let conn = FrankenConnection::open(db_path.to_string_lossy().into_owned()).unwrap();
         let schema_rows = franken_fts_schema_rows(&conn).unwrap();
@@ -28883,7 +28887,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "blocked on frankensqlite contentless-FTS fix (y8n3i / fsqlite bd-sf8dx): fsqlite 0.1.13 open-validation still demands a _content shadow for a legacy (no content= option) fts_messages schema row, so repair cannot even open; un-ignore via cljkz once fsqlite treats that as recoverable"]
     fn franken_storage_open_repairs_duplicate_fts_messages_schema_rows() {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("test_open_repairs_duplicate_fts_schema.db");

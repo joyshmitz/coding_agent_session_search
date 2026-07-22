@@ -137,7 +137,7 @@ be silently skipped during closeout.
 ### models
 
 - **Owning beads:** .5, .5.1, .5.5
-- **Failure modes:** fm-models-fastembed-missing, fm-models-onnx-load-failure, fm-models-checksum-mismatch
+- **Failure modes:** fm-models-native-minilm-missing, fm-models-native-load-failure, fm-models-checksum-mismatch
 - **Mandatory proofs:** integration
 - **Proof artifacts:** `tests/cli_model_lifecycle_contract.rs`, `tests/e2e_analytics_models.rs`
 - **Optional diagnostics:** live model download (opt-in; never CI-required)

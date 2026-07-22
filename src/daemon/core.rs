@@ -5,8 +5,8 @@
 
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder};
-use std::io::{Read, Write};
-use std::os::unix::fs::{DirBuilderExt, FileTypeExt, PermissionsExt};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,7 +17,6 @@ use fs2::FileExt;
 use parking_lot::RwLock;
 use tracing::{debug, error, info, warn};
 
-use super::daemon_run_lock_path;
 use super::models::ModelManager;
 use super::protocol::{
     EmbedResponse, EmbeddingJobDetail, EmbeddingJobInfo, ErrorCode, ErrorResponse, FramedMessage,
@@ -26,6 +25,7 @@ use super::protocol::{
 };
 use super::resource::ResourceMonitor;
 use super::worker::{EmbeddingJobConfig, EmbeddingWorker, EmbeddingWorkerHandle};
+use super::{DaemonRunLockMetadata, daemon_run_lock_path};
 
 struct BoundDaemonSocket {
     listener: UnixListener,
@@ -175,6 +175,9 @@ pub struct DaemonConfig {
     pub nice_value: i32,
     /// IO priority class (0-3).
     pub ionice_class: u32,
+    /// Lexical generation visible when this daemon started. Advisory runtime
+    /// metadata only, used to diagnose stale searchers after atomic publish.
+    pub served_generation: Option<u64>,
 }
 
 impl Default for DaemonConfig {
@@ -187,6 +190,7 @@ impl Default for DaemonConfig {
             memory_limit: 0,                      // Unlimited
             nice_value: 10,                       // Low priority
             ionice_class: 2,                      // Best-effort
+            served_generation: None,
         }
     }
 }
@@ -330,7 +334,7 @@ impl ModelDaemon {
         // Use a file lock to ensure only one daemon instance runs for this socket path
         let lock_path = daemon_run_lock_path(&self.config.socket_path);
 
-        let lock_file = match std::fs::OpenOptions::new()
+        let mut lock_file = match std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
@@ -368,6 +372,9 @@ impl ModelDaemon {
                 "Another daemon is already running",
             ));
         }
+
+        write_daemon_run_lock_metadata(&mut lock_file, self.config.served_generation)?;
+        let mut last_lock_heartbeat = Instant::now();
 
         // Apply resource limits
         if !self.resources.apply_nice(self.config.nice_value) {
@@ -436,6 +443,20 @@ impl ModelDaemon {
                         "Daemon memory limit exceeded, shutting down"
                     );
                     break;
+                }
+
+                // Refresh independently of socket idleness. A busy daemon may
+                // accept continuously, but its heartbeat must still reflect a
+                // live owner rather than looking stale under load.
+                if last_lock_heartbeat.elapsed() >= Duration::from_secs(1) {
+                    if let Err(error) = write_daemon_run_lock_metadata(
+                        &mut lock_file,
+                        self.config.served_generation,
+                    ) {
+                        warn!(error = %error, "Failed to refresh daemon run-lock heartbeat");
+                    } else {
+                        last_lock_heartbeat = Instant::now();
+                    }
                 }
 
                 // Accept new connections
@@ -838,6 +859,33 @@ impl ModelDaemon {
     pub fn request_shutdown(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
     }
+}
+
+fn write_daemon_run_lock_metadata(
+    lock_file: &mut std::fs::File,
+    generation: Option<u64>,
+) -> std::io::Result<()> {
+    let file_metadata = lock_file.metadata()?;
+    if !file_metadata.file_type().is_file() || file_metadata.nlink() != 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "refusing to write daemon metadata through a non-regular or multiply-linked run lock",
+        ));
+    }
+    let heartbeat_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or(0);
+    let metadata = DaemonRunLockMetadata {
+        pid: std::process::id(),
+        heartbeat_unix_ms,
+        generation,
+    };
+    let encoded = serde_json::to_vec(&metadata).map_err(std::io::Error::other)?;
+    lock_file.seek(SeekFrom::Start(0))?;
+    lock_file.write_all(&encoded)?;
+    lock_file.set_len(encoded.len() as u64)?;
+    lock_file.flush()
 }
 
 #[cfg(test)]

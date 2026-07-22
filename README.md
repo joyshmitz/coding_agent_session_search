@@ -86,7 +86,7 @@ cass sources agents include openclaw
 - Lexical search is the required fast path. Missing, stale, or incompatible lexical assets are treated as derived-state problems that cass should rebuild from SQLite instead of asking operators to perform routine manual repair.
 - Hybrid is the default search intent. Robot metadata (`--robot --robot-meta`) reports the requested mode, realized mode, semantic refinement status, and any lexical fallback reason when semantic assets are not ready.
 - Semantic assets are opportunistic background enrichment. Lexical-only results are expected during first indexing, semantic catch-up, disabled semantic policy, or unavailable local model/vector files.
-- Semantic model acquisition is **opt-in**: `cass models install` downloads the requested embedder on explicit request; cass never auto-downloads. Three embedders are supported via `--model <name>`: `all-minilm-l6-v2` (alias `minilm`, ~90 MB; the default), `snowflake-arctic-s` (~120 MB), and `nomic-embed` (~270 MB). Air-gapped installs use `--from-file <dir>`. While the chosen model is absent, search silently uses lexical-only and reports `fallback_mode="lexical"` in health/status.
+- Semantic model acquisition is **opt-in**: `cass models install` downloads `all-minilm-l6-v2` (alias `minilm`, ~90 MB) on explicit request; cass never auto-downloads. This is the only embedder topology currently verified by the pure-Rust native backend. Air-gapped installs use `--from-file <dir>`. While it is absent, hybrid search uses lexical-only and reports `fallback_mode="lexical"` in health/status.
 - `cass triage --json` is the safest first command for agents: it combines readiness, `next_command`, `recommended_commands[]`, docs/schema pointers, starter workflows, and accepted recoveries. `cass health --json` and `cass status --json` remain the narrower truth surfaces for readiness, active rebuilds, and recovery.
 
 **Lexical publish durability (atomic-swap)**
@@ -215,7 +215,7 @@ AI coding agents are transforming how we write software. Claude Code, Codex, Cur
 - **Zero-Stall Updates**: The background indexer commits changes atomically; `reader.reload()` ensures new messages appear in the search bar immediately without restarting.
 
 ### 🧠 Optional Semantic Search (Local Inference, No Network at Query Time)
-- **Local inference**: Uses a FastEmbed embedder running ONNX on-device. Once the chosen model is installed, no network traffic is required to answer queries.
+- **Local inference**: Uses frankensearch's pure-Rust native MiniLM implementation with local safetensors weights. Once MiniLM is installed, no network traffic is required to answer queries.
 - **Warm-daemon reuse**: Semantic and hybrid CLI searches automatically use an
   already-running local embedding daemon (including a socket selected with
   `CASS_DAEMON_SOCKET`) and only initialize the installed in-process model if
@@ -225,16 +225,11 @@ AI coding agents are transforming how we write software. Claude Code, Codex, Cur
   when their reported embedder matches the active vector index. The one-shot
   CLI's `--two-tier` output is the final quality result set, while the TUI is
   the surface that displays fast results and refines them in place.
-- **Opt-in acquisition**: `cass models install` downloads the requested embedder from Hugging Face on explicit request and verifies SHA256 checksums. Nothing is fetched until you run the install command. Three embedders are supported:
-  - `all-minilm-l6-v2` — `cass models install --model all-minilm-l6-v2` (alias: `minilm`). 384-dim. ~90 MB. The default; fastest. Best for general English semantic similarity.
-  - `snowflake-arctic-s` — `cass models install --model snowflake-arctic-s`. 384-dim. ~120 MB. Stronger MTEB scores than MiniLM at similar cost; good drop-in replacement for code-heavy corpora.
-  - `nomic-embed` — `cass models install --model nomic-embed` (alias: `nomic-embed-text-v1.5`). 768-dim. ~270 MB. Highest recall on long-context queries; trade off larger index footprint.
+- **Opt-in acquisition**: `cass models install` downloads `all-minilm-l6-v2` from Hugging Face on explicit request and verifies SHA256 checksums. Nothing is fetched until you run the install command. MiniLM is 384-dimensional and about 90 MB; no other embedder topology is currently installable or runnable.
 
-  Removal mirrors install: `cass models remove --model <name>` accepts the same alias set. The same alias map is honored by the daemon embedding worker (see `src/daemon/worker.rs::resolve_embedder_kind`) so background indexing accepts whatever the operator installed.
-
-- **Air-gapped install**: `cass models install --model <name> --from-file <dir>` accepts a pre-downloaded model directory so you can bring the assets in yourself.
+- **Air-gapped install**: `cass models install --model minilm --from-file <dir>` accepts a pre-downloaded MiniLM directory so you can bring the assets in yourself.
 - **Required files** (all must be present after install; `cass models verify` checks them):
-  - `model.onnx`
+  - `model.safetensors`
   - `tokenizer.json`
   - `config.json`
   - `special_tokens_map.json`
@@ -242,9 +237,9 @@ AI coding agents are transforming how we write software. Claude Code, Codex, Cur
 - **Vector index**: Stored as `vector_index/index-<embedder>.fsvi` in the data directory.
 - **Lexical fail-open**: While the model is absent, `cass` returns lexical-only results and reports `fallback_mode="lexical"` in health/status; search never blocks on semantic assets.
 
-#### Hash Embedder Fallback
+#### Explicit Hash Vector Tier
 
-When ML model files are not installed, `cass` uses a deterministic hash-based embedder as a fallback. While not "truly" semantic (it captures lexical overlap rather than meaning), it provides useful functionality:
+The deterministic hash embedder is available only when explicitly selected, such as with `--fast-only`, `--embedder hash`, or `CASS_SEMANTIC_EMBEDDER=hash`. It is a separate lexical-feature vector space, not a silent substitute for missing MiniLM vectors:
 
 | Feature | ML Model (MiniLM) | Hash Embedder (FNV-1a) |
 |---------|-------------------|------------------------|
@@ -263,7 +258,7 @@ When ML model files are not installed, `cass` uses a deterministic hash-based em
 **When to Use**:
 - Quick setup without downloading model files
 - Environments where ML inference overhead is unwanted
-- Fallback when ML model fails to load
+- Fast-tier testing or an explicitly chosen degraded mode
 
 **Override**: Set `CASS_SEMANTIC_EMBEDDER=hash` to force hash mode even when ML model is available.
 
@@ -290,7 +285,7 @@ When ML model files are not installed, `cass` uses a deterministic hash-based em
 
 **Lexical Search**: Uses Tantivy's BM25 implementation with edge n-grams for prefix matching. Best when you know the exact terms you're looking for. The lexical index is derived from SQLite; if it is missing, stale, or incompatible, cass reports the state and rebuilds through the normal indexing path from the canonical database.
 
-**Semantic Search**: Computes vector similarity between query and indexed message embeddings. Finds conceptually related content even without exact term overlap. Requires either the ML model (MiniLM) or falls back to hash embedder.
+**Semantic Search**: Computes vector similarity between query and indexed MiniLM embeddings. Finds conceptually related content even without exact term overlap. Explicit semantic mode requires the MiniLM model and a compatible MiniLM vector index; it never substitutes same-dimensional hash vectors.
 
 **Hybrid Search**: The default. It combines lexical and semantic results using Reciprocal Rank Fusion (RRF) when semantic assets are ready, and it fails open to lexical when semantic enrichment is still catching up or disabled:
 ```
@@ -2793,7 +2788,7 @@ cass models check-update --json
 ```
 
 **Model Files** (stored in `$CASS_DATA_DIR/models/all-MiniLM-L6-v2/`):
-- `model.onnx` - The neural network weights (~90MB)
+- `model.safetensors` - The neural network weights (~90MB)
 - `tokenizer.json` - Vocabulary and tokenization rules
 - `config.json` - Model configuration
 - `special_tokens_map.json` - Special token definitions

@@ -230,3 +230,112 @@ real passing run emits a `pass` artifact while a timeout-before-assertions emits
 `$CASS_PROOF_DIR` artifact files + the exact `cargo test` command above — not
 prose. The lib classifier itself is proven by
 `cargo test --lib proof_artifact` (`test result: ok`).
+
+## 9. Local guided-operations dashboard (`5u82n.12`)
+
+The dashboard is a human-readable, read-only projection over existing robot
+contracts. Render its self-contained offline HTML to stdout:
+
+```sh
+cass swarm dashboard --html > /tmp/cass-operations-dashboard.html
+```
+
+The report has no JavaScript, network dependency, form, apply mode, or file/DB
+mutation path. The shell redirection above is the operator's explicit choice;
+`cass` itself never writes the report. For deterministic test or support
+fixtures, pass `--fixture <path>` (or `--fixture-dir <dir> --fixture-id <id>`).
+
+Agents must not parse the HTML. Consume the underlying JSON contracts directly:
+
+```sh
+cass guide <intent> --json
+cass swarm macros --json
+cass swarm resource-plan --json
+cass swarm privacy-preview --json
+cass swarm repro-capsule --json
+cass search <query> --robot --robot-meta
+cass swarm evidence --json
+```
+
+Use `cass swarm dashboard --json` only when automation needs the normalized
+cross-surface rollup (current goal, blockers, warning counts, recent capsule
+metadata, and the next proof command). Search/session content is never copied
+into that model; trust is metadata-only, paths/secrets are redacted, and local
+capsule links must be safe relative paths.
+
+Proof the fixture adapter, byte-for-byte deterministic HTML, hostile-input
+escaping, long-path behavior, empty/partial/blocked states, redaction, and the
+no-network/no-mutation contract with:
+
+```sh
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-dashboard-target \
+  cargo test --lib operations_dashboard
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-dashboard-target \
+  cargo test --test operations_dashboard_contract
+```
+
+## 10. Integrated guided-operations golden gate (`5u82n.13`)
+
+The capstone gate runs the guided surfaces together against checked-in,
+synthetic fixtures and freezes their composed contract. It writes runtime audit
+artifacts into an isolated temporary directory: stdout, stderr, and parsed JSON
+for each scenario plus redaction, fixture-manifest, timing, and assertion
+summaries. The temporary artifact set is validated during the test; the stable,
+scrubbed robot rollup and reviewed command matrix live under
+`tests/golden/guided_ops/`.
+
+```sh
+rch exec -- env CARGO_TARGET_DIR=/tmp/cass-guided-golden-target \
+  cargo test --test e2e_guided_ops_golden_gate
+```
+
+The pass contract requires an unchanged before/after HOME and data-directory
+snapshot, zero private-marker leaks, robot-safe recommendations, every command
+inside its timing budget, and a full `bv --robot-insights` result with zero
+dependency cycles. Regeneration is opt-in via `UPDATE_GUIDED_OPS_GOLDENS=1` and
+must be followed by byte-level review of both goldens and a second non-update
+run.
+
+## 11. Gated guide apply/run mode (`5u82n.17`)
+
+`cass guide` remains a dry-run unless `--apply` (alias `--run`) is explicit.
+Every recognized plan now includes a deterministic `execution` transcript with
+tokenized argv, allowlist decision, mutation class, rch decision, proof-gate
+result/source, and per-step confirmation evidence. Macro command identifiers are
+never passed to a shell.
+
+Before a mutating adapter can run, apply mode requires ready prerequisites,
+clear stop conditions, exact privacy/cost-tier acceptance where applicable, the
+macro's rch grant, all preceding proof gates, and `--confirm-step <N>` for that
+exact mutation. Confirmations do not carry between steps. Fixture apply is
+permanently non-mutating, even when every grant is present; this is the stable
+way to exercise a fully authorized transcript in tests.
+
+```sh
+# Read-only plan and transcript.
+cass guide support-capsule --json
+
+# Gated live apply. Review the dry-run and resource/privacy surfaces first.
+cass guide support-capsule --apply \
+  --confirm-fact db_present \
+  --accept-privacy-tier redacted \
+  --accept-cost-risk medium \
+  --confirm-stop-conditions-clear \
+  --confirm-step 3 \
+  --json
+```
+
+An apply request can still return `overall_status=blocked` or
+`awaiting-confirmation`; inspect `execution.global_gates[]` and
+`execution.transcript[]` rather than inferring success from the request flag.
+Only the closed, parameter-complete support-capsule mutation adapter is live in
+this slice. Other mutation identifiers remain honestly `adapter-unavailable`
+until they have equally strict typed inputs and rollback/proof coverage.
+
+Proof the real CLI contract, fixture no-mutation guarantee, deterministic
+transcript, and the readiness/privacy/cost/rch/stop/confirmation gates with:
+
+```sh
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-guide-apply-target \
+  cargo test --locked --test e2e_guide_apply_gate
+```

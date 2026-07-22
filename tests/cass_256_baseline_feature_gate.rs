@@ -18,6 +18,51 @@ use coding_agent_search::search::embedder::EmbedderError;
 use coding_agent_search::search::fastembed_embedder::FastEmbedder;
 use coding_agent_search::search::fastembed_reranker::FastEmbedReranker;
 
+const CARGO_MANIFEST: &str = include_str!("../Cargo.toml");
+const BUILD_SCRIPT: &str = include_str!("../build.rs");
+const RELEASE_WORKFLOW: &str = include_str!("../.github/workflows/release.yml");
+const BAKEOFF_VALIDATION_SCRIPT: &str = include_str!("../scripts/bakeoff/cass_validation_e2e.sh");
+const RERANK_E2E_SCRIPT: &str = include_str!("../scripts/bakeoff/cass_rerank_e2e.sh");
+
+#[test]
+fn retired_baseline_build_machinery_does_not_return() -> Result<(), String> {
+    if CARGO_MANIFEST.contains("\nsemantic = [") || CARGO_MANIFEST.contains("\nfastembed =") {
+        return Err(
+            "semantic support must stay native and always compiled, not return as an ONNX-era Cargo feature"
+                .to_string(),
+        );
+    }
+    if BUILD_SCRIPT.contains("emit_platform_link_hints")
+        || BUILD_SCRIPT.contains("rustc-link-lib=framework=CoreML")
+        || BUILD_SCRIPT.contains("CARGO_FEATURE_SEMANTIC")
+    {
+        return Err(
+            "build.rs must not retain ORT/CoreML or semantic-feature linkage machinery".to_string(),
+        );
+    }
+    if RELEASE_WORKFLOW.contains("cass-linux-amd64-baseline")
+        || RELEASE_WORKFLOW.contains("cass-windows-amd64-baseline")
+        || RELEASE_WORKFLOW.contains("matrix.cargo_flags")
+        || RELEASE_WORKFLOW.contains("contains(matrix.asset_name, '-baseline')")
+    {
+        return Err(
+            "release matrix must publish one runtime-dispatched binary per x86_64 platform"
+                .to_string(),
+        );
+    }
+    if BAKEOFF_VALIDATION_SCRIPT.contains("model.onnx")
+        || RERANK_E2E_SCRIPT.contains("model.onnx")
+        || !BAKEOFF_VALIDATION_SCRIPT.contains("model.safetensors")
+        || !RERANK_E2E_SCRIPT.contains("model.safetensors")
+    {
+        return Err(
+            "runnable reranker validation must require native safetensors, not retired ONNX assets"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn cass_256_canonical_name_stable_across_features() {
     // Surface must accept the documented aliases in every build; the

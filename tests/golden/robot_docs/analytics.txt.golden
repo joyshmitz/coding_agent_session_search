@@ -31,8 +31,9 @@ analytics:
 
 ### analytics status
   data.tables: [{ table, exists, row_count, min_day_id, max_day_id, last_updated }]
-  data.coverage: { total_messages, message_metrics_coverage_pct, api_token_coverage_pct,
-                   model_name_coverage_pct, estimate_only_pct }
+  data.coverage: { total_messages, <metric>_pct, <metric>_status, <metric>_display }
+    Metrics: message_metrics_coverage, api_token_coverage, model_name_coverage, estimate_only
+    <metric>_pct is number|null; status preserves true-zero, no-data, schema, and rebuild states.
   data.drift: { signals: [{ signal, detail, severity }], track_a_fresh, track_b_fresh }
   data.recommended_action: string
 
@@ -87,6 +88,9 @@ analytics:
 ## Coverage & Uncertainty Semantics
   - api_token_coverage_pct: % of messages with API token data (from Claude, Codex).
   - estimate_only_pct: % of messages with content-estimated tokens only (chars/4 heuristic).
+  - *_pct is null when no trustworthy number exists; inspect *_status and *_display.
+  - status values: value, true-zero, no-data, aggregate-failed, schema-incompatible,
+    rebuild-required, invalid-input. A true zero is never conflated with missing data.
   - When coverage is low, derived metrics are unreliable estimates, not ground truth.
   - Content token estimates are always available (heuristic); API tokens are sparse.
 

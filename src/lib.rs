@@ -31,6 +31,7 @@ pub mod fleet_upgrade_rehearsal;
 pub mod fleet_version_skew;
 pub mod ftui_harness;
 pub mod guide_planner;
+pub mod guide_runner;
 pub mod html_export;
 pub mod incident_discovery;
 pub mod indexer;
@@ -38,6 +39,7 @@ pub mod lessons;
 pub mod lessons_extraction;
 pub mod metric_integrity;
 pub mod model;
+pub mod operations_dashboard;
 pub mod pages;
 pub mod perf_evidence;
 pub mod policy_registry;
@@ -840,13 +842,16 @@ pub enum Commands {
         #[arg(long, visible_alias = "robot")]
         json: bool,
     },
-    /// Intent-to-command planner for guided safe workflows. Read-only: maps an
+    /// Intent-to-command planner and gated runner for guided safe workflows.
+    /// Dry-run is the default. `--apply` automatically evaluates only closed,
+    /// read-only proof adapters and requires an explicit confirmation for each
+    /// mutating step; macro strings are never evaluated by a shell. Maps an
     /// operator intent (fix-ci, investigate-search-miss, prepare-release,
     /// repair-assets, export-session, onboard-source, support-capsule) to an
     /// exact safe command plan — steps, prerequisites, proof gates, forbidden
     /// shortcuts, rch target-dir hints, cost/risk, privacy notes, and stop
-    /// conditions. Never mutates and never launches a bare TUI. Omit the intent
-    /// to list the known intents.
+    /// conditions. Never launches a bare TUI. Omit the intent to list the known
+    /// intents.
     Guide {
         /// Operator intent to plan (omit to list the known intents). Multiple
         /// words are joined, e.g. `cass guide rebuild index`.
@@ -858,6 +863,34 @@ pub enum Commands {
         /// Override data dir
         #[arg(long)]
         data_dir: Option<PathBuf>,
+        /// Enter gated apply mode (`--run` is an alias). Without this flag the
+        /// transcript is a deterministic, fully read-only dry-run.
+        #[arg(long, visible_alias = "run", default_value_t = false)]
+        apply: bool,
+        /// Confirm one exact mutating step number. Repeat for multiple steps;
+        /// confirmation never carries across steps.
+        #[arg(long, value_delimiter = ',')]
+        confirm_step: Vec<usize>,
+        /// Confirm an operator-context preflight fact as true. Repeatable; the
+        /// confirmation is recorded in the robot transcript.
+        #[arg(long)]
+        confirm_fact: Vec<String>,
+        /// Accept the exact declared privacy tier (`redacted` or `sensitive`).
+        /// A generic yes is intentionally not accepted.
+        #[arg(long)]
+        accept_privacy_tier: Option<String>,
+        /// Accept the exact declared cost-risk band (`medium` or `high`) after
+        /// reviewing the resource what-if result.
+        #[arg(long)]
+        accept_cost_risk: Option<String>,
+        /// Permit steps whose macro policy requires rch offload. This does not
+        /// permit a shell or an unallowlisted executable.
+        #[arg(long, default_value_t = false)]
+        allow_rch: bool,
+        /// Assert that every declared stop condition was checked and is clear.
+        /// An observed triggered stop condition always wins over this assertion.
+        #[arg(long, default_value_t = false)]
+        confirm_stop_conditions_clear: bool,
         /// Output as JSON (for automation)
         #[arg(long, visible_alias = "robot")]
         json: bool,
@@ -1567,9 +1600,9 @@ pub enum QuarantineCommand {
         json: bool,
     },
     /// Re-attempt retry-eligible quarantined conversations (bounded; dry-run by
-    /// default). Clears eligible (legacy / version-stale) entries so they are
-    /// re-ingested on the next `cass index` pass; irreducible same-version
-    /// entries are reported but never cleared unless `--force-irreducible`.
+    /// default). Apply reparses each exact source conversation and clears it
+    /// only after persistence succeeds; irreducible same-version entries are
+    /// reported but never attempted unless `--force-irreducible`.
     Retry {
         /// Override data dir
         #[arg(long)]
@@ -1586,8 +1619,8 @@ pub enum QuarantineCommand {
         #[arg(long, default_value_t = false)]
         force_irreducible: bool,
 
-        /// Actually clear eligible entries so the next index re-ingests them.
-        /// Without this, runs as a dry-run (classify only).
+        /// Targeted re-ingest eligible entries now. Without this, emit a
+        /// read-only retry plan.
         #[arg(long, default_value_t = false)]
         apply: bool,
 
@@ -1908,6 +1941,28 @@ pub enum SwarmCommand {
         fixture: Option<PathBuf>,
 
         /// Read provider input from a swarm fixture directory.
+        #[arg(long, value_hint = ValueHint::DirPath)]
+        fixture_dir: Option<PathBuf>,
+
+        /// Fixture id within --fixture-dir. Defaults to healthy for the pinned command shape.
+        #[arg(long, default_value = "healthy")]
+        fixture_id: String,
+    },
+    /// Render a local read-only operations dashboard over guided-workflow robot JSON.
+    Dashboard {
+        /// Output the normalized dashboard model as JSON (`--robot` also works).
+        #[arg(long, visible_alias = "robot", conflicts_with = "html")]
+        json: bool,
+
+        /// Output a self-contained offline HTML report to stdout.
+        #[arg(long, conflicts_with = "json")]
+        html: bool,
+
+        /// Read child robot payloads from a single swarm fixture file.
+        #[arg(long, value_hint = ValueHint::FilePath, conflicts_with = "fixture_dir")]
+        fixture: Option<PathBuf>,
+
+        /// Read child robot payloads from a swarm fixture directory.
         #[arg(long, value_hint = ValueHint::DirPath)]
         fixture_dir: Option<PathBuf>,
 
@@ -7513,6 +7568,13 @@ async fn execute_cli(
                     intent,
                     fixture,
                     data_dir,
+                    apply,
+                    confirm_step,
+                    confirm_fact,
+                    accept_privacy_tier,
+                    accept_cost_risk,
+                    allow_rch,
+                    confirm_stop_conditions_clear,
                     json,
                 } => {
                     let structured_format = resolve_subcommand_structured_format(cli, json);
@@ -7522,6 +7584,13 @@ async fn execute_cli(
                         &data_dir,
                         cli.db.clone(),
                         structured_format,
+                        apply,
+                        &confirm_step,
+                        &confirm_fact,
+                        accept_privacy_tier.as_deref(),
+                        accept_cost_risk.as_deref(),
+                        allow_rch,
+                        confirm_stop_conditions_clear,
                     )?;
                 }
                 Commands::Doctor {
@@ -8083,8 +8152,8 @@ fn run_quarantine_command(cmd: QuarantineCommand, cli: &Cli) -> CliResult<()> {
 }
 
 /// `cass quarantine retry`: a bounded, resumable retry of retry-eligible
-/// quarantined conversations (#292 ask #3). Dry-run by default; `--apply` clears
-/// eligible entries so the next `cass index` re-ingests them.
+/// quarantined conversations (#292 ask #3). Dry-run emits the exact plan;
+/// `--apply` reparses and persists each planned conversation by quarantine key.
 fn run_quarantine_retry_command(
     data_dir_override: Option<PathBuf>,
     max_attempts: Option<usize>,
@@ -8098,17 +8167,56 @@ fn run_quarantine_retry_command(
         eligible_only: !force_irreducible,
     };
 
-    let report =
-        crate::indexer::run_quarantine_retry(&data_dir, &config, apply).map_err(|err| {
-            CliError {
-                code: 9,
-                kind: "quarantine",
-                message: format!("quarantine retry failed: {err}"),
-                hint: Some(
-                    "Run `cass quarantine list --json` to inspect entries, then retry.".to_string(),
-                ),
-                retryable: false,
+    if !apply {
+        let plan = crate::indexer::plan_quarantine_retry(&data_dir, &config);
+        let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
+            if matches!(fmt, RobotFormat::Sessions) {
+                RobotFormat::Compact
+            } else {
+                fmt
             }
+        });
+        if let Some(fmt) = structured_format {
+            let mut payload = serde_json::to_value(&plan).unwrap_or_else(|_| serde_json::json!({}));
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("schema_version".to_string(), serde_json::json!(1));
+                obj.insert("applied".to_string(), serde_json::json!(false));
+                obj.insert("dry_run".to_string(), serde_json::json!(true));
+                obj.insert(
+                    "data_dir".to_string(),
+                    serde_json::json!(data_dir.display().to_string()),
+                );
+            }
+            return output_structured_value(payload, fmt);
+        }
+
+        println!("CASS Quarantine Retry");
+        println!("=====================");
+        println!();
+        println!("Mode: dry-run (read-only plan)");
+        println!();
+        println!("{}", plan.summary);
+        println!(
+            "  planned attempts: {}, irreducible: {}, source-missing: {}",
+            plan.planned_attempts, plan.skip_irreducible, plan.skip_source_missing
+        );
+        if plan.resume_recommended {
+            println!("  (budget reached — re-run to plan the remaining eligible entries)");
+        }
+        println!();
+        println!("Next: {}", plan.next_safe_command);
+        return Ok(());
+    }
+
+    let report =
+        crate::indexer::run_quarantine_retry(&data_dir, &config, true).map_err(|err| CliError {
+            code: 9,
+            kind: "quarantine",
+            message: format!("quarantine retry failed: {err}"),
+            hint: Some(
+                "Run `cass quarantine list --json` to inspect entries, then retry.".to_string(),
+            ),
+            retryable: false,
         })?;
 
     let structured_format = output_format.or_else(robot_format_from_env).map(|fmt| {
@@ -8123,8 +8231,8 @@ fn run_quarantine_retry_command(
         let mut payload = serde_json::to_value(&report).unwrap_or_else(|_| serde_json::json!({}));
         if let Some(obj) = payload.as_object_mut() {
             obj.insert("schema_version".to_string(), serde_json::json!(1));
-            obj.insert("applied".to_string(), serde_json::json!(apply));
-            obj.insert("dry_run".to_string(), serde_json::json!(!apply));
+            obj.insert("applied".to_string(), serde_json::json!(true));
+            obj.insert("dry_run".to_string(), serde_json::json!(false));
             obj.insert(
                 "data_dir".to_string(),
                 serde_json::json!(data_dir.display().to_string()),
@@ -8136,36 +8244,13 @@ fn run_quarantine_retry_command(
     println!("CASS Quarantine Retry");
     println!("=====================");
     println!();
-    println!(
-        "Mode: {}",
-        if apply {
-            "APPLY (clears eligible entries for re-ingest on next index)"
-        } else {
-            "dry-run (classify only)"
-        }
-    );
+    println!("Mode: {}", "APPLY (targeted re-ingest by quarantine key)");
     println!();
     println!("{}", report.summary);
-    if apply {
-        println!(
-            "  cleared (eligible): {}, remaining quarantined: {}",
-            report.cleared, report.remaining_quarantined
-        );
-    } else {
-        println!(
-            "  eligible for retry: {}, irreducible: {}, source-missing: {}",
-            report
-                .entries
-                .iter()
-                .filter(|e| matches!(
-                    e.outcome,
-                    crate::indexer::quarantine_retry::RetryOutcome::RetriedCleared
-                ))
-                .count(),
-            report.skipped_irreducible,
-            report.skipped_source_missing
-        );
-    }
+    println!(
+        "  re-ingested and cleared: {}, remaining quarantined: {}",
+        report.cleared, report.remaining_quarantined
+    );
     if report.resume_recommended {
         println!("  (budget reached — re-run to resume the remaining eligible entries)");
     }
@@ -8692,7 +8777,7 @@ fn parse_size_bytes(raw: &str) -> std::result::Result<u64, CliError> {
 // (coding_agent_session_search-guided-ops-repro-trust-5u82n.4)
 //
 // Lessons are a derived, advisory surface: local evidence (landed commit
-// summaries in live mode; commits/beads/proofs in fixture mode) is classified
+// summaries, closed beads, and proof records) is classified
 // and redacted by `crate::lessons_extraction`, then reduced to distinct,
 // supersession-resolved records by `crate::lessons::LessonGraph`. The command
 // is read-only and never mutates user data.
@@ -8748,12 +8833,22 @@ fn load_lessons_evidence(path: &Path) -> CliResult<crate::lessons_extraction::Le
     })
 }
 
-/// Gather live lessons evidence from the local repository: landed commit
-/// summaries (the most universally available, stable signal). Richer live bead
-/// and proof mining is a scoped follow-on; the extraction core already supports
-/// all three sources and fixture mode exercises them.
+/// Gather live lessons evidence from the local repository.
+///
+/// This is deliberately metadata-first: beads contribute only their lifecycle
+/// metadata, titles, and close reasons; proof records contribute only names,
+/// outcomes, commands, and timestamps. Raw session text and proof stdout/stderr
+/// artifacts are never read. Closed-session mining remains optional because the
+/// canonical cass database is user history rather than repository metadata.
 fn gather_live_lessons_evidence() -> crate::lessons_extraction::LessonsEvidence {
     let repo = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    gather_repository_lessons_evidence(&repo)
+}
+
+/// Gather the same metadata-first evidence as live mode from an explicit
+/// repository root. The trust-correlation layer reuses this helper so lesson
+/// citations and `cass lessons` always derive identical content-stable ids.
+fn gather_repository_lessons_evidence(repo: &Path) -> crate::lessons_extraction::LessonsEvidence {
     let project = repo
         .file_name()
         .and_then(|n| n.to_str())
@@ -8761,10 +8856,183 @@ fn gather_live_lessons_evidence() -> crate::lessons_extraction::LessonsEvidence 
         .unwrap_or_else(|| "cass".to_string());
     crate::lessons_extraction::LessonsEvidence {
         project,
-        commits: gather_git_commit_evidence(&repo, 500),
-        beads: Vec::new(),
-        proofs: Vec::new(),
+        commits: gather_git_commit_evidence(repo, 500),
+        beads: gather_closed_bead_evidence(&repo.join(".beads/issues.jsonl")),
+        proofs: gather_proof_evidence(&repo.join(".cass/proofs/proof-manifest.jsonl")),
     }
+}
+
+/// Parse an RFC3339 timestamp into non-negative epoch milliseconds.
+fn lessons_rfc3339_millis(value: Option<&str>) -> u64 {
+    value
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .and_then(|value| u64::try_from(value.timestamp_millis()).ok())
+        .unwrap_or(0)
+}
+
+/// Best-effort read of closed Beads. A malformed line is ignored rather than
+/// making the advisory lessons surface unavailable.
+fn gather_closed_bead_evidence(path: &Path) -> Vec<crate::lessons_extraction::BeadEvidence> {
+    let Ok(body) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    body.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|bead| {
+            bead.get("status")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|status| status.eq_ignore_ascii_case("closed"))
+        })
+        .filter_map(|bead| {
+            let id = bead.get("id")?.as_str()?.trim();
+            if id.is_empty() {
+                return None;
+            }
+            let closed_at = bead.get("closed_at").and_then(serde_json::Value::as_str);
+            let updated_at = bead.get("updated_at").and_then(serde_json::Value::as_str);
+            Some(crate::lessons_extraction::BeadEvidence {
+                id: id.to_string(),
+                title: bead
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                close_reason: bead
+                    .get("close_reason")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                issue_type: bead
+                    .get("issue_type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                status: "closed".to_string(),
+                labels: bead
+                    .get("labels")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect(),
+                updated_ms: lessons_rfc3339_millis(closed_at)
+                    .max(lessons_rfc3339_millis(updated_at)),
+            })
+        })
+        .collect()
+}
+
+/// File modification time supplies freshness for lightweight `ProofRun`
+/// artifacts, whose schema intentionally records durations rather than a wall
+/// clock timestamp.
+fn lessons_file_modified_millis(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+/// Convert one lightweight proof-manifest entry into lesson evidence. Only the
+/// sibling proof JSON named by the entry is opened; paths embedded in a
+/// manifest cannot escape its directory.
+fn lightweight_proof_evidence(
+    manifest_path: &Path,
+    entry: &serde_json::Value,
+) -> Option<crate::lessons_extraction::ProofEvidence> {
+    let label = entry.get("label")?.as_str()?.trim();
+    if label.is_empty() {
+        return None;
+    }
+    let manifest_dir = manifest_path.parent()?;
+    let artifact_name = Path::new(entry.get("path")?.as_str()?).file_name()?;
+    let artifact_path = manifest_dir.join(artifact_name);
+    let artifact_is_local_regular = std::fs::symlink_metadata(&artifact_path)
+        .ok()
+        .is_some_and(|meta| meta.is_file() && !meta.file_type().is_symlink());
+    let artifact = artifact_is_local_regular
+        .then(|| std::fs::read_to_string(&artifact_path).ok())
+        .flatten()
+        .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok());
+    let status = artifact
+        .as_ref()
+        .and_then(|value| value.get("status"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| entry.get("status").and_then(serde_json::Value::as_str))
+        .unwrap_or("unknown");
+    let command = artifact
+        .as_ref()
+        .and_then(|value| value.pointer("/run/command"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| entry.get("command").and_then(serde_json::Value::as_str))
+        .unwrap_or_default();
+    let artifact_timestamp = if artifact_is_local_regular {
+        lessons_file_modified_millis(&artifact_path)
+    } else {
+        0
+    };
+    Some(crate::lessons_extraction::ProofEvidence {
+        name: label.to_string(),
+        status: status.to_string(),
+        command: command.to_string(),
+        timestamp_ms: artifact_timestamp.max(lessons_file_modified_millis(manifest_path)),
+    })
+}
+
+/// Convert one heavyweight `.12.3` proof-log record into lesson evidence. The
+/// parsed stdout/stderr JSON and artifact files are intentionally ignored.
+fn structured_proof_evidence(
+    entry: &serde_json::Value,
+) -> Option<crate::lessons_extraction::ProofEvidence> {
+    let name = entry
+        .get("scenario_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| entry.get("command_id").and_then(serde_json::Value::as_str))?
+        .trim();
+    if name.is_empty() {
+        return None;
+    }
+    let status = entry.get("outcome")?.as_str()?;
+    let command = entry
+        .pointer("/execution/argv")
+        .and_then(serde_json::Value::as_array)
+        .map(|argv| {
+            argv.iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default();
+    Some(crate::lessons_extraction::ProofEvidence {
+        name: name.to_string(),
+        status: status.to_string(),
+        command,
+        timestamp_ms: entry
+            .get("finished_at_ms")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|timestamp| u64::try_from(timestamp).ok())
+            .unwrap_or(0),
+    })
+}
+
+/// Best-effort read of the canonical repository-local proof manifest. Supports
+/// both lightweight `EmittedProof` entries and heavyweight `.12.3` records.
+fn gather_proof_evidence(path: &Path) -> Vec<crate::lessons_extraction::ProofEvidence> {
+    let Ok(body) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    body.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter_map(|entry| {
+            if entry.get("scenario_id").is_some() {
+                structured_proof_evidence(&entry)
+            } else {
+                lightweight_proof_evidence(path, &entry)
+            }
+        })
+        .collect()
 }
 
 /// Best-effort read of the last `max` non-merge commit subjects from `repo`.
@@ -9295,6 +9563,20 @@ fn run_swarm_command(cmd: SwarmCommand, cli: &Cli) -> CliResult<()> {
         } => run_swarm_repro_capsule(
             cli,
             json,
+            fixture.as_deref(),
+            fixture_dir.as_deref(),
+            &fixture_id,
+        ),
+        SwarmCommand::Dashboard {
+            json,
+            html,
+            fixture,
+            fixture_dir,
+            fixture_id,
+        } => run_swarm_dashboard(
+            cli,
+            json,
+            html,
             fixture.as_deref(),
             fixture_dir.as_deref(),
             &fixture_id,
@@ -10111,6 +10393,79 @@ fn run_swarm_repro_capsule(
         {
             println!("Capsule: {id}");
         }
+    }
+
+    Ok(())
+}
+
+fn run_swarm_dashboard(
+    cli: &Cli,
+    json: bool,
+    html: bool,
+    fixture: Option<&Path>,
+    fixture_dir: Option<&Path>,
+    fixture_id: &str,
+) -> CliResult<()> {
+    let structured_format = resolve_subcommand_structured_format(cli, json).map(|fmt| {
+        if matches!(fmt, RobotFormat::Sessions) {
+            RobotFormat::Compact
+        } else {
+            fmt
+        }
+    });
+
+    if html && structured_format.is_some() {
+        return Err(CliError {
+            code: 2,
+            kind: CliErrorKind::Usage.kind_str(),
+            message: "--html cannot be combined with a structured --format".to_string(),
+            hint: Some(
+                "Use `cass swarm dashboard --html` or `cass swarm dashboard --json`, not both."
+                    .to_string(),
+            ),
+            retryable: false,
+        });
+    }
+
+    let payload = if let Some(path) = resolve_swarm_fixture_path(fixture, fixture_dir, fixture_id)?
+    {
+        let set = crate::swarm_status::FixtureSwarmAdapterSet::from_fixture_path(&path).map_err(
+            |err| CliError {
+                code: 10,
+                kind: CliErrorKind::Config.kind_str(),
+                message: err.to_string(),
+                hint: Some("Use --fixture <file> or --fixture-dir <dir> --fixture-id <id> with a checked-in swarm fixture.".to_string()),
+                retryable: false,
+            },
+        )?;
+        let source = set
+            .input()
+            .source_value(crate::swarm_status::SwarmProviderName::OperationsDashboard);
+        crate::operations_dashboard::render_operations_dashboard_fixture(
+            set.input().fixture_id(),
+            source,
+        )
+    } else {
+        crate::operations_dashboard::render_operations_dashboard_live()
+    };
+
+    if html {
+        print!(
+            "{}",
+            crate::operations_dashboard::render_operations_dashboard_html(&payload)
+        );
+    } else if let Some(fmt) = structured_format {
+        output_structured_value(payload, fmt)?;
+    } else {
+        println!(
+            "Operations dashboard: {}",
+            payload
+                .get("summary")
+                .and_then(|summary| summary.get("recommended_action"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("inspect-underlying-json-surfaces")
+        );
+        println!("Use --html for the offline report or --json for the underlying model.");
     }
 
     Ok(())
@@ -13130,8 +13485,8 @@ fn swarm_proof_debt_remediation(
             }
             "missing-proof" | "missing-rch-proof" | "incomplete-proof-command-set"
             | "stale-proof" => vec![
-                "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-proof-debt-target cargo check --all-targets".to_string(),
-                "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-proof-debt-target cargo test --test swarm_status_contract -- --nocapture".to_string(),
+                "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-proof-debt-target cargo check --all-targets".to_string(),
+                "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-proof-debt-target cargo test --test swarm_status_contract -- --nocapture".to_string(),
             ],
             _ => vec![format!(
                 "cass swarm evidence --json --bead {safe_subject}"
@@ -14487,7 +14842,7 @@ fn swarm_work_packet_verification(
             "proof summary in bead closeout"
         ],
         "rch_required": rch_required,
-        "target_dir_hint": if rch_required { "/tmp/cass-work-packet-target" } else { "" },
+        "target_dir_hint": if rch_required { "/data/tmp/cass-work-packet-target" } else { "" },
         "full_gate_required": swarm_work_packet_full_gate_required(&file_classes),
         "rationale": if build_pressure == "high" {
             "Defer expensive verification until build pressure drops; keep commands for the later proof pass."
@@ -14983,6 +15338,7 @@ fn swarm_work_packet_generated_artifact_path(path: &str) -> bool {
         || lower.starts_with("target/")
         || lower.contains("/target/")
         || lower.starts_with("/tmp/cass-")
+        || lower.starts_with("/data/tmp/cass-")
         || lower.contains("cargo_target_dir")
         || lower.ends_with(".profraw")
 }
@@ -15268,35 +15624,35 @@ fn swarm_work_packet_verification_commands(
     if has_class("swarm-contract") {
         commands.push(swarm_work_packet_command_step(
             "focused-swarm-contract",
-            "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-swarm-work-packet-target cargo test --test swarm_status_contract -- --nocapture",
+            "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-swarm-work-packet-target cargo test --test swarm_status_contract -- --nocapture",
             "Swarm work-packet/status contract changed or is directly relevant.",
         ));
     }
     if has_class("golden-json") {
         commands.push(swarm_work_packet_command_step(
             "robot-golden-contract",
-            "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-golden-target cargo test --test golden_robot_json --test golden_robot_docs",
+            "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-golden-target cargo test --test golden_robot_json --test golden_robot_docs",
             "Robot JSON or robot docs contracts need deterministic golden coverage.",
         ));
     }
     if has_class("docs") && !has_class("golden-json") {
         commands.push(swarm_work_packet_command_step(
             "robot-docs-contract",
-            "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-docs-target cargo test --test golden_robot_docs",
+            "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-docs-target cargo test --test golden_robot_docs",
             "Documentation changes that touch robot-facing help should keep docs goldens stable.",
         ));
     }
     if has_class("sibling-dependency") {
         commands.push(swarm_work_packet_command_step(
             "sibling-dependency-contract",
-            "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-strict-target cargo check --features strict-path-dep-validation",
+            "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-strict-target cargo check --features strict-path-dep-validation",
             "Sibling dependency pins or build.rs contract checks changed.",
         ));
     }
     if has_class("ui-snapshot") {
         commands.push(swarm_work_packet_command_step(
             "tui-snapshot-contract",
-            "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-tui-target cargo test --test tui_flows",
+            "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-tui-target cargo test --test tui_flows",
             "TUI flow or snapshot surface changed.",
         ));
     }
@@ -15313,17 +15669,17 @@ fn swarm_work_packet_verification_commands(
     if code_changed {
         commands.push(swarm_work_packet_command_step(
             "cargo-check-all-targets",
-            "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target cargo check --all-targets",
+            "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-check-target cargo check --all-targets",
             "Rust code or tests changed; compile every target before closeout.",
         ));
         commands.push(swarm_work_packet_command_step(
             "clippy-all-targets",
-            "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target cargo clippy --all-targets -- -D warnings",
+            "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-check-target cargo clippy --all-targets -- -D warnings",
             "Repo gate treats warnings as errors.",
         ));
         commands.push(swarm_work_packet_command_step(
             "fmt-check",
-            "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target cargo fmt --check",
+            "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-check-target cargo fmt --check",
             "Formatting must stay stable.",
         ));
     }
@@ -15577,7 +15933,7 @@ mod swarm_status_cli_tests {
                             "kind": "rch-test",
                             "bead_id": "cass-proof-1",
                             "commit_id": "abc123",
-                            "command_shape": "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-proof cargo test --test cli_robot",
+                            "command_shape": "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-proof cargo test --test cli_robot",
                             "status": "passed",
                             "remote_exit_status": 0,
                             "changed_paths": ["src/lib.rs", "tests/cli_robot.rs"],
@@ -17763,13 +18119,10 @@ fn state_meta_json_for_status(
 /// does (bead qfswx, follow-on to vl1cj's doctor wiring). Returns the report as
 /// a JSON value (`null` only if serialization somehow fails).
 ///
-/// Derivable here WITHOUT the deep PRAGMA integrity probe the doctor owns:
-/// `ok` / `openread_failed` / `derived_only_drift` / `unknown_deferred`. A DB
-/// file that exists but did not open is treated as an openread fault regardless
-/// of the open error's retry hint — over-coarsening a transient busy lock to
-/// the same high-risk state is the conservative direction. Refining
-/// busy/locked, schema-drift, legacy-interop and WAL-sidecar into their precise
-/// states needs dedicated probes (the part-2 follow-on of qfswx).
+/// The shared db-open/index signals derive the coarse readiness state first;
+/// bounded dedicated probes then refine typed contention, on-disk schema drift,
+/// legacy layouts, and structurally suspect WAL/SHM sidecars. Generic
+/// `CliError.retryable` is never used to infer busy/locked.
 fn storage_integrity_value_from_state(
     data_dir: &Path,
     db_path: &Path,
@@ -17777,8 +18130,8 @@ fn storage_integrity_value_from_state(
     not_initialized: bool,
 ) -> serde_json::Value {
     use crate::search::storage_integrity::{
-        DoctorStorageSignals, build_readiness_storage_integrity,
-        load_matching_integrity_attestation,
+        DoctorStorageSignals, apply_dedicated_storage_probe, build_readiness_storage_integrity,
+        load_matching_integrity_attestation, probe_dedicated_storage_state,
     };
     let db_file_present = db_path.exists();
     let db_opened = state
@@ -17810,11 +18163,10 @@ fn storage_integrity_value_from_state(
     // fingerprint-still-valid doctor/index quick_check verdict projects its
     // real pass/fail outcome with cached provenance.
     let attestation = load_matching_integrity_attestation(data_dir, db_path);
-    serde_json::to_value(build_readiness_storage_integrity(
-        signals,
-        attestation.as_ref(),
-    ))
-    .unwrap_or(serde_json::Value::Null)
+    let report = build_readiness_storage_integrity(signals, attestation.as_ref());
+    let dedicated = probe_dedicated_storage_state(db_path, Duration::from_millis(100));
+    serde_json::to_value(apply_dedicated_storage_probe(report, dedicated))
+        .unwrap_or(serde_json::Value::Null)
 }
 
 #[cfg(test)]
@@ -19913,6 +20265,9 @@ fn is_robot_mode(command: &Commands, cli: &Cli) -> bool {
         Commands::Swarm(SwarmCommand::ReproCapsule { json, .. }) => {
             resolve_subcommand_structured_format(cli, *json).is_some()
         }
+        Commands::Swarm(SwarmCommand::Dashboard { json, .. }) => {
+            resolve_subcommand_structured_format(cli, *json).is_some()
+        }
         Commands::Models(ModelsCommand::Status { json }) => {
             resolve_subcommand_structured_format(cli, *json).is_some()
         }
@@ -20317,7 +20672,7 @@ fn print_robot_docs(topic: RobotTopic, wrap: WrapConfig) -> CliResult<()> {
             "  cass api-version [--json]        Show crate_version + api_version + contract_version.".to_string(),
             "  cass state [--json]              Alias of `cass status` (index/db/rebuild/semantic readiness).".to_string(),
             "  cass models status [--json]      Semantic model acquisition + cache state.".to_string(),
-            "  cass models install [--from-file DIR] [--model NAME]  Download + install embedder (minilm | snowflake-arctic-s | nomic-embed).".to_string(),
+            "  cass models install [--from-file DIR] [--model minilm]  Download + install the MiniLM embedder.".to_string(),
             "  cass models remove [--model NAME]  Remove an installed semantic model from disk.".to_string(),
             "  cass models verify [--json]      Per-file SHA-256 verification of the installed model.".to_string(),
             "  cass models check-update [--json]  Compare installed revision against the pinned registry revision.".to_string(),
@@ -20711,8 +21066,9 @@ fn render_analytics_docs() -> Vec<String> {
         String::new(),
         "### analytics status".into(),
         "  data.tables: [{ table, exists, row_count, min_day_id, max_day_id, last_updated }]".into(),
-        "  data.coverage: { total_messages, message_metrics_coverage_pct, api_token_coverage_pct,".into(),
-        "                   model_name_coverage_pct, estimate_only_pct }".into(),
+        "  data.coverage: { total_messages, <metric>_pct, <metric>_status, <metric>_display }".into(),
+        "    Metrics: message_metrics_coverage, api_token_coverage, model_name_coverage, estimate_only".into(),
+        "    <metric>_pct is number|null; status preserves true-zero, no-data, schema, and rebuild states.".into(),
         "  data.drift: { signals: [{ signal, detail, severity }], track_a_fresh, track_b_fresh }".into(),
         "  data.recommended_action: string".into(),
         String::new(),
@@ -20767,6 +21123,9 @@ fn render_analytics_docs() -> Vec<String> {
         "## Coverage & Uncertainty Semantics".into(),
         "  - api_token_coverage_pct: % of messages with API token data (from Claude, Codex).".into(),
         "  - estimate_only_pct: % of messages with content-estimated tokens only (chars/4 heuristic).".into(),
+        "  - *_pct is null when no trustworthy number exists; inspect *_status and *_display.".into(),
+        "  - status values: value, true-zero, no-data, aggregate-failed, schema-incompatible,".into(),
+        "    rebuild-required, invalid-input. A true zero is never conflated with missing data.".into(),
         "  - When coverage is low, derived metrics are unreliable estimates, not ground truth.".into(),
         "  - Content token estimates are always available (heuristic); API tokens are sparse.".into(),
         String::new(),
@@ -21312,20 +21671,40 @@ fn search_lexical_self_heal_diagnosis(
             "lexical checkpoint page-size contract is incompatible with this cass binary",
         )));
     }
-    let current_storage_fingerprint =
-        crate::indexer::lexical_storage_fingerprint_for_db(db_path).map_err(|e| CliError {
-            code: 5,
-            kind: CliErrorKind::StorageFingerprint.kind_str(),
-            message: format!(
-                "failed to fingerprint cass database {} while validating lexical assets: {e}",
-                db_path.display()
-            ),
-            hint: Some(
-                "cass will rebuild the derived lexical index after the canonical database can be fingerprinted"
-                    .to_string(),
-            ),
-            retryable: true,
-        })?;
+    let current_storage_fingerprint = match crate::indexer::lexical_storage_fingerprint_for_db(
+        db_path,
+    ) {
+        Ok(fingerprint) => fingerprint,
+        Err(err) => {
+            let dedicated = crate::search::storage_integrity::probe_dedicated_storage_state(
+                db_path,
+                Duration::from_millis(100),
+            );
+            if dedicated.busy_or_locked {
+                return Ok(Some(SearchLexicalSelfHealDiagnosis::existing_index(
+                    "canonical database is busy or locked; using the existing readable lexical index and deferring validation",
+                )));
+            }
+            if dedicated.wal_sidecar_suspect && dedicated.main_db_header_plausible {
+                return Ok(Some(SearchLexicalSelfHealDiagnosis::existing_index(
+                    "canonical database has a structurally suspect WAL/SHM sidecar; using the existing readable lexical index and deferring validation",
+                )));
+            }
+            return Err(CliError {
+                    code: 5,
+                    kind: CliErrorKind::StorageFingerprint.kind_str(),
+                    message: format!(
+                        "failed to fingerprint cass database {} while validating lexical assets: {err}",
+                        db_path.display()
+                    ),
+                    hint: Some(
+                        "cass will rebuild the derived lexical index after the canonical database can be fingerprinted"
+                            .to_string(),
+                    ),
+                    retryable: true,
+            });
+        }
+    };
     if !crate::search::asset_state::lexical_storage_fingerprints_match(
         &current_storage_fingerprint,
         &checkpoint.storage_fingerprint,
@@ -25532,6 +25911,7 @@ fn trust_value_for_hit(
         if !link.is_empty() {
             ctx.outcome = link.outcome;
             ctx.linked_closed_bead = link.linked_closed_bead;
+            ctx.linked_lessons = link.linked_lessons;
             if let Some(commit) = link.linked_commit {
                 ctx.release_tag = correlation.release_tag_for_commit(&commit);
                 ctx.linked_commit = Some(commit);
@@ -26129,6 +26509,7 @@ fn output_robot_results(
                         "hits": result.cache_stats.cache_hits,
                         "misses": result.cache_stats.cache_miss,
                         "shortfall": result.cache_stats.cache_shortfall,
+                        "outcomes": result.cache_stats.searcher_cache,
                         "prewarm_scheduled": result.cache_stats.prewarm_scheduled,
                         "prewarm_skipped_pressure": result.cache_stats.prewarm_skipped_pressure,
                     },
@@ -26268,6 +26649,7 @@ fn output_robot_results(
                             "hits": result.cache_stats.cache_hits,
                             "misses": result.cache_stats.cache_miss,
                             "shortfall": result.cache_stats.cache_shortfall,
+                            "outcomes": result.cache_stats.searcher_cache,
                             "prewarm_scheduled": result.cache_stats.prewarm_scheduled,
                             "prewarm_skipped_pressure": result.cache_stats.prewarm_skipped_pressure,
                         },
@@ -69081,8 +69463,7 @@ fn gather_onboarding_observation(
     }
 }
 
-/// Human-readable onboarding summary (never a bare TUI). The rich interactive
-/// wizard shell is the dependent bead 5u82n.16.
+/// Human-readable onboarding summary (never a bare TUI).
 fn print_onboarding_human(
     report: &crate::source_onboarding::OnboardingReport,
     observation: &crate::source_onboarding::OnboardingObservation,
@@ -69132,10 +69513,108 @@ fn print_onboarding_human(
     println!("  Undo: {}", report.rollback_note);
 }
 
+/// Run the TTY-only guided review shell over an already-gathered onboarding
+/// report. The shell is deliberately advisory: choosing an item only explains
+/// the observation or prints the next command. It never executes that command,
+/// indexes data, installs a model, or changes source configuration.
+fn run_onboarding_interactive_wizard(
+    report: &crate::source_onboarding::OnboardingReport,
+    observation: &crate::source_onboarding::OnboardingObservation,
+) -> CliResult<()> {
+    use colored::Colorize;
+    use dialoguer::{Confirm, Select, theme::ColorfulTheme};
+
+    const MENU_ITEMS: [&str; 4] = [
+        "Show the safest next command",
+        "Review providers and indexing scope",
+        "Review privacy, search mode, and undo",
+        "Exit without changes",
+    ];
+
+    println!();
+    println!("{}", "Read-only guided review".bold().cyan());
+    println!("  This wizard explains the plan. It will not run commands or change CASS state.");
+
+    loop {
+        let selection = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("What would you like to review?")
+            .items(MENU_ITEMS)
+            .default(0)
+            .interact_opt()
+            .map_err(|err| CliError::unknown(format!("onboarding wizard input failed: {err}")))?;
+
+        let Some(selection) = selection else {
+            println!("  Input cancelled; no changes were made.");
+            return Ok(());
+        };
+
+        match selection {
+            0 => {
+                println!();
+                println!("{}", "Recommended next command".bold());
+                println!("  {}", report.recommended_command.cyan());
+                println!("  This wizard did not run that command.");
+            }
+            1 => {
+                println!();
+                println!("{}", "Provider and indexing scope".bold());
+                if report.providers.is_empty() {
+                    println!("  No provider roots were detected.");
+                } else {
+                    for provider in &report.providers {
+                        println!(
+                            "  - {}: {} (~{} sessions)",
+                            provider.name,
+                            provider.readiness.as_str(),
+                            provider.estimated_sessions
+                        );
+                    }
+                }
+                println!(
+                    "  Estimated new sessions in scope: {}",
+                    report.estimated_index_sessions
+                );
+                println!(
+                    "  Conversations already indexed: {}",
+                    observation.indexed_conversation_count
+                );
+            }
+            2 => {
+                println!();
+                println!("{}", "Privacy, search mode, and undo".bold());
+                println!(
+                    "  Provider discovery reads directory metadata; this review does not index session content."
+                );
+                println!("  {}", report.semantic_note());
+                println!("  Undo: {}", report.rollback_note);
+                if let Some(hint) = &report.remote_hint {
+                    println!("  Remote sources: {hint}");
+                }
+            }
+            _ => {
+                println!("  No changes were made.");
+                return Ok(());
+            }
+        }
+
+        let review_another = Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt("Review another section?")
+            .default(false)
+            .interact()
+            .map_err(|err| CliError::unknown(format!("onboarding wizard input failed: {err}")))?;
+        if !review_another {
+            println!("  No changes were made.");
+            return Ok(());
+        }
+    }
+}
+
 /// `cass onboarding` — read-only first-run onboarding/readiness surface. Gathers
 /// a live observation, maps it through the pure `source_onboarding::recommend`
 /// core, and emits the deterministic report (`--json` for agents, otherwise a
-/// human summary). Mutation-free (bead 5u82n.6).
+/// human summary). When both standard streams are terminals, the summary is
+/// followed by a read-only guided review shell. Mutation-free (beads 5u82n.6
+/// and 5u82n.16).
 fn run_onboarding(
     data_dir_override: &Option<PathBuf>,
     db_override: Option<PathBuf>,
@@ -69163,13 +69642,17 @@ fn run_onboarding(
     }
 
     print_onboarding_human(&report, &observation);
+    if io::stdin().is_terminal() && io::stdout().is_terminal() {
+        run_onboarding_interactive_wizard(&report, &observation)?;
+    }
     Ok(())
 }
 
-/// `cass guide [INTENT]` — read-only intent-to-command planner (bead
-/// `…5u82n.1`). Resolves an operator intent to a safe advisory command plan via
-/// the workflow macro registry, classifies live preflight readiness, and emits
-/// the plan (`--json` for agents, otherwise a human summary). Mutation-free.
+/// `cass guide [INTENT]` — intent-to-command planner plus gated runner (beads
+/// `…5u82n.1` and `…5u82n.17`). Dry-run is the default. Apply mode automatically
+/// evaluates only allowlisted read-only proof adapters and requires an explicit
+/// confirmation for each exact mutating step; workflow macro strings are never
+/// interpreted by a shell.
 ///
 /// Live mode derives the determinable preflight facts (db present, lexical index
 /// present, search assets ready) from a single `state_meta_json` snapshot; facts
@@ -69181,14 +69664,24 @@ fn run_guide(
     data_dir_override: &Option<PathBuf>,
     db_override: Option<PathBuf>,
     output_format: Option<RobotFormat>,
+    apply: bool,
+    confirmed_steps: &[usize],
+    confirmed_facts: &[String],
+    accepted_privacy_tier: Option<&str>,
+    accepted_cost_risk: Option<&str>,
+    allow_rch: bool,
+    stop_conditions_clear: bool,
 ) -> CliResult<()> {
     let mut intent = intent_words.join(" ");
+    let data_dir = data_dir_override.clone().unwrap_or_else(default_data_dir);
 
     // Fixture mode: facts (and optionally a default intent) from a checked-in file.
-    let (facts, source_kind, fixture_id): (Option<serde_json::Value>, &str, String) = if let Some(
-        path,
-    ) = fixture
-    {
+    let (mut facts, source_kind, fixture_id, fixture_context): (
+        Option<serde_json::Value>,
+        &str,
+        String,
+        Option<serde_json::Value>,
+    ) = if let Some(path) = fixture {
         let raw = std::fs::read_to_string(path).map_err(|err| CliError {
                 code: 10,
                 kind: CliErrorKind::Config.kind_str(),
@@ -69217,10 +69710,9 @@ fn run_guide(
             .and_then(|s| s.to_str())
             .unwrap_or("fixture")
             .to_string();
-        (facts, "fixture", id)
+        (facts, "fixture", id, Some(parsed))
     } else {
         // Live mode: derive the determinable facts from one state snapshot.
-        let data_dir = data_dir_override.clone().unwrap_or_else(default_data_dir);
         let db_path = db_override.unwrap_or_else(|| data_dir.join("agent_search.db"));
         let state = state_meta_json(&data_dir, &db_path, 300, true);
         let db_present = state
@@ -69244,11 +69736,44 @@ fn run_guide(
             None,
             None,
         );
-        (Some(facts), "live", "live".to_string())
+        (Some(facts), "live", "live".to_string(), None)
     };
 
-    let payload =
+    // Operator-context facts are explicit grants, never inferred. They are
+    // overlaid before readiness classification and echoed in the transcript.
+    if !confirmed_facts.is_empty() {
+        let facts = facts.get_or_insert_with(|| serde_json::json!({}));
+        let map = facts.as_object_mut().ok_or_else(|| CliError {
+            code: 10,
+            kind: CliErrorKind::Config.kind_str(),
+            message: "guide facts must be a JSON object".to_string(),
+            hint: Some(
+                "Use a fixture shaped like {\"facts\": {\"db_present\": true}}.".to_string(),
+            ),
+            retryable: false,
+        })?;
+        for fact in confirmed_facts {
+            map.insert(fact.clone(), serde_json::Value::Bool(true));
+        }
+    }
+
+    let plan =
         crate::guide_planner::render_guide_plan(&intent, facts.as_ref(), source_kind, &fixture_id);
+    let payload = crate::guide_runner::render_execution(
+        plan,
+        &crate::guide_runner::GuideRunRequest {
+            apply,
+            confirmed_steps,
+            confirmed_facts,
+            accepted_privacy_tier,
+            accepted_cost_risk,
+            allow_rch,
+            stop_conditions_clear,
+            source_kind,
+            fixture_context: fixture_context.as_ref(),
+            data_dir: &data_dir,
+        },
+    );
 
     if let Some(format) = output_format {
         return output_structured_value(payload, format);
@@ -69347,7 +69872,16 @@ fn print_guide_human(payload: &serde_json::Value) {
             {
                 println!("  Next: {action}");
             }
-            println!("  (advisory only — nothing is executed; pass --json for the full plan)");
+            let execution_mode = payload
+                .pointer("/execution/mode")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("dry-run");
+            let execution_status = payload
+                .pointer("/execution/overall_status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("dry-run");
+            println!("  Mode: {execution_mode}  |  Execution: {execution_status}");
+            println!("  (pass --json for the argv, proof-gate, and confirmation transcript)");
         }
     }
 }
@@ -69595,6 +70129,32 @@ mod root_cause_signal_gather_tests {
     }
 }
 
+fn probe_daemon_runtime_for_diagnostics(
+    data_dir: &std::path::Path,
+) -> crate::daemon_runtime_state::DaemonRuntimeDiagnostic {
+    #[cfg(unix)]
+    {
+        crate::daemon::client::probe_daemon_runtime(
+            data_dir,
+            crate::daemon::client::DEFAULT_RUNTIME_PROBE_TIMEOUT,
+        )
+    }
+
+    #[cfg(not(unix))]
+    {
+        crate::daemon_runtime_state::DaemonRuntimeDiagnostic::from_observation(
+            crate::daemon_runtime_state::DaemonRuntimeObservation {
+                data_dir: Some(data_dir.display().to_string()),
+                probe_incomplete: true,
+                connect_error: Some(
+                    "daemon runtime probing is unavailable on this platform".to_string(),
+                ),
+                ..Default::default()
+            },
+        )
+    }
+}
+
 fn run_status(
     data_dir_override: &Option<PathBuf>,
     db_override: Option<PathBuf>,
@@ -69839,6 +70399,7 @@ fn run_status(
         let topology_budget =
             serde_json::to_value(crate::topology_budget::inspect_host_topology_budget())
                 .unwrap_or(serde_json::Value::Null);
+        let daemon_runtime = probe_daemon_runtime_for_diagnostics(&data_dir);
 
         // Status is a readiness surface, not a doctor run. Deep coverage checks
         // verify raw-mirror manifests and can hash very large archived blobs, and
@@ -69945,6 +70506,7 @@ fn run_status(
             "ingest_quarantine": state.get("ingest_quarantine").cloned().unwrap_or(serde_json::Value::Null),
             "policy_registry": policy_registry,
             "topology_budget": topology_budget,
+            "daemon_runtime": daemon_runtime,
             "doctor_summary": doctor_summary_value,
             "remote_source_sync": remote_sync_value,
             "coverage_risk": coverage_value,
@@ -71774,17 +72336,11 @@ mod cli_read_db_tests {
 
     #[test]
     #[serial]
-    fn semantic_index_embedder_policy_env_overrides_fastembed_default() {
+    fn unsupported_semantic_policy_does_not_route_to_unloadable_embedder() {
         let _embedder = set_env("CASS_SEMANTIC_EMBEDDER", "snowflake-arctic-s");
 
-        assert_eq!(
-            resolve_semantic_index_embedder("fastembed"),
-            "snowflake-arctic-s"
-        );
-        assert_eq!(
-            resolve_semantic_index_embedder("minilm"),
-            "snowflake-arctic-s"
-        );
+        assert_eq!(resolve_semantic_index_embedder("fastembed"), "fastembed");
+        assert_eq!(resolve_semantic_index_embedder("minilm"), "minilm");
         assert_eq!(resolve_semantic_index_embedder("hash"), "hash");
     }
 
@@ -73554,6 +74110,10 @@ pub(crate) fn run_doctor_impl(
     let mut storage_lexical_index_drifted = false;
     let mut storage_attestation_check_depth: Option<&'static str> = None;
     let mut storage_attestation_detail: Option<String> = None;
+    let dedicated_storage_probe = crate::search::storage_integrity::probe_dedicated_storage_state(
+        &db_path,
+        Duration::from_millis(100),
+    );
     let mut auto_fix_actions: Vec<String> = Vec::new();
     let mut auto_fix_applied = false;
     let mut fs_mutation_receipts: Vec<DoctorFsMutationReceipt> = Vec::new();
@@ -73829,138 +74389,150 @@ pub(crate) fn run_doctor_impl(
     // databases without dirtying precious archive evidence during a read-only doctor check.
     let archive_db_probe_started = Instant::now();
     if db_path.exists() {
-        let db_open_result = open_franken_cli_read_db_with_hard_timeout(
-            db_path.to_path_buf(),
-            "doctor database health",
-            Duration::from_secs(30),
-        );
-        match db_open_result {
-            Ok(conn) => {
-                // #287: the row-count and PRAGMA probes run on a deadline-bounded
-                // worker thread. On timeout the doctor records a `timeout` check
-                // (with the in-flight phase) and continues, so a wedged database
-                // can no longer hold the entire doctor run hostage with zero
-                // stdout output.
-                let probe_timeout = doctor_archive_db_probe_hard_timeout();
-                match run_bounded_doctor_archive_db_probe(conn, &db_path, probe_timeout) {
-                    DoctorBoundedArchiveDbProbeOutcome::Completed(probe) => {
-                        if let (Some(conv_count), Some(msg_count), Some(integrity_probe)) =
-                            (probe.conv_count, probe.msg_count, probe.integrity)
-                        {
-                            db_conversations = Some(conv_count.max(0) as usize);
-                            db_messages = Some(msg_count.max(0) as usize);
-                            match integrity_probe {
-                                Ok(integrity) if integrity.is_ok() => {
-                                    storage_attestation_check_depth = Some("integrity_check");
-                                    db_ok = true;
-                                    add_check!(
-                                        "database",
-                                        "pass",
-                                        format!(
-                                            "Database OK ({} conversations, {} messages)",
-                                            conv_count, msg_count
-                                        ),
-                                        false
-                                    );
+        if dedicated_storage_probe.busy_or_locked {
+            add_check!(
+                "database",
+                "warn",
+                "Database is busy or locked by another operation; bounded typed contention probe stopped before the deep integrity check",
+                false
+            );
+        } else {
+            let db_open_result = open_franken_cli_read_db_with_hard_timeout(
+                db_path.to_path_buf(),
+                "doctor database health",
+                Duration::from_secs(30),
+            );
+            match db_open_result {
+                Ok(conn) => {
+                    // #287: the row-count and PRAGMA probes run on a deadline-bounded
+                    // worker thread. On timeout the doctor records a `timeout` check
+                    // (with the in-flight phase) and continues, so a wedged database
+                    // can no longer hold the entire doctor run hostage with zero
+                    // stdout output.
+                    let probe_timeout = doctor_archive_db_probe_hard_timeout();
+                    match run_bounded_doctor_archive_db_probe(conn, &db_path, probe_timeout) {
+                        DoctorBoundedArchiveDbProbeOutcome::Completed(probe) => {
+                            if let (Some(conv_count), Some(msg_count), Some(integrity_probe)) =
+                                (probe.conv_count, probe.msg_count, probe.integrity)
+                            {
+                                db_conversations = Some(conv_count.max(0) as usize);
+                                db_messages = Some(msg_count.max(0) as usize);
+                                match integrity_probe {
+                                    Ok(integrity) if integrity.is_ok() => {
+                                        storage_attestation_check_depth = Some("integrity_check");
+                                        db_ok = true;
+                                        add_check!(
+                                            "database",
+                                            "pass",
+                                            format!(
+                                                "Database OK ({} conversations, {} messages)",
+                                                conv_count, msg_count
+                                            ),
+                                            false
+                                        );
 
-                                    // Check whether the FTS table is visible through
-                                    // frankensqlite on this connection. Do not auto-register
-                                    // it here: on migrated databases with legacy rootpage=0
-                                    // FTS schema entries, CREATE VIRTUAL TABLE IF NOT EXISTS
-                                    // can persist duplicate sqlite_master rows.
-                                    match probe.fts_state {
-                                        Some(DoctorFtsTableState::QueryableViaFrankensqlite) => {
-                                            add_check!(
-                                                "fts_table",
-                                                "pass",
-                                                "FTS search table (fts_messages) is queryable via frankensqlite",
-                                                false
-                                            );
+                                        // Check whether the FTS table is visible through
+                                        // frankensqlite on this connection. Do not auto-register
+                                        // it here: on migrated databases with legacy rootpage=0
+                                        // FTS schema entries, CREATE VIRTUAL TABLE IF NOT EXISTS
+                                        // can persist duplicate sqlite_master rows.
+                                        match probe.fts_state {
+                                            Some(
+                                                DoctorFtsTableState::QueryableViaFrankensqlite,
+                                            ) => {
+                                                add_check!(
+                                                    "fts_table",
+                                                    "pass",
+                                                    "FTS search table (fts_messages) is queryable via frankensqlite",
+                                                    false
+                                                );
+                                            }
+                                            Some(DoctorFtsTableState::Missing {
+                                                frankensqlite_error,
+                                            }) => {
+                                                // An absent in-DB FTS shadow is benign
+                                                // here (lexical search falls back to
+                                                // Tantivy), so it does NOT feed the
+                                                // storage_state derivation — doctor
+                                                // reports it as a `pass` below.
+                                                add_check!(
+                                                    "fts_table",
+                                                    "pass",
+                                                    format!(
+                                                        "Database-resident FTS table is absent or not queryable via frankensqlite ({frankensqlite_error}); lexical search relies on the Tantivy index instead"
+                                                    ),
+                                                    false
+                                                );
+                                            }
+                                            None => {}
                                         }
-                                        Some(DoctorFtsTableState::Missing {
-                                            frankensqlite_error,
-                                        }) => {
-                                            // An absent in-DB FTS shadow is benign
-                                            // here (lexical search falls back to
-                                            // Tantivy), so it does NOT feed the
-                                            // storage_state derivation — doctor
-                                            // reports it as a `pass` below.
-                                            add_check!(
-                                                "fts_table",
-                                                "pass",
-                                                format!(
-                                                    "Database-resident FTS table is absent or not queryable via frankensqlite ({frankensqlite_error}); lexical search relies on the Tantivy index instead"
-                                                ),
-                                                false
-                                            );
-                                        }
-                                        None => {}
+                                    }
+                                    Ok(integrity) => {
+                                        storage_integrity_failed = true;
+                                        let failed_pragma = integrity.failed_pragma_name();
+                                        let diagnostic_summary = integrity.diagnostic_summary();
+                                        storage_attestation_check_depth = Some(failed_pragma);
+                                        storage_attestation_detail =
+                                            Some(diagnostic_summary.clone());
+                                        add_check!(
+                                            "database",
+                                            "fail",
+                                            format!(
+                                                "Database failed frankensqlite {failed_pragma}: {} ({} conversations, {} messages)",
+                                                diagnostic_summary, conv_count, msg_count
+                                            ),
+                                            true
+                                        );
+                                        needs_rebuild = true;
+                                    }
+                                    Err(err) => {
+                                        storage_integrity_unverified = true;
+                                        add_check!(
+                                            "database",
+                                            "fail",
+                                            format!(
+                                                "Database health probe failed via frankensqlite: {err}"
+                                            ),
+                                            true
+                                        );
+                                        needs_rebuild = true;
                                     }
                                 }
-                                Ok(integrity) => {
-                                    storage_integrity_failed = true;
-                                    let failed_pragma = integrity.failed_pragma_name();
-                                    let diagnostic_summary = integrity.diagnostic_summary();
-                                    storage_attestation_check_depth = Some(failed_pragma);
-                                    storage_attestation_detail = Some(diagnostic_summary.clone());
-                                    add_check!(
-                                        "database",
-                                        "fail",
-                                        format!(
-                                            "Database failed frankensqlite {failed_pragma}: {} ({} conversations, {} messages)",
-                                            diagnostic_summary, conv_count, msg_count
-                                        ),
-                                        true
-                                    );
-                                    needs_rebuild = true;
-                                }
-                                Err(err) => {
-                                    storage_integrity_unverified = true;
-                                    add_check!(
-                                        "database",
-                                        "fail",
-                                        format!(
-                                            "Database health probe failed via frankensqlite: {err}"
-                                        ),
-                                        true
-                                    );
-                                    needs_rebuild = true;
-                                }
+                            } else {
+                                storage_integrity_unverified = true;
+                                add_check!("database", "fail", "Database query failed", true);
+                                needs_rebuild = true;
                             }
-                        } else {
-                            storage_integrity_unverified = true;
-                            add_check!("database", "fail", "Database query failed", true);
-                            needs_rebuild = true;
+                        }
+                        DoctorBoundedArchiveDbProbeOutcome::TimedOut { phase } => {
+                            storage_probe_timed_out = true;
+                            // Deliberately NOT a `fail`: a busy or wedged database is
+                            // not proof of corruption, so the doctor must not steer
+                            // operators toward a rebuild. The `timeout` status keeps
+                            // the run bounded and is surfaced through the
+                            // `timeout_or_busy_spin_guard` reason code (#287).
+                            add_check!(
+                                "database",
+                                "timeout",
+                                format!(
+                                    "Database health probe timed out after {}s during {phase}; archive health is unverified (busy or wedged database). Retry later or inspect with `cass status --json`.",
+                                    probe_timeout.as_secs()
+                                ),
+                                false
+                            );
                         }
                     }
-                    DoctorBoundedArchiveDbProbeOutcome::TimedOut { phase } => {
-                        storage_probe_timed_out = true;
-                        // Deliberately NOT a `fail`: a busy or wedged database is
-                        // not proof of corruption, so the doctor must not steer
-                        // operators toward a rebuild. The `timeout` status keeps
-                        // the run bounded and is surfaced through the
-                        // `timeout_or_busy_spin_guard` reason code (#287).
-                        add_check!(
-                            "database",
-                            "timeout",
-                            format!(
-                                "Database health probe timed out after {}s during {phase}; archive health is unverified (busy or wedged database). Retry later or inspect with `cass status --json`.",
-                                probe_timeout.as_secs()
-                            ),
-                            false
-                        );
-                    }
                 }
-            }
-            Err(e) => {
-                storage_db_open_failed = true;
-                add_check!(
-                    "database",
-                    "fail",
-                    format!("Cannot open database: {}", e.message),
-                    true
-                );
-                needs_rebuild = true;
+                Err(e) => {
+                    storage_db_open_failed = true;
+                    add_check!(
+                        "database",
+                        "fail",
+                        format!("Cannot open database: {}", e.message),
+                        true
+                    );
+                    needs_rebuild = true;
+                }
             }
         }
     } else if not_initialized {
@@ -74055,14 +74627,14 @@ pub(crate) fn run_doctor_impl(
     // database + lexical-index signals gathered above into the canonical
     // `StorageState` / `SourceOfTruthRisk` / `ArchiveReadability` contract so
     // doctor robot JSON projects the same vocabulary status/search-meta will.
-    // Derivable today: ok / openread_failed / integrity_failed /
-    // derived_only_drift (+ unknown_deferred fallback). The schema_drift /
-    // legacy_interop_failed / wal_sidecar_suspect / busy_or_locked /
-    // fts_metadata_failed states need probes doctor does not yet run and are
-    // intentionally NOT claimed here.
+    // The common signals derive ok/openread/integrity/derived/deferred first;
+    // the dedicated probe overlays typed contention, schema drift, legacy
+    // layout, or structurally suspect WAL/SHM evidence below. FTS metadata
+    // remains separate because a missing in-DB shadow is a benign fallback.
     let storage_integrity_report = {
         use crate::search::storage_integrity::{
-            DoctorStorageSignals, StorageCheck, build_doctor_storage_integrity,
+            DoctorStorageSignals, StorageCheck, apply_dedicated_storage_probe,
+            build_doctor_storage_integrity,
         };
         let db_file_present = db_path.exists();
         let db_elapsed_ms = archive_db_probe_started.elapsed().as_millis() as i64;
@@ -74124,7 +74696,10 @@ pub(crate) fn run_doctor_impl(
         if fix_can_mutate && let Some(attestation) = live_attestation.as_ref() {
             crate::search::storage_integrity::persist_integrity_attestation(&data_dir, attestation);
         }
-        let mut report = build_doctor_storage_integrity(signals, storage_checks);
+        let mut report = apply_dedicated_storage_probe(
+            build_doctor_storage_integrity(signals, storage_checks),
+            dedicated_storage_probe,
+        );
         if let Some(attestation) = live_attestation {
             report.attestation_source = Some("live".to_string());
             report.attestation_check_depth = Some(attestation.check_depth.clone());
@@ -75679,6 +76254,9 @@ pub(crate) fn run_doctor_impl(
         .first()
         .map(|incident| incident.incident_id.clone());
 
+    let daemon_runtime = output_format
+        .or_else(robot_format_from_env)
+        .map(|_| probe_daemon_runtime_for_diagnostics(&data_dir));
     let elapsed_ms = start.elapsed().as_millis() as u64;
     // Bounded-budget signal for the robot surface (uojcg.2.2): the report saw
     // `doctor check` exceed an 8s cap. Per-check internal timeouts already bound
@@ -75952,6 +76530,7 @@ pub(crate) fn run_doctor_impl(
             "derived_semantic_assets": derived_semantic_assets,
             "storage_pressure": storage_pressure,
             "storage_integrity": storage_integrity_report,
+            "daemon_runtime": daemon_runtime,
             "asset_taxonomy": doctor_asset_taxonomy_report(),
             "anomaly_taxonomy": doctor_anomaly_taxonomy_report(),
             "repair_contract": doctor_repair_contract_report(),
@@ -78374,6 +78953,7 @@ fn run_config_based_export(
         recovery_secret,
         generate_qr: wizard_state.generate_qr,
         generated_docs: vec![],
+        analytics_status: Some(crate::pages::analytics::robot_status_projection(db_path)?),
     };
 
     let bundle_builder = crate::pages::bundle::BundleBuilder::with_config(bundle_config);
@@ -81745,6 +82325,20 @@ fn response_schema_search_cache_stats() -> serde_json::Value {
         ("misses", serde_json::json!({ "type": "integer" })),
         ("shortfall", serde_json::json!({ "type": "integer" })),
         (
+            "outcomes",
+            response_schema_object([
+                ("hit", serde_json::json!({ "type": "integer" })),
+                ("cold_miss", serde_json::json!({ "type": "integer" })),
+                (
+                    "stale_generation_miss",
+                    serde_json::json!({ "type": "integer" }),
+                ),
+                ("forced_reload", serde_json::json!({ "type": "integer" })),
+                ("reload_failure", serde_json::json!({ "type": "integer" })),
+                ("fallback", serde_json::json!({ "type": "integer" })),
+            ]),
+        ),
+        (
             "prewarm_scheduled",
             serde_json::json!({ "type": "integer" }),
         ),
@@ -82403,6 +82997,7 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
                 "ingest_quarantine": response_schema_ingest_quarantine(),
                 "policy_registry": response_schema_policy_registry(),
                 "topology_budget": response_schema_topology_budget(),
+                "daemon_runtime": response_schema_opaque_object(),
                 "doctor_summary": response_schema_doctor_v2_summary("status-summary"),
                 "remote_source_sync": response_schema_doctor_remote_source_sync_runtime_summary(),
                 "coverage_risk": response_schema_doctor_coverage_risk(),
@@ -83219,6 +83814,15 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
         "storage_integrity".to_string(),
         response_schema_storage_integrity(),
     );
+    doctor_properties.insert(
+        "daemon_runtime".to_string(),
+        response_schema_opaque_object(),
+    );
+    doctor_schema
+        .get_mut("required")
+        .and_then(|value| value.as_array_mut())
+        .expect("doctor schema required array")
+        .push(json!("daemon_runtime"));
     schemas.insert("doctor".to_string(), doctor_schema);
 
     schemas.insert(
@@ -83768,6 +84372,44 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
 #[cfg(test)]
 mod response_schema_tests {
     use super::*;
+
+    #[test]
+    fn b7tb0_runtime_and_cache_outcome_schemas_are_discoverable() {
+        let schemas = build_response_schemas();
+        assert!(
+            schemas["status"]["properties"]
+                .get("daemon_runtime")
+                .is_some()
+        );
+        assert!(
+            schemas["doctor"]["properties"]
+                .get("daemon_runtime")
+                .is_some()
+        );
+        assert!(
+            schemas["doctor"]["required"]
+                .as_array()
+                .expect("doctor required fields")
+                .iter()
+                .any(|field| field.as_str() == Some("daemon_runtime"))
+        );
+
+        let outcomes = &schemas["search"]["properties"]["_meta"]["properties"]["cache_stats"]["properties"]
+            ["outcomes"]["properties"];
+        for field in [
+            "hit",
+            "cold_miss",
+            "stale_generation_miss",
+            "forced_reload",
+            "reload_failure",
+            "fallback",
+        ] {
+            assert!(
+                outcomes.get(field).is_some(),
+                "missing cache outcome {field}"
+            );
+        }
+    }
 
     #[test]
     fn status_schema_includes_semantic_and_rebuild_truth() {
@@ -97457,8 +98099,7 @@ fn print_fleet_upgrade_rehearsal_human(output: &FleetUpgradeRehearsalOutput) {
 
 /// Show semantic model installation status.
 ///
-/// Reports on every embedder cass knows about (currently `minilm`,
-/// `snowflake-arctic-s`, `nomic-embed`), not just the compiled-in default.
+/// Reports the MiniLM embedder implemented by the native backend.
 /// The "active" model is the one resolved from policy
 /// (`quality_tier_embedder`) — that is what `cass index` and `cass search`
 /// will actually use.
@@ -97484,22 +98125,11 @@ fn run_models_status(output_format: Option<RobotFormat>) -> CliResult<()> {
         budget_max_bytes: acquisition_policy.max_model_bytes,
     };
 
-    // Canonicalize the policy's quality_tier_embedder to a registry name.
-    // The policy stores short aliases (e.g. "snowflake", "minilm") while
-    // ModelManifest::for_embedder expects registry names — match both.
+    // Canonicalize the policy's quality_tier_embedder to the one registry name
+    // implemented by the native backend. Unsupported historical aliases remain
+    // visible in `policy_quality_tier_embedder`, but never become active.
     let policy_embedder = policy.quality_tier_embedder.as_str();
-    let active_registry_name = match policy_embedder {
-        "minilm" | "all-minilm-l6-v2" | "fastembed" | "minilm-384" => Some("minilm"),
-        "snowflake"
-        | "snowflake-arctic-s"
-        | "snowflake-arctic-embed-s"
-        | "snowflake-arctic-s-384" => Some("snowflake-arctic-s"),
-        "nomic" | "nomic-embed" | "nomic-embed-text-v1.5" | "nomic-embed-768" => {
-            Some("nomic-embed")
-        }
-        "hash" => None, // hash fallback — no model files
-        _ => None,
-    };
+    let active_registry_name = FastEmbedder::canonical_name(policy_embedder);
 
     // Per-model status snapshot.
     struct ModelStatus {
@@ -97515,7 +98145,7 @@ fn run_models_status(output_format: Option<RobotFormat>) -> CliResult<()> {
         acquisition: serde_json::Value,
     }
 
-    let known: &[&str] = &["minilm", "snowflake-arctic-s", "nomic-embed"];
+    let known: &[&str] = &["minilm"];
     let mut statuses: Vec<ModelStatus> = Vec::with_capacity(known.len());
     for name in known {
         let Some(manifest) = ModelManifest::for_embedder(name) else {
@@ -97664,16 +98294,14 @@ fn run_models_status(output_format: Option<RobotFormat>) -> CliResult<()> {
         println!("Active embedder (quality tier): {}", policy_embedder);
         if active_registry_name.is_none() && policy_embedder != "hash" {
             println!(
-                "  {} unrecognized embedder name; cass will fall back to hash-only.",
+                "  {} unsupported quality embedder; hybrid search will fail open to lexical.",
                 "⚠".yellow()
             );
         }
         if policy_embedder == "hash" {
-            println!("  No ONNX model is in use; semantic search runs in hash-fallback mode.");
+            println!("  The explicit hash vector tier is active; no native model is in use.");
         }
-        println!(
-            "Override with: CASS_SEMANTIC_EMBEDDER={{minilm|snowflake-arctic-s|nomic-embed|hash}}"
-        );
+        println!("Override with: CASS_SEMANTIC_EMBEDDER={{minilm|hash}}");
         println!("Fail-open: lexical search remains available.");
         println!();
 
@@ -97743,7 +98371,7 @@ fn run_models_status(output_format: Option<RobotFormat>) -> CliResult<()> {
         if active_status.is_none() && policy_embedder != "hash" {
             println!(
                 "{}: active embedder '{}' has no manifest registered. \
-                 Use 'cass models install --model <name>' to install one of the supported embedders.",
+                 Use 'cass models install --model minilm' to install the supported embedder.",
                 "⚠".yellow(),
                 policy_embedder
             );
@@ -97754,11 +98382,9 @@ fn run_models_status(output_format: Option<RobotFormat>) -> CliResult<()> {
 }
 
 /// Resolve a CLI-supplied semantic model name (or alias) to the canonical
-/// registry name used by `ModelManifest::for_embedder` and
-/// `FastEmbedder::model_dir_for`. Mirrors the alias map in
-/// `src/daemon/worker.rs::resolve_embedder_kind` so the CLI surface accepts
-/// the same names the daemon worker honors. Bead:
-/// `coding_agent_session_search-v3of1`.
+/// registry name used by model installation and removal. Embedder aliases match
+/// the MiniLM-only daemon worker; retired ONNX-era aliases are rejected before
+/// they can route to an unloadable manifest.
 /// Models the pure-Rust native inference backend can actually load (cass
 /// #308): the native embedder hardcodes the all-MiniLM-L6-v2 topology and the
 /// native reranker is architecture-verified for ms-marco only. Anything else
@@ -97772,22 +98398,44 @@ fn native_backend_supports_model(registry_name: &str) -> bool {
 fn resolve_cli_model_name(model_name: &str) -> CliResult<&'static str> {
     match model_name.to_ascii_lowercase().as_str() {
         "fastembed" | "minilm" | "minilm-384" | "all-minilm-l6-v2" => Ok("minilm"),
-        "snowflake-arctic-s" | "snowflake-arctic-s-384" | "snowflake-arctic-embed-s" => {
-            Ok("snowflake-arctic-s")
-        }
-        "nomic-embed" | "nomic-embed-768" | "nomic-embed-text-v1.5" => Ok("nomic-embed"),
+        "snowflake"
+        | "snowflake-arctic-s"
+        | "snowflake-arctic-s-384"
+        | "snowflake-arctic-embed-s"
+        | "nomic"
+        | "nomic-embed"
+        | "nomic-embed-768"
+        | "nomic-embed-text-v1.5" => Err(CliError {
+            code: 20,
+            kind: CliErrorKind::Model.kind_str(),
+            message: format!(
+                "Unsupported embedder '{}': the pure-Rust native backend currently supports only all-MiniLM-L6-v2 (alias minilm).",
+                model_name
+            ),
+            hint: Some("Use --model minilm, or keep using lexical search".into()),
+            retryable: false,
+        }),
         "ms-marco" | "ms-marco-minilm" | "ms-marco-minilm-l-6-v2" | "ms-marco-minilm-l6-v2" => {
             Ok("ms-marco")
         }
         "jina-reranker-turbo" | "jina-reranker-v1-turbo" | "jina-reranker-v1-turbo-en" => {
-            Ok("jina-reranker-turbo")
+            Err(CliError {
+                code: 20,
+                kind: CliErrorKind::Model.kind_str(),
+                message: format!(
+                    "Unsupported reranker '{}': the pure-Rust native backend currently supports only ms-marco-MiniLM-L-6-v2 (alias ms-marco).",
+                    model_name
+                ),
+                hint: Some("Use --model ms-marco, or omit reranking".into()),
+                retryable: false,
+            })
         }
         _ => Err(CliError {
             code: 20,
             kind: CliErrorKind::Model.kind_str(),
             message: format!(
-                "Unknown model '{}'. Embedders: all-minilm-l6-v2 (alias minilm), \
-                 snowflake-arctic-s, nomic-embed. Rerankers: ms-marco, jina-reranker-turbo.",
+                "Unknown model '{}'. Embedder: all-minilm-l6-v2 (alias minilm). \
+                 Reranker: ms-marco.",
                 model_name
             ),
             hint: Some("Use 'cass models status' to see available models".into()),
@@ -97903,7 +98551,7 @@ fn run_models_install(
                     source_path.display()
                 ),
                 hint: Some(
-                    "Provide a directory containing model files (model.onnx, tokenizer.json, etc.)"
+                    "Provide a directory containing model files (model.safetensors, tokenizer.json, etc.)"
                         .into(),
                 ),
                 retryable: false,
@@ -98454,10 +99102,7 @@ fn run_models_backfill(
             code: 20,
             kind: CliErrorKind::Model.kind_str(),
             message: format!("Unknown embedder '{}'.", embedder_type),
-            hint: Some(
-                "Use --embedder hash, --embedder fastembed, or a registered model name such as snowflake-arctic-s"
-                    .into(),
-            ),
+            hint: Some("Use --embedder hash or --embedder minilm (alias fastembed)".into()),
             retryable: false,
         });
     }
@@ -99606,7 +100251,8 @@ fn run_daemon(
     use crate::daemon::{ModelDaemon, ModelManager};
 
     let data_dir = data_dir.unwrap_or_else(default_data_dir);
-    let config = resolved_daemon_config(socket, idle_timeout, max_connections);
+    let mut config = resolved_daemon_config(socket, idle_timeout, max_connections);
+    config.served_generation = crate::daemon::published_lexical_generation(&data_dir);
 
     let models = ModelManager::new(&data_dir);
     let daemon = ModelDaemon::new(config, models);
@@ -99963,46 +100609,51 @@ mod subcommand_robot_output_tests {
 mod cli_models_resolution_tests {
     use super::*;
 
-    /// `coding_agent_session_search-v3of1`: `cass models install` and
-    /// `cass models remove` previously hardcoded
-    /// `if model_name != "all-minilm-l6-v2"` (with comment "Only support
-    /// the default model for now"), rejecting all other registered
-    /// embedders even though `EmbedderRegistry`, `ModelManifest::for_embedder`,
-    /// `FastEmbedder::model_dir_for`, and the daemon worker
-    /// (commit cf85b403) all know about `snowflake-arctic-s` and
-    /// `nomic-embed`. This test pins the post-fix contract: every
-    /// registry-known name (including aliases honored by
-    /// `daemon::worker::resolve_embedder_kind`) must resolve to its
-    /// canonical registry name; only genuinely unknown names error.
     #[test]
-    fn resolve_cli_model_name_accepts_every_registered_embedder_alias() {
-        for (alias, expected_canonical) in [
+    fn resolve_cli_model_name_accepts_only_native_minilm_embedder_aliases() {
+        for alias in [
             ("all-minilm-l6-v2", "minilm"),
             ("minilm", "minilm"),
             ("minilm-384", "minilm"),
             ("fastembed", "minilm"),
             ("MINILM", "minilm"),
-            ("snowflake-arctic-s", "snowflake-arctic-s"),
-            ("snowflake-arctic-s-384", "snowflake-arctic-s"),
-            ("snowflake-arctic-embed-s", "snowflake-arctic-s"),
-            ("Snowflake-Arctic-S", "snowflake-arctic-s"),
-            ("nomic-embed", "nomic-embed"),
-            ("nomic-embed-768", "nomic-embed"),
-            ("nomic-embed-text-v1.5", "nomic-embed"),
-            ("NOMIC-EMBED", "nomic-embed"),
         ] {
             assert_eq!(
-                resolve_cli_model_name(alias).expect("registered alias must resolve"),
-                expected_canonical,
-                "registered alias {alias:?} must resolve to canonical name {expected_canonical:?}"
+                resolve_cli_model_name(alias.0).expect("MiniLM alias must resolve"),
+                alias.1
             );
         }
     }
 
+    #[test]
+    fn resolve_cli_model_name_rejects_unimplemented_embedder_topologies() {
+        for alias in ["snowflake-arctic-s", "nomic-embed-text-v1.5"] {
+            let error = resolve_cli_model_name(alias).expect_err("topology is not implemented");
+            assert_eq!(error.code, 20);
+            assert!(error.message.contains("supports only all-MiniLM-L6-v2"));
+            assert!(!error.message.contains("install --model snowflake"));
+            assert!(!error.message.contains("install --model nomic"));
+        }
+    }
+
+    #[test]
+    fn resolve_cli_model_name_rejects_unimplemented_reranker_topology() {
+        let error = resolve_cli_model_name("jina-reranker-v1-turbo-en")
+            .expect_err("Jina topology is not implemented by the native reranker");
+        assert_eq!(error.code, 20);
+        assert!(
+            error
+                .message
+                .contains("supports only ms-marco-MiniLM-L-6-v2")
+        );
+        assert_eq!(
+            error.hint.as_deref(),
+            Some("Use --model ms-marco, or omit reranking")
+        );
+    }
+
     /// `coding_agent_session_search-v3of1`: unknown names must be rejected
     /// with code=20, kind="model", and a hint pointing at `cass models status`.
-    /// Pre-fix message was "Only 'all-minilm-l6-v2' is supported."; post-fix
-    /// must list all registered names so operators discover snowflake/nomic.
     #[test]
     fn resolve_cli_model_name_rejects_unknown_with_useful_hint() {
         let err =
@@ -100014,14 +100665,10 @@ mod cli_models_resolution_tests {
             "error must name the rejected input; got {message:?}",
             message = err.message
         );
-        assert!(
-            err.message.contains("snowflake-arctic-s")
-                && err.message.contains("nomic-embed")
-                && err.message.contains("all-minilm-l6-v2"),
-            "error must list all 3 supported models so operators discover non-default options; \
-             got {message:?}",
-            message = err.message
-        );
+        assert!(err.message.contains("all-minilm-l6-v2"));
+        assert!(!err.message.contains("snowflake-arctic-s"));
+        assert!(!err.message.contains("nomic-embed"));
+        assert!(!err.message.contains("jina-reranker"));
         assert_eq!(
             err.hint.as_deref(),
             Some("Use 'cass models status' to see available models")
@@ -100042,7 +100689,7 @@ mod cli_models_resolution_tests {
         use crate::search::model_download::ModelManifest;
 
         let probe_data_dir = std::path::Path::new("/tmp/cass-v3of1-probe");
-        for canonical in ["minilm", "snowflake-arctic-s", "nomic-embed"] {
+        for canonical in ["minilm"] {
             assert!(
                 ModelManifest::for_embedder(canonical).is_some(),
                 "canonical name {canonical:?} returned by resolve_cli_model_name must have a \
@@ -100074,8 +100721,6 @@ mod cli_models_resolution_tests {
             ("ms-marco-minilm-l-6-v2", "ms-marco"),
             ("ms-marco-minilm-l6-v2", "ms-marco"),
             ("MS-MARCO", "ms-marco"),
-            ("jina-reranker-turbo", "jina-reranker-turbo"),
-            ("jina-reranker-v1-turbo-en", "jina-reranker-turbo"),
         ] {
             assert_eq!(
                 resolve_cli_model_name(alias).expect("reranker alias must resolve"),
@@ -100095,7 +100740,7 @@ mod cli_models_resolution_tests {
         // the exact bug that left "WARN Failed to load reranker" on
         // every fresh daemon start (cass#242).
         let probe = std::path::Path::new("/tmp/cass-reranker-probe");
-        for canonical in ["ms-marco", "jina-reranker-turbo"] {
+        for canonical in ["ms-marco"] {
             let manifest = ModelManifest::for_reranker(canonical)
                 .unwrap_or_else(|| panic!("{canonical} manifest must be registered"));
             let registered = RERANKERS

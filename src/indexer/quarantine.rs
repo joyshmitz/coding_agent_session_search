@@ -21,6 +21,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -236,6 +237,91 @@ impl QuarantineState {
 
 fn current_cass_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+/// Privacy-safe record for a malformed connector input line. The original
+/// payload is deliberately never stored: the hash is enough to deduplicate a
+/// repeated scan and correlate the record with an operator-owned source file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectorLineQuarantineRecord {
+    pub provider: String,
+    pub source_path: String,
+    pub line_number: u64,
+    pub payload_blake3: String,
+    pub payload_bytes: usize,
+    pub failure_kind: String,
+    pub first_observed_at: DateTime<Utc>,
+    pub last_observed_at: DateTime<Utc>,
+    pub attempt_count: u64,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ConnectorLineQuarantineState {
+    #[serde(default)]
+    entries: BTreeMap<String, ConnectorLineQuarantineRecord>,
+}
+
+static CONNECTOR_LINE_QUARANTINE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+/// Upsert one malformed connector line without retaining its private content.
+/// Concurrent connector scans are serialized so one provider cannot overwrite
+/// another provider's newly observed record.
+pub fn record_connector_line(
+    data_dir: &Path,
+    provider: &str,
+    source_path: &Path,
+    line_number: u64,
+    payload: &[u8],
+    failure_kind: &str,
+) -> std::io::Result<()> {
+    let _guard = CONNECTOR_LINE_QUARANTINE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let quarantine_dir = data_dir.join("quarantine");
+    std::fs::create_dir_all(&quarantine_dir)?;
+    let path = quarantine_dir.join("connector_ingest_lines.json");
+    let mut state: ConnectorLineQuarantineState = match std::fs::read_to_string(&path) {
+        Ok(json) => serde_json::from_str(&json).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid connector quarantine state: {error}"),
+            )
+        })?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(error) => return Err(error),
+    };
+    let digest = blake3::hash(payload).to_hex().to_string();
+    let key = format!(
+        "{}|{}|{}|{}",
+        provider,
+        source_path.display(),
+        line_number,
+        digest
+    );
+    let now = Utc::now();
+    state
+        .entries
+        .entry(key)
+        .and_modify(|record| {
+            record.last_observed_at = now;
+            record.attempt_count = record.attempt_count.saturating_add(1);
+        })
+        .or_insert_with(|| ConnectorLineQuarantineRecord {
+            provider: provider.to_string(),
+            source_path: source_path.display().to_string(),
+            line_number,
+            payload_blake3: digest,
+            payload_bytes: payload.len(),
+            failure_kind: failure_kind.to_string(),
+            first_observed_at: now,
+            last_observed_at: now,
+            attempt_count: 1,
+        });
+    let temp_path = quarantine_dir.join("connector_ingest_lines.json.tmp");
+    let json = serde_json::to_vec_pretty(&state).map_err(std::io::Error::other)?;
+    std::fs::write(&temp_path, json)?;
+    std::fs::rename(temp_path, path)
 }
 
 #[cfg(test)]

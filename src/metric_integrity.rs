@@ -60,6 +60,12 @@ pub enum MetricOutcome {
     InvalidInput,
 }
 
+impl Default for MetricOutcome {
+    fn default() -> Self {
+        Self::NoData
+    }
+}
+
 impl MetricOutcome {
     /// Build a [`MetricOutcome::Value`] from a float, routing any non-finite
     /// value to [`MetricOutcome::InvalidInput`] so a `NaN`/`Inf` can never enter
@@ -166,7 +172,7 @@ pub fn bakeoff_quality_ratio(baseline: f64, candidate: f64) -> MetricOutcome {
     if baseline <= 0.0 {
         return MetricOutcome::NoData;
     }
-    MetricOutcome::finite(candidate / baseline)
+    safe_ratio(candidate, baseline)
 }
 
 /// Percentage improvement of `candidate` over `baseline`, through the same

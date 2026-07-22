@@ -50,18 +50,12 @@
 //! emits a `storage_integrity` block (`storage_state` / `source_of_truth_risk` /
 //! `archive_readability` + read-only `checks_attempted`), derived from doctor's
 //! existing read-only db-open / integrity / FTS / lexical-index signals.
-//! [`doctor_check_projects_storage_state_per_fixture`] now asserts that live
-//! `storage_state` directly for every fixture — **exactly** for the derivable
-//! classes (`ok` / `openread_failed` / `integrity_failed` / `derived_only_drift`,
-//! plus the `unknown_deferred` fallback) and against a documented **coarser**
-//! allowed set for the canonical-broken header / WAL / busy fixtures whose
-//! precise cause (`schema_drift` / `legacy_interop_failed` / `wal_sidecar_suspect`
-//! / `busy_or_locked`) still needs the unstarted `.14.2`/`.14.3` schema-version /
-//! WAL / busy probes. Each fixture still carries its precise
-//! `expected_storage_state` + `expected_source_of_truth_risk` as forward
-//! metadata, and [`storage_fixture_suite_is_wellformed_against_the_taxonomy`]
-//! pins that metadata to the `.14.1` enum + risk mapping so the suite cannot
-//! drift from the contract.
+//! [`doctor_check_projects_storage_state_per_fixture`] preserves the coarse
+//! open-failure expectation for the original deliberately unreadable fixtures.
+//! [`dedicated_openable_fixtures_are_exact_across_status_search_and_doctor`]
+//! separately uses structurally openable schema/legacy/sidecar fixtures and a
+//! real typed-lock fixture to pin `schema_drift`, `legacy_interop_failed`,
+//! `wal_sidecar_suspect`, and `busy_or_locked` exactly.
 //!
 //! Attribution
 //! -----------
@@ -861,7 +855,7 @@ fn check_db_preserved(
     let bytes = std::fs::read(&db).map_err(|e| format!("re-read DB after probe: {e}"))?;
     if require_byte_identical {
         let hash_after = sha256_hex(&bytes);
-        if hash_after != *hash_before {
+        if !hash_after.as_str().cmp(hash_before).is_eq() {
             return Err(format!(
                 "canonical DB was rewritten by a read surface: hash {hash_before} -> {hash_after} \
                  (source-of-truth must be byte-identical)"
@@ -1625,15 +1619,11 @@ fn duplicate_label_failure(label: &str) -> String {
 // module docs promised ("when a follow-on wires `storage_state` into the robot
 // surfaces, the per-fixture checks tighten to assert it directly").
 //
-// What doctor can derive today (bead vl1cj split): `ok`, `openread_failed`,
-// `integrity_failed`, `derived_only_drift` (+ the `unknown_deferred` fallback).
-// The precise `schema_drift` / `legacy_interop_failed` / `wal_sidecar_suspect` /
-// `busy_or_locked` causes need the unstarted `.14.2`/`.14.3` schema-version / WAL
-// / busy probes; `fts_metadata_failed` is likewise deferred because doctor's
-// `fts_table` probe cannot tell a benign absent in-DB `fts_messages` shadow (it
-// reports that as `pass`) from a genuinely corrupt one. For those fixtures the
-// gate pins the coarser observed state and the precise `expected_storage_state`
-// stays forward metadata until those probes land (follow-on).
+// The original canonical-broken byte fixtures intentionally remain coarse:
+// their unreadable DB open dominates any more specific header/sidecar clue.
+// The dedicated openable fixtures below exercise exact schema/legacy/WAL/busy
+// states without weakening that precedence. `fts_metadata_failed` remains
+// separate because a missing in-DB FTS shadow is a benign Tantivy fallback.
 
 /// Every `ArchiveReadability` wire label from `src/search/storage_integrity.rs`.
 const VALID_ARCHIVE_READABILITY: &[&str] = &[
@@ -1644,14 +1634,14 @@ const VALID_ARCHIVE_READABILITY: &[&str] = &[
     "timed_out",
 ];
 
-/// The `storage_state`(s) `cass doctor --check --json` may honestly derive for a
-/// fixture TODAY from its existing read-only signals (bead vl1cj). Derived-only
-/// fixtures (intact canonical DB, broken *derived* lexical asset) pin the exact
-/// `.14.1` label; the canonical-broken header / WAL / busy fixtures need the
-/// `.14.2`/`.14.3` probes to recover their precise cause, so the gate pins the
-/// coarser observed set those signals legitimately produce.
+/// Storage states accepted for the original deliberately broken fixtures, plus
+/// exact pins for the dedicated openable probe fixtures.
 fn acceptable_doctor_storage_states(fixture_id: &str) -> &'static [&'static str] {
     match fixture_id {
+        "fm-storage-openable-schema-drift" => &["schema_drift"],
+        "fm-storage-openable-legacy-interop" => &["legacy_interop_failed"],
+        "fm-storage-openable-orphan-shm" => &["wal_sidecar_suspect"],
+        "fm-storage-openable-exclusive-writer" => &["busy_or_locked"],
         // Intact DB + a broken/empty *derived* lexical index. Doctor cannot tell
         // a broken in-DB FTS shadow from a broken Tantivy index without the
         // `.14.x` probes, so both index-corruption fixtures read as the same
@@ -1660,16 +1650,9 @@ fn acceptable_doctor_storage_states(fixture_id: &str) -> &'static [&'static str]
         "fm-storage-stale-searcher-cache" | "fm-storage-fts-metadata-mismatch" => {
             &["derived_only_drift"]
         }
-        // Every canonical-broken fixture — header corruption (integrity / openread
-        // / schema-drift / legacy-interop) AND the WAL/SHM sidecar fixtures
-        // (stale-wal-shm / busy-lock) — defeats doctor's read-only opener, so all
-        // six observe a coarse high-risk read-failure (`openread_failed` today;
-        // `integrity_failed` is the documented neighbour if the opener succeeds but
-        // a later integrity probe fails; `unknown_deferred` covers a bounded-probe
-        // timeout under host pressure). The PRECISE cause — `schema_drift` /
-        // `legacy_interop_failed` / `wal_sidecar_suspect` / `busy_or_locked` —
-        // needs the unstarted `.14.2`/`.14.3` schema-version / WAL / busy probes,
-        // so it stays forward metadata until those land.
+        // These six historical byte fixtures defeat the read-only opener, so
+        // generic open/integrity/deferred states correctly dominate. Exact
+        // probe-state coverage uses the separate openable fixtures below.
         "fm-storage-pragma-integrity-fail"
         | "fm-storage-frankensqlite-openread-cursor"
         | "fm-storage-schema-version-drift"
@@ -1990,5 +1973,330 @@ fn doctor_check_projects_storage_state_per_fixture() -> Result<(), String> {
         ));
     }
     tracker.complete();
+    Ok(())
+}
+
+// =============================================================================
+// Dedicated openable-probe fixtures (bead kmasx)
+// =============================================================================
+
+#[derive(Clone, Copy)]
+enum DedicatedFixtureSetup {
+    FutureSchemaVersion,
+    LegacySchemaVersion,
+    OrphanShmOnly,
+    ExclusiveWriter,
+}
+
+#[derive(Clone, Copy)]
+struct DedicatedProbeFixture {
+    id: &'static str,
+    expected_state: &'static str,
+    expected_risk: &'static str,
+    setup: DedicatedFixtureSetup,
+}
+
+fn dedicated_probe_fixtures() -> [DedicatedProbeFixture; 4] {
+    [
+        DedicatedProbeFixture {
+            id: "fm-storage-openable-schema-drift",
+            expected_state: "schema_drift",
+            expected_risk: "medium",
+            setup: DedicatedFixtureSetup::FutureSchemaVersion,
+        },
+        DedicatedProbeFixture {
+            id: "fm-storage-openable-legacy-interop",
+            expected_state: "legacy_interop_failed",
+            expected_risk: "medium",
+            setup: DedicatedFixtureSetup::LegacySchemaVersion,
+        },
+        DedicatedProbeFixture {
+            id: "fm-storage-openable-orphan-shm",
+            expected_state: "wal_sidecar_suspect",
+            expected_risk: "medium",
+            setup: DedicatedFixtureSetup::OrphanShmOnly,
+        },
+        DedicatedProbeFixture {
+            id: "fm-storage-openable-exclusive-writer",
+            expected_state: "busy_or_locked",
+            expected_risk: "low",
+            setup: DedicatedFixtureSetup::ExclusiveWriter,
+        },
+    ]
+}
+
+fn set_probe_fixture_schema_version(db: &Path, legacy: bool) -> Result<(), String> {
+    use frankensqlite::compat::{ConnectionExt as _, ParamValue, RowExt as _};
+
+    let mut conn = frankensqlite::Connection::open(db.display().to_string())
+        .map_err(|err| format!("open probe fixture DB: {err}"))?;
+    let raw_current = conn
+        .query_row_map(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            &[],
+            |row: &frankensqlite::Row| row.get_typed::<String>(0),
+        )
+        .map_err(|err| format!("read fixture schema version: {err}"))?;
+    let current = raw_current
+        .parse::<i64>()
+        .map_err(|err| format!("parse fixture schema version {raw_current:?}: {err}"))?;
+    let diagnostic_version = if legacy { 1 } else { current.saturating_add(1) };
+    conn.execute_compat(
+        "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+        &[ParamValue::from(diagnostic_version.to_string())],
+    )
+    .map_err(|err| format!("set fixture schema version: {err}"))?;
+    // Fixture setup is the mutating phase: close normally so the deliberate
+    // schema marker reaches the main DB before the read-only hash is captured.
+    if conn.close_in_place().is_err() {
+        conn.close_best_effort_in_place();
+    }
+    Ok(())
+}
+
+fn park_fixture_wal_and_create_orphan_shm(data_dir: &Path) -> Result<(), String> {
+    let db = db_path(data_dir);
+    let wal = db.with_file_name("agent_search.db-wal");
+    if wal.exists() {
+        std::fs::rename(&wal, data_dir.join("retained-baseline-wal.fixture"))
+            .map_err(|err| format!("park baseline WAL without deleting evidence: {err}"))?;
+    }
+    std::fs::write(data_dir.join("agent_search.db-shm"), [0_u8; 32])
+        .map_err(|err| format!("write orphan SHM fixture: {err}"))
+}
+
+fn hold_probe_fixture_exclusive_writer(db: &Path) -> Result<frankensqlite::Connection, String> {
+    let conn = frankensqlite::Connection::open(db.display().to_string())
+        .map_err(|err| format!("open exclusive-writer fixture DB: {err}"))?;
+    conn.execute("PRAGMA journal_mode = DELETE;")
+        .map_err(|err| format!("select rollback-journal mode for busy fixture: {err}"))?;
+    conn.execute("BEGIN EXCLUSIVE TRANSACTION;")
+        .map_err(|err| format!("hold exclusive writer transaction: {err}"))?;
+    Ok(conn)
+}
+
+fn retarget_fixture_lexical_checkpoint(data_dir: &Path) -> Result<(), String> {
+    let checkpoint = coding_agent_search::search::tantivy::expected_index_dir(data_dir)
+        .join(".lexical-rebuild-state.json");
+    let bytes = std::fs::read(&checkpoint)
+        .map_err(|err| format!("read copied lexical checkpoint: {err}"))?;
+    let mut value: Value = serde_json::from_slice(&bytes)
+        .map_err(|err| format!("parse copied lexical checkpoint: {err}"))?;
+    let stored_db_path = value
+        .pointer_mut("/db/db_path")
+        .ok_or_else(|| "copied lexical checkpoint lacks db.db_path".to_string())?;
+    *stored_db_path = Value::String(db_path(data_dir).display().to_string());
+    let updated = serde_json::to_vec(&value)
+        .map_err(|err| format!("serialize retargeted lexical checkpoint: {err}"))?;
+    std::fs::write(&checkpoint, updated)
+        .map_err(|err| format!("write retargeted lexical checkpoint: {err}"))
+}
+
+fn parse_complete_json(
+    out: Output,
+    label: &str,
+    allowed_exit_codes: &[i32],
+) -> Result<Value, String> {
+    let code = out
+        .status
+        .code()
+        .ok_or_else(|| format!("{label}: process terminated by signal"))?;
+    if !allowed_exit_codes
+        .iter()
+        .any(|allowed| code.cmp(allowed).is_eq())
+    {
+        return Err(format!(
+            "{label}: unexpected exit={code}, stdout={}, stderr={}",
+            head(&String::from_utf8_lossy(&out.stdout)),
+            head(&String::from_utf8_lossy(&out.stderr)),
+        ));
+    }
+    let stdout = std::str::from_utf8(&out.stdout)
+        .map_err(|err| format!("{label}: stdout not UTF-8: {err}"))?;
+    serde_json::from_str(stdout.trim()).map_err(|err| {
+        format!(
+            "{label}: stdout not pure JSON: {err}; head={}",
+            head(stdout)
+        )
+    })
+}
+
+fn assert_dedicated_surface_state(
+    payload: &Value,
+    pointer: &str,
+    fixture: DedicatedProbeFixture,
+    surface: &str,
+) -> Result<(), String> {
+    let block = payload
+        .pointer(pointer)
+        .ok_or_else(|| format!("{} {surface}: missing {pointer}", fixture.id))?;
+    let state = block
+        .get("storage_state")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{} {surface}: missing storage_state", fixture.id))?;
+    let risk = block
+        .get("source_of_truth_risk")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{} {surface}: missing source_of_truth_risk", fixture.id))?;
+    if !state.cmp(fixture.expected_state).is_eq() || !risk.cmp(fixture.expected_risk).is_eq() {
+        return Err(format!(
+            "{} {surface}: observed state/risk={state}/{risk}, expected={}/{}",
+            fixture.id, fixture.expected_state, fixture.expected_risk
+        ));
+    }
+    let checks = block
+        .get("checks_attempted")
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("{} {surface}: missing checks_attempted", fixture.id))?;
+    let missing_required = [
+        "contention_classification",
+        "schema_version",
+        "wal_sidecar_shape",
+    ]
+    .into_iter()
+    .find(|required| {
+        !checks.iter().any(|check| {
+            check
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| name.cmp(required).is_eq())
+        })
+    });
+    if let Some(required) = missing_required {
+        return Err(format!(
+            "{} {surface}: dedicated probe check {required:?} was not recorded",
+            fixture.id
+        ));
+    }
+    Ok(())
+}
+
+fn run_dedicated_surface(
+    home: &Path,
+    codex_home: &Path,
+    data_dir: &Path,
+    fixture: DedicatedProbeFixture,
+    surface: &str,
+    args: &[&str],
+) -> Result<Value, String> {
+    let out = run_surface_caught(home, codex_home, fixture.id, args, data_dir)
+        .ok_or_else(|| format!("{} {surface}: bounded runner timed out", fixture.id))?;
+    // A read-only doctor check reports the complete structured diagnosis and
+    // then exits 5 when a health failure remains. Status/search stay at 0.
+    let allowed_exit_codes: &[i32] = if surface.cmp("doctor").is_eq() {
+        &[0, 5]
+    } else {
+        &[0]
+    };
+    parse_complete_json(
+        out,
+        &format!("{} {surface}", fixture.id),
+        allowed_exit_codes,
+    )
+}
+
+fn prove_dedicated_fixture_surfaces(
+    home: &Path,
+    codex_home: &Path,
+    template_dd: &Path,
+    fixture: DedicatedProbeFixture,
+) -> Result<(), String> {
+    let data_dir = home.join(fixture.id);
+    copy_tree(template_dd, &data_dir)
+        .map_err(|err| format!("{}: clone baseline fixture: {err}", fixture.id))?;
+    // The copied lexical generation is still valid for the byte-identical
+    // database, but its checkpoint names the template path. Retarget that
+    // derived metadata before introducing the failure mode so search does not
+    // attempt an unrelated self-heal through the deliberately degraded DB.
+    retarget_fixture_lexical_checkpoint(&data_dir)?;
+    let db = db_path(&data_dir);
+
+    let mut exclusive_writer = None;
+    match fixture.setup {
+        DedicatedFixtureSetup::FutureSchemaVersion => {
+            set_probe_fixture_schema_version(&db, false)?;
+        }
+        DedicatedFixtureSetup::LegacySchemaVersion => {
+            set_probe_fixture_schema_version(&db, true)?;
+        }
+        DedicatedFixtureSetup::OrphanShmOnly => {
+            park_fixture_wal_and_create_orphan_shm(&data_dir)?;
+        }
+        DedicatedFixtureSetup::ExclusiveWriter => {
+            exclusive_writer = Some(hold_probe_fixture_exclusive_writer(&db)?);
+        }
+    }
+
+    let hash_before = sha256_hex(
+        &std::fs::read(&db).map_err(|err| format!("{}: read fixture DB: {err}", fixture.id))?,
+    );
+    let dd = data_dir
+        .to_str()
+        .ok_or_else(|| format!("{}: fixture path not UTF-8", fixture.id))?;
+
+    let status = run_dedicated_surface(
+        home,
+        codex_home,
+        &data_dir,
+        fixture,
+        "status",
+        &["status", "--json", "--data-dir", dd],
+    )?;
+    assert_dedicated_surface_state(&status, "/storage_integrity", fixture, "status")?;
+
+    let doctor = run_dedicated_surface(
+        home,
+        codex_home,
+        &data_dir,
+        fixture,
+        "doctor",
+        &["doctor", "--check", "--json", "--data-dir", dd],
+    )?;
+    assert_dedicated_surface_state(&doctor, "/storage_integrity", fixture, "doctor")?;
+
+    let search = run_dedicated_surface(
+        home,
+        codex_home,
+        &data_dir,
+        fixture,
+        "search",
+        &[
+            "search",
+            PROBE_QUERY,
+            "--robot",
+            "--robot-meta",
+            "--fields",
+            "minimal",
+            "--limit",
+            "3",
+            "--data-dir",
+            dd,
+        ],
+    )?;
+    assert_dedicated_surface_state(&search, "/_meta/storage_integrity", fixture, "search")?;
+
+    if let Some(mut writer) = exclusive_writer {
+        let _ = writer.execute("ROLLBACK;");
+        if writer.close_without_checkpoint_in_place().is_err() {
+            writer.close_best_effort_in_place();
+        }
+    }
+    check_db_preserved(&data_dir, &hash_before, true)
+}
+
+/// The four probe-dependent states have dedicated, openable fixtures and are
+/// exact on every truth surface. The busy fixture holds a real exclusive
+/// frankensqlite transaction; no generic `retryable` hint or fabricated WAL is
+/// accepted as contention evidence.
+#[test]
+fn dedicated_openable_fixtures_are_exact_across_status_search_and_doctor() -> Result<(), String> {
+    let (home, template_dd) = isolated_home()?;
+    let codex_home = home.path().join(".codex");
+    std::fs::create_dir_all(&codex_home).map_err(|err| format!("create codex home: {err}"))?;
+    build_baseline(home.path(), &codex_home, &template_dd)?;
+
+    for fixture in dedicated_probe_fixtures() {
+        prove_dedicated_fixture_surfaces(home.path(), &codex_home, &template_dd, fixture)?;
+    }
     Ok(())
 }

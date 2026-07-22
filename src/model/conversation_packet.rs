@@ -414,8 +414,10 @@ impl ConversationPacket {
         );
 
         // Re-derive hashes + projections from the capped payload so the packet
-        // stays internally consistent (mirrors `from_normalized_conversation`).
-        Self::from_payload(self.payload, ConversationPacketBuilder::RawConnectorScan)
+        // stays internally consistent while preserving which authoritative
+        // builder supplied the payload.
+        let builder = self.diagnostics.builder;
+        Self::from_payload(self.payload, builder)
     }
 
     pub fn from_canonical_replay(
@@ -882,6 +884,10 @@ mod tests {
         assert!(total <= 1000, "cumulative content {total} exceeds cap");
         // Projections were re-derived from the capped payload (internally consistent).
         assert!(packet.projections.lexical.total_content_bytes <= 1000);
+        assert_eq!(
+            packet.diagnostics.builder,
+            ConversationPacketBuilder::RawConnectorScan
+        );
     }
 
     #[test]
@@ -941,6 +947,24 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn capped_canonical_packet_preserves_builder_diagnostics() {
+        let mut conv = canonical_conversation();
+        conv.messages[0].content = "a".repeat(600);
+        conv.messages[1].content = "b".repeat(600);
+
+        let packet =
+            ConversationPacket::from_canonical_replay(&conv, ConversationPacketProvenance::local())
+                .capped_for_inline_lexical_index(1000);
+
+        assert_eq!(packet.payload.messages[0].content.len(), 600);
+        assert_eq!(packet.payload.messages[1].content.len(), 400);
+        assert_eq!(
+            packet.diagnostics.builder,
+            ConversationPacketBuilder::CanonicalReplay
+        );
     }
 
     #[test]

@@ -111,6 +111,9 @@ pub struct BundleConfig {
     pub generate_qr: bool,
     /// Additional generated documentation files to include
     pub generated_docs: Vec<GeneratedDoc>,
+    /// Exact `cass analytics status --json` data projection for the source
+    /// archive. Pages consumes this instead of inventing separate readiness.
+    pub analytics_status: Option<serde_json::Value>,
 }
 
 impl Default for BundleConfig {
@@ -122,6 +125,7 @@ impl Default for BundleConfig {
             recovery_secret: None,
             generate_qr: false,
             generated_docs: Vec::new(),
+            analytics_status: None,
         }
     }
 }
@@ -242,6 +246,16 @@ impl BundleBuilder {
                 let dest_path = site_dir.join(name);
                 fs::write(&dest_path, content)
                     .with_context(|| format!("Failed to write {}", name))?;
+            }
+
+            if let Some(status) = &self.config.analytics_status {
+                let status_json = serde_json::to_vec_pretty(status)
+                    .context("Failed to serialize analytics_status.json")?;
+                crate::pages::write_file_durably(
+                    &site_dir.join("analytics_status.json"),
+                    &status_json,
+                )
+                .context("Failed to write analytics_status.json")?;
             }
 
             // Copy payload into site/payload/

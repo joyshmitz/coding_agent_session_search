@@ -106,7 +106,7 @@ The `.env` file exists and **MUST NEVER be overwritten**.
 | `rusqlite` | SQLite database (bundled) — legacy, retained during frankensqlite migration |
 | `frankensearch` | Unified search engine: lexical BM25 + semantic + RRF fusion |
 | `franken_agent_detection` | Agent session auto-detection across 15+ providers |
-| `fastembed` | ONNX-based text embeddings |
+| `frankentorch` (via `frankensearch`) | Pure-Rust native MiniLM embeddings and reranking |
 | `hnsw_rs` | HNSW approximate nearest neighbors |
 | `half` + `wide` + `memmap2` | f16 quantized vectors, portable SIMD, memory-mapped I/O |
 | `ftui` + `ftui-extras` | FrankenTUI terminal interface |
@@ -484,7 +484,7 @@ coding_agent_session_search/
 │   │   ├── two_tier_search.rs    # Progressive 2-tier hybrid search
 │   │   ├── ann_index.rs          # HNSW approximate nearest neighbors
 │   │   ├── hash_embedder.rs      # FNV-1a hash embedder (fast, zero-dep)
-│   │   ├── fastembed_embedder.rs # ONNX-based quality embedder
+│   │   ├── fastembed_embedder.rs # Native MiniLM quality embedder (legacy filename)
 │   │   ├── embedder.rs           # Embedder trait
 │   │   ├── embedder_registry.rs  # Embedder auto-detection
 │   │   ├── reranker.rs           # Cross-encoder reranking

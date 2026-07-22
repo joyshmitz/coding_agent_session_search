@@ -24,12 +24,10 @@
 //!    degraded fallback observable instead of all collapsing into one
 //!    "cache_miss" counter.
 //!
-//! This is pure, side-effect-free logic over recorded observations — the caller
-//! gathers the facts (does the socket connect? is the lock held by a live
-//! process? what generation is the daemon serving vs published?) and this turns
-//! them into a classified, serializable diagnostic. Surface-wiring into the
-//! robot status/doctor/fleet outputs and the bounded daemon probe land in a
-//! follow-on; here we pin the contract and its tests.
+//! The classification itself is pure, side-effect-free logic over recorded
+//! observations. The bounded read-only probe gathers those facts and the live
+//! status/doctor surfaces serialize this contract without spawning a daemon or
+//! mutating archive state.
 
 use serde::{Deserialize, Serialize};
 
@@ -141,6 +139,9 @@ pub struct DaemonRuntimeObservation {
     /// The owning process id, when discoverable (advisory; for the diagnostic).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_pid: Option<u32>,
+    /// Wall-clock heartbeat written by the daemon into its run-lock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat_unix_ms: Option<u64>,
     /// Age of the daemon's last heartbeat in ms, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_heartbeat_age_ms: Option<u64>,
@@ -164,11 +165,16 @@ impl DaemonRuntimeObservation {
         self.run_lock_present && matches!(self.run_lock_acquirable, Some(true))
     }
 
-    /// Whether the served generation is behind the published one.
-    fn generation_is_behind(&self) -> bool {
+    /// Whether the served generation differs from the published one.
+    ///
+    /// Generation identifiers are opaque identities on some backends (for
+    /// example, a digest of atomically-published metadata), so ordering them
+    /// would miss stale readers whenever the newer digest happened to be
+    /// numerically smaller.
+    fn generation_is_stale(&self) -> bool {
         matches!(
             (self.daemon_generation, self.published_generation),
-            (Some(served), Some(published)) if served < published
+            (Some(served), Some(published)) if served != published
         )
     }
 }
@@ -198,7 +204,7 @@ pub fn classify(obs: &DaemonRuntimeObservation) -> DaemonRuntimeState {
 
     // Connected, responsive, but serving an older generation than published: the
     // stale-searcher case a reload fixes.
-    if connected && !matches!(obs.responded_to_ping, Some(false)) && obs.generation_is_behind() {
+    if connected && !matches!(obs.responded_to_ping, Some(false)) && obs.generation_is_stale() {
         return DaemonRuntimeState::GenerationSkew;
     }
 
@@ -601,6 +607,13 @@ mod tests {
         assert!(recovery.action_needed);
         assert!(!recovery.disposable_runtime_artifact);
         assert!(recovery.why.contains("archive is untouched"));
+    }
+
+    #[test]
+    fn b7tb0_opaque_generation_mismatch_is_skew_even_when_new_identity_is_smaller() {
+        let mut obs = live_responsive(9);
+        obs.published_generation = Some(5);
+        assert_eq!(classify(&obs), DaemonRuntimeState::GenerationSkew);
     }
 
     #[test]

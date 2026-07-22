@@ -47,6 +47,9 @@ use notify::{RecursiveMode, Watcher, recommended_watcher};
 use rayon::{ThreadPool, ThreadPoolBuilder, prelude::*};
 use tempfile::Builder as TempDirBuilder;
 
+use crate::connector_ingest_diagnostics::{
+    ConnectorIngestDiagnostic, ConnectorIngestReport, ConnectorIngestRun, ProviderIngestSummary,
+};
 use crate::connectors::NormalizedConversation;
 #[cfg(test)]
 use crate::connectors::NormalizedMessage;
@@ -862,6 +865,12 @@ pub struct IndexingStats {
     pub index_ms: u64,
     /// Per-connector breakdown
     pub connectors: Vec<ConnectorStats>,
+    /// Per-provider source outcomes; unlike conversation counts this preserves
+    /// locked, encrypted, malformed, skipped, and discovered-only sources.
+    pub connector_summary: BTreeMap<String, ProviderIngestSummary>,
+    /// Actionable connector findings. These contain provenance and hashes, but
+    /// never message or malformed-line payload content.
+    pub connector_diagnostics: Vec<ConnectorIngestDiagnostic>,
     /// Agents discovered during scan
     pub agents_discovered: Vec<String>,
     /// Total conversations indexed
@@ -887,6 +896,32 @@ pub struct IndexingStats {
     /// True when SQLite ingest succeeded but inline lexical updates were
     /// deferred and the caller must rebuild lexical assets from the archive.
     pub lexical_update_deferred: bool,
+}
+
+fn record_connector_ingest_report(
+    progress: Option<&Arc<IndexingProgress>>,
+    report: ConnectorIngestReport,
+) {
+    let Some(progress) = progress else {
+        return;
+    };
+    let Ok(mut stats) = progress.stats.lock() else {
+        return;
+    };
+    stats
+        .connector_summary
+        .entry(report.provider)
+        .or_default()
+        .merge(report.summary);
+    stats.connector_diagnostics.extend(report.diagnostics);
+    stats.connector_diagnostics.sort_by(|left, right| {
+        left.provider
+            .cmp(&right.provider)
+            .then_with(|| left.source_path.cmp(&right.source_path))
+            .then_with(|| left.line_or_row.cmp(&right.line_or_row))
+            .then_with(|| left.failure_kind.cmp(&right.failure_kind))
+    });
+    stats.connector_diagnostics.dedup();
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -11693,7 +11728,7 @@ fn spawn_connector_producer(
                 .cloned()
                 .map(ScanRoot::local)
                 .collect();
-            capture_connector_sources_before_parse(
+            let mut ingest_diagnostics = capture_connector_sources_before_parse(
                 conn.as_ref(),
                 &ctx,
                 &config.data_dir,
@@ -11713,6 +11748,7 @@ fn spawn_connector_producer(
                 if should_skip_subagent_source(&conversation.source_path) {
                     return Ok(());
                 }
+                ingest_diagnostics.observe_conversation(&mut conversation);
                 prepare_conversation_for_ingest(
                     &config.data_dir,
                     name,
@@ -11760,6 +11796,7 @@ fn spawn_connector_producer(
                         return;
                     }
                     scan_succeeded = false;
+                    ingest_diagnostics.observe_scan_error(&ctx.data_dir, &e.to_string());
                     tracing::warn!(connector = name, "local scan failed: {}", e);
                     let _ = tx.send(IndexMessage::ScanError {
                         connector_name: name,
@@ -11767,6 +11804,7 @@ fn spawn_connector_producer(
                     });
                 }
             }
+            record_connector_ingest_report(config.progress.as_ref(), ingest_diagnostics.finish());
         }
 
         // Scan explicitly configured additional roots. These may be true remote
@@ -11793,7 +11831,7 @@ fn spawn_connector_producer(
             );
             let mut batch_sender =
                 StreamingBatchSender::new(&tx, config.flow_limiter.clone(), name, is_discovered);
-            capture_connector_sources_before_parse(
+            let mut ingest_diagnostics = capture_connector_sources_before_parse(
                 conn.as_ref(),
                 &ctx,
                 &config.data_dir,
@@ -11813,6 +11851,7 @@ fn spawn_connector_producer(
                 if should_skip_subagent_source(&conversation.source_path) {
                     return Ok(());
                 }
+                ingest_diagnostics.observe_conversation(&mut conversation);
                 prepare_conversation_for_ingest(
                     &config.data_dir,
                     name,
@@ -11881,6 +11920,7 @@ fn spawn_connector_producer(
                         return;
                     }
                     scan_succeeded = false;
+                    ingest_diagnostics.observe_scan_error(&root.path, &e.to_string());
                     tracing::warn!(
                         connector = name,
                         root = %root.path.display(),
@@ -11892,6 +11932,7 @@ fn spawn_connector_producer(
                     });
                 }
             }
+            record_connector_ingest_report(config.progress.as_ref(), ingest_diagnostics.finish());
         }
 
         let scan_ms = scan_start.elapsed().as_millis() as u64;
@@ -12704,7 +12745,7 @@ fn run_batch_index_with_connector_factories(
                         .cloned()
                         .map(ScanRoot::local)
                         .collect();
-                    capture_connector_sources_before_parse(
+                    let mut ingest_diagnostics = capture_connector_sources_before_parse(
                         conn.as_ref(),
                         &ctx,
                         &data_dir,
@@ -12723,6 +12764,9 @@ fn run_batch_index_with_connector_factories(
                                     &conv.source_path,
                                 )
                             });
+                            for conversation in &mut local_convs {
+                                ingest_diagnostics.observe_conversation(conversation);
+                            }
                             for conv in &mut local_convs {
                                 prepare_conversation_for_ingest(
                                     &data_dir,
@@ -12738,10 +12782,15 @@ fn run_batch_index_with_connector_factories(
                             // Note: agent was counted as discovered but scan failed
                             // This is acceptable as detection succeeded (agent exists)
                             scan_succeeded = false;
+                            ingest_diagnostics.observe_scan_error(&ctx.data_dir, &e.to_string());
                             scan_errors.push(e.to_string());
                             tracing::warn!("scan failed for {}: {}", name, e);
                         }
                     }
+                    record_connector_ingest_report(
+                        progress_ref,
+                        ingest_diagnostics.finish(),
+                    );
                 }
 
                 if !additional_scan_roots.is_empty() {
@@ -12765,7 +12814,7 @@ fn run_batch_index_with_connector_factories(
                             vec![root.clone()],
                             root_since_ts,
                         );
-                        capture_connector_sources_before_parse(
+                        let mut ingest_diagnostics = capture_connector_sources_before_parse(
                             conn.as_ref(),
                             &ctx,
                             &data_dir,
@@ -12783,6 +12832,9 @@ fn run_batch_index_with_connector_factories(
                                         &conv.source_path,
                                     )
                                 });
+                                for conversation in &mut remote_convs {
+                                    ingest_diagnostics.observe_conversation(conversation);
+                                }
                                 for conv in &mut remote_convs {
                                     prepare_conversation_for_ingest(
                                         &data_dir,
@@ -12796,6 +12848,8 @@ fn run_batch_index_with_connector_factories(
                             }
                             Err(e) => {
                                 scan_succeeded = false;
+                                ingest_diagnostics
+                                    .observe_scan_error(&root.path, &e.to_string());
                                 scan_errors.push(format!(
                                     "remote scan failed for {}: {}",
                                     root.path.display(),
@@ -12808,6 +12862,10 @@ fn run_batch_index_with_connector_factories(
                                 );
                             }
                         }
+                        record_connector_ingest_report(
+                            progress_ref,
+                            ingest_diagnostics.finish(),
+                        );
                     }
                 }
 
@@ -22370,6 +22428,33 @@ fn clear_poison_jsonl_records(
     reason: &str,
     conversation_ids: &BTreeSet<String>,
 ) -> Result<usize> {
+    clear_poison_jsonl_records_where(data_dir, file_name, reason, |conversation_id, _| {
+        conversation_ids.contains(conversation_id)
+    })
+}
+
+fn clear_poison_jsonl_key_records(
+    data_dir: &Path,
+    file_name: &str,
+    reason: &str,
+    quarantine_keys: &BTreeSet<(String, i64)>,
+) -> Result<usize> {
+    clear_poison_jsonl_records_where(
+        data_dir,
+        file_name,
+        reason,
+        |conversation_id, schema_version| {
+            quarantine_keys.contains(&(conversation_id.to_string(), schema_version))
+        },
+    )
+}
+
+fn clear_poison_jsonl_records_where(
+    data_dir: &Path,
+    file_name: &str,
+    reason: &str,
+    should_clear_key: impl Fn(&str, i64) -> bool,
+) -> Result<usize> {
     let path = data_dir.join("quarantine").join(file_name);
     if !path.exists() {
         return Ok(0);
@@ -22396,7 +22481,9 @@ fn clear_poison_jsonl_records(
                     .then(|| poison_record_key_from_value(&value))
                     .flatten()
             })
-            .is_some_and(|(conversation_id, _)| conversation_ids.contains(&conversation_id));
+            .is_some_and(|(conversation_id, schema_version)| {
+                should_clear_key(&conversation_id, schema_version)
+            });
         if should_clear {
             cleared = cleared.saturating_add(1);
         } else {
@@ -22764,18 +22851,249 @@ fn quarantine_source_missing_ids(data_dir: &Path) -> BTreeSet<String> {
     missing
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QuarantineRetrySource {
+    provider: String,
+    source_path: PathBuf,
+    external_id: Option<String>,
+    workspace: Option<PathBuf>,
+    started_at: Option<i64>,
+    ended_at: Option<i64>,
+    message_count: Option<usize>,
+}
+
+/// Join structured quarantine keys back to the exact source log and connector
+/// recorded in the poison ledger. The ledger deliberately stores no message
+/// body, so retry reparses the authoritative source instead of replaying a
+/// stale or secret-bearing payload from quarantine metadata.
+fn quarantine_retry_sources(data_dir: &Path) -> BTreeMap<QuarantineKey, QuarantineRetrySource> {
+    let quarantine_dir = data_dir.join("quarantine");
+    let mut sources = BTreeMap::new();
+    for file_name in [WATCH_INGEST_POISON_FILE, INDEX_INGEST_POISON_FILE] {
+        let path = quarantine_dir.join(file_name);
+        let Ok(contents) = fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in contents.lines() {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+                continue;
+            };
+            let Some((conversation_id, schema_version)) = poison_record_key_from_value(&value)
+            else {
+                continue;
+            };
+            let Ok(schema_version) = u32::try_from(schema_version) else {
+                continue;
+            };
+            let provider = value
+                .get("agent_slug")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|provider| !provider.is_empty())
+                .or_else(|| conversation_id.split('|').next().map(str::trim))
+                .map(str::to_string);
+            let source_path = value
+                .get("source_path")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|path| !path.is_empty());
+            let (Some(provider), Some(source_path)) = (provider, source_path) else {
+                continue;
+            };
+            sources.insert(
+                QuarantineKey::new(conversation_id, schema_version),
+                QuarantineRetrySource {
+                    provider,
+                    source_path: PathBuf::from(source_path),
+                    external_id: value
+                        .get("external_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    workspace: value
+                        .get("workspace")
+                        .and_then(serde_json::Value::as_str)
+                        .map(PathBuf::from),
+                    started_at: value.get("started_at").and_then(serde_json::Value::as_i64),
+                    ended_at: value.get("ended_at").and_then(serde_json::Value::as_i64),
+                    message_count: value
+                        .get("message_count")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|count| usize::try_from(count).ok()),
+                },
+            );
+        }
+    }
+    sources
+}
+
+fn targeted_quarantine_retry(
+    data_dir: &Path,
+    key: &QuarantineKey,
+    source: Option<&QuarantineRetrySource>,
+) -> quarantine_retry::AttemptResult {
+    match targeted_quarantine_retry_inner(data_dir, key, source) {
+        Ok(result) => result,
+        Err(error) if error_is_out_of_memory(&error) => {
+            quarantine_retry::AttemptResult::OutOfMemory
+        }
+        Err(error) => quarantine_retry::AttemptResult::Failed(error.to_string()),
+    }
+}
+
+fn targeted_quarantine_retry_inner(
+    data_dir: &Path,
+    key: &QuarantineKey,
+    source: Option<&QuarantineRetrySource>,
+) -> Result<quarantine_retry::AttemptResult> {
+    let source = source.context("quarantine retry source metadata is missing")?;
+    if !source.source_path.is_file() {
+        anyhow::bail!(
+            "quarantine retry source is not a readable file: {}",
+            source.source_path.display()
+        );
+    }
+    let kind = ConnectorKind::from_slug(&source.provider).with_context(|| {
+        format!(
+            "quarantine retry does not recognize connector provider {}",
+            source.provider
+        )
+    })?;
+    let connector = kind.create_connector();
+    let root = ScanRoot::local(source.source_path.clone());
+    let context = crate::connectors::ScanContext::with_roots(
+        source.source_path.clone(),
+        vec![root.clone()],
+        None,
+    );
+    let conversations = connector.scan(&context).with_context(|| {
+        format!(
+            "targeted quarantine retry could not parse {}",
+            source.source_path.display()
+        )
+    })?;
+    let mut candidates = conversations
+        .into_iter()
+        .filter(|conversation| {
+            conversation.agent_slug == source.provider
+                && conversation.source_path == source.source_path
+                && source
+                    .started_at
+                    .is_none_or(|started_at| conversation.started_at == Some(started_at))
+                && source
+                    .ended_at
+                    .is_none_or(|ended_at| conversation.ended_at == Some(ended_at))
+                && source
+                    .message_count
+                    .is_none_or(|message_count| conversation.messages.len() == message_count)
+        })
+        .collect::<Vec<_>>();
+    if candidates.len() > 1
+        && let Some(expected_external_id) = source.external_id.as_deref()
+    {
+        candidates.retain(|conversation| {
+            conversation.external_id.as_deref() == Some(expected_external_id)
+        });
+    }
+    if candidates.len() != 1 {
+        anyhow::bail!(
+            "targeted quarantine retry expected exactly one matching conversation in {}, found {}",
+            source.source_path.display(),
+            candidates.len()
+        );
+    }
+    let mut conversation = candidates
+        .into_iter()
+        .next()
+        .context("targeted quarantine retry candidate disappeared")?;
+
+    // The same file may have originally been discovered through a directory
+    // root, while this retry intentionally scans only the exact source. Some
+    // connectors derive external_id/workspace from the scan root, so restore
+    // the canonical identity recorded at quarantine before preparing it again.
+    conversation.external_id.clone_from(&source.external_id);
+    conversation.workspace.clone_from(&source.workspace);
+
+    let origin = Origin::local();
+    prepare_conversation_for_ingest(
+        data_dir,
+        kind.slug(),
+        &origin,
+        Some(&root),
+        &mut conversation,
+    );
+    anyhow::ensure!(
+        poison_conversation_id(&conversation) == key.conversation_id,
+        "targeted quarantine retry identity changed after canonical preparation"
+    );
+    let conversations = [conversation];
+    let db_path = data_dir.join("agent_search.db");
+    let storage = FrankenStorage::open(&db_path)
+        .with_context(|| format!("opening quarantine retry archive {}", db_path.display()))?;
+    storage.run_migrations()?;
+    let index_path = index_dir(data_dir)?;
+    let mut lexical = TantivyIndex::open_or_create(&index_path)?;
+    let outcome = ingest_watch_batch_with_oom_split(
+        &storage,
+        &mut lexical,
+        data_dir,
+        &conversations,
+        &None,
+        true,
+        false,
+    )?;
+
+    if outcome.quarantined_conversations > 0 {
+        return Ok(quarantine_retry::AttemptResult::OutOfMemory);
+    }
+    if outcome.deferred_conversations > 0 {
+        return Ok(quarantine_retry::AttemptResult::Failed(
+            "targeted retry deferred after repeated out-of-memory without attributable host pressure"
+                .to_string(),
+        ));
+    }
+    if outcome.processed_conversations != 1 {
+        return Ok(quarantine_retry::AttemptResult::Failed(format!(
+            "targeted retry processed {} conversations instead of one",
+            outcome.processed_conversations
+        )));
+    }
+    if outcome.batch_outcome.lexical_update_deferred {
+        return Ok(quarantine_retry::AttemptResult::Failed(
+            outcome
+                .batch_outcome
+                .lexical_update_error
+                .unwrap_or_else(|| "targeted retry deferred its lexical update".to_string()),
+        ));
+    }
+    lexical.commit()?;
+    persist::with_ephemeral_writer(
+        &storage,
+        false,
+        "updating targeted quarantine retry last_indexed_at",
+        |writer| writer.set_last_indexed_at(FrankenStorage::now_millis()),
+    )?;
+    Ok(quarantine_retry::AttemptResult::Reindexed)
+}
+
+/// Read-only dry-run for the live quarantine retry command.
+pub fn plan_quarantine_retry(
+    data_dir: &Path,
+    config: &quarantine_retry::RetryConfig,
+) -> quarantine_retry::RetryPlan {
+    let state = QuarantineState::load(data_dir);
+    let source_missing = quarantine_source_missing_ids(data_dir);
+    quarantine_retry::plan_retry(&state, current_cass_version(), config, &source_missing)
+}
+
 /// Operator-facing bounded quarantine retry (#292 ask #3, `cass quarantine
 /// retry`). Wires the internal bounded retry classifier
 /// ([`quarantine_retry::plan_retry`]) to a CLI action.
 ///
-/// This is intentionally non-destructive and bounded: it classifies every
-/// quarantine entry (retry-eligible legacy/version-stale vs. irreducible
-/// same-version vs. source-missing) and, on `apply`, *clears the eligible
-/// entries' quarantine + poison records* so they are re-attempted on the next
-/// `cass index` pass — the existing, proven, batch-OOM-resilient retry trigger
-/// (which now also benefits from the #298 solo isolate-retry). It never clears
-/// irreducible same-version entries unless `eligible_only=false` is explicitly
-/// passed, and never deletes a source log.
+/// This is intentionally bounded: dry-run only classifies entries; `apply`
+/// reparses and persists exactly the quarantined conversation named by each
+/// eligible key. It never substitutes a broad corpus rebuild, never deletes a
+/// source log, and never clears a quarantine record before that exact replay
+/// has durably reached SQLite and the lexical index.
 pub fn run_quarantine_retry(
     data_dir: &Path,
     config: &quarantine_retry::RetryConfig,
@@ -22795,17 +23113,7 @@ pub fn run_quarantine_retry(
         return Ok(quarantine_retry_report_from_plan(&plan, current_version));
     }
 
-    // Apply: clear the eligible (Retry-disposition) entries' quarantine + poison
-    // records so the next `cass index` re-ingests them. Use `execute_retry` to
-    // walk the same plan; the attempt fn clears the matching poison JSONL
-    // records (both watch and index) and reports a clean clear so
-    // `execute_retry` removes the structured state entry.
-    let eligible_ids: BTreeSet<String> = plan
-        .entries
-        .iter()
-        .filter(|entry| entry.disposition == quarantine_retry::PlannedDisposition::Retry)
-        .map(|entry| entry.conversation_id.clone())
-        .collect();
+    let retry_sources = quarantine_retry_sources(data_dir);
 
     let report = quarantine_retry::execute_retry(
         &mut state,
@@ -22813,41 +23121,32 @@ pub fn run_quarantine_retry(
         config,
         &source_missing,
         now,
-        |key| {
-            // Clearing the poison record makes the conversation eligible for
-            // re-ingest on the next index pass. We report `Reindexed` so the
-            // structured state entry is cleared in lockstep.
-            if eligible_ids.contains(&key.conversation_id) {
-                quarantine_retry::AttemptResult::Reindexed
-            } else {
-                // Should not happen (only Retry entries reach the attempt fn),
-                // but stay safe: leave it quarantined.
-                quarantine_retry::AttemptResult::Failed("not_eligible".to_string())
-            }
-        },
+        |key| targeted_quarantine_retry(data_dir, key, retry_sources.get(key)),
     );
 
     // Persist the structured state (the durable resume checkpoint) and clear the
     // matching poison JSONL records for cleared conversations.
-    if let Err(err) = state.save(data_dir) {
-        tracing::warn!(
-            data_dir = %data_dir.display(),
-            error = %err,
-            "failed to persist quarantine state after retry clear"
-        );
-    }
-    let cleared_ids: BTreeSet<String> = report
+    state
+        .save(data_dir)
+        .context("persisting quarantine state after targeted retry")?;
+    let cleared_keys: BTreeSet<(String, i64)> = report
         .entries
         .iter()
         .filter(|entry| entry.outcome == quarantine_retry::RetryOutcome::RetriedCleared)
-        .map(|entry| entry.conversation_id.clone())
+        .map(|entry| {
+            (
+                entry.conversation_id.clone(),
+                i64::from(entry.schema_version),
+            )
+        })
         .collect();
-    if !cleared_ids.is_empty() {
+    if !cleared_keys.is_empty() {
         for (file_name, reason) in [
             (WATCH_INGEST_POISON_FILE, "watch-ingest-out-of-memory"),
             (INDEX_INGEST_POISON_FILE, "index-ingest-out-of-memory"),
         ] {
-            if let Err(err) = clear_poison_jsonl_records(data_dir, file_name, reason, &cleared_ids)
+            if let Err(err) =
+                clear_poison_jsonl_key_records(data_dir, file_name, reason, &cleared_keys)
             {
                 tracing::warn!(
                     data_dir = %data_dir.display(),
@@ -23459,7 +23758,7 @@ fn reindex_paths_with_semantic_delta(
             since_ts,
         );
 
-        capture_connector_sources_before_parse(
+        let mut ingest_diagnostics = capture_connector_sources_before_parse(
             conn.as_ref(),
             &ctx,
             &opts.data_dir,
@@ -23474,6 +23773,7 @@ fn reindex_paths_with_semantic_delta(
         let mut convs = match conn.scan(&ctx) {
             Ok(c) => c,
             Err(e) => {
+                ingest_diagnostics.observe_scan_error(&root.path, &e.to_string());
                 tracing::debug!(
                     "watch scan failed for {:?} at {}: {}",
                     kind,
@@ -23503,6 +23803,11 @@ fn reindex_paths_with_semantic_delta(
             );
         }
         let preserve_this_watch_watermark = preserve_watch_watermark || active_sources_skipped > 0;
+
+        for conversation in &mut convs {
+            ingest_diagnostics.observe_conversation(conversation);
+        }
+        record_connector_ingest_report(opts.progress.as_ref(), ingest_diagnostics.finish());
 
         // Provenance injection and path rewriting
         for conv in &mut convs {
@@ -24595,8 +24900,8 @@ fn capture_connector_sources_before_parse(
     fallback_roots: &[ScanRoot],
     since_ts: Option<i64>,
     active_source_filter: &ActiveSessionSourceFilter,
-) {
-    match connector.discover_source_files(ctx) {
+) -> ConnectorIngestRun {
+    let (observed_sources, discovery_error) = match connector.discover_source_files(ctx) {
         Ok(sources) if !sources.is_empty() => {
             let primary_source_count = sources
                 .iter()
@@ -24614,7 +24919,7 @@ fn capture_connector_sources_before_parse(
                     "deferring large primary source raw-mirror capture to per-conversation streaming path"
                 );
             }
-            for source in sources {
+            for source in &sources {
                 if should_skip_active_session_source(
                     active_source_filter,
                     &source.origin.source_id,
@@ -24627,8 +24932,21 @@ fn capture_connector_sources_before_parse(
                 {
                     continue;
                 }
-                capture_discovered_source_file_before_parse(data_dir, provider, &source);
+                capture_discovered_source_file_before_parse(data_dir, provider, source);
             }
+            (
+                sources
+                    .into_iter()
+                    .filter(|source| {
+                        !should_skip_active_session_source(
+                            active_source_filter,
+                            &source.origin.source_id,
+                            &source.source_path,
+                        )
+                    })
+                    .collect(),
+                None,
+            )
         }
         Ok(_) => {
             for root in fallback_roots {
@@ -24640,6 +24958,7 @@ fn capture_connector_sources_before_parse(
                     active_source_filter,
                 );
             }
+            (Vec::new(), None)
         }
         Err(error) => {
             tracing::warn!(
@@ -24656,8 +24975,14 @@ fn capture_connector_sources_before_parse(
                     active_source_filter,
                 );
             }
+            (Vec::new(), Some(error.to_string()))
         }
+    };
+    let mut run = ConnectorIngestRun::begin(provider, data_dir, ctx, &observed_sources);
+    if let Some(error) = discovery_error {
+        run.observe_scan_error(&ctx.data_dir, &error);
     }
+    run
 }
 
 fn should_skip_raw_mirror_capture_for_logical_source(path: &Path) -> bool {
@@ -25172,16 +25497,25 @@ pub mod persist {
     /// twice; this helper walks once and yields a slice of positional
     /// indices that `TantivyIndex::add_messages_from_packet` can use
     /// directly.
-    fn lexical_packet_for_persist(conv: &NormalizedConversation) -> ConversationPacket {
+    fn lexical_packet_for_persist(conv: &Conversation) -> ConversationPacket {
         // #291 Gap A: the incremental/`--watch` inline ingest path materializes the
         // whole conversation here, so a heavy (image/base64) conversation would
         // OOM→bisect→quarantine exactly as the `--full` rebuild did before #290.
         // Apply the same per-conversation lexical content cap that
         // `fetch_messages_for_lexical_rebuild` applies on the `--full` path, so the
         // watch daemon truncates indexed text instead of quarantining.
-        ConversationPacket::from_normalized_conversation(
+        ConversationPacket::from_canonical_replay(
             conv,
-            ConversationPacketProvenance::local(),
+            ConversationPacketProvenance {
+                source_id: conv.source_id.clone(),
+                origin_kind: crate::search::tantivy::normalized_index_origin_kind(
+                    &conv.source_id,
+                    None,
+                ),
+                origin_host: crate::search::tantivy::normalized_index_origin_host(
+                    conv.origin_host.as_deref(),
+                ),
+            },
         )
         .capped_for_inline_lexical_index(
             crate::storage::sqlite::lexical_max_conversation_content_bytes(),
@@ -26220,7 +26554,7 @@ pub mod persist {
 
         let mut skip_inline_lexical_updates = false;
         for (idx, outcome) in ordered {
-            let conv = &convs[idx];
+            let internal_conv = &internal_convs[idx];
             batch_outcome.record_insert_outcome(&outcome);
             if defer_lexical_updates || skip_inline_lexical_updates {
                 if capture_semantic_delta {
@@ -26239,7 +26573,7 @@ pub mod persist {
             match lexical_strategy {
                 LexicalPopulationStrategy::DeferredAuthoritativeDbRebuild => continue,
                 LexicalPopulationStrategy::InlineRebuildFromScan => {
-                    let packet = lexical_packet_for_persist(conv);
+                    let packet = lexical_packet_for_persist(internal_conv);
                     t_index
                         .as_deref_mut()
                         .expect("inline rebuild requires Tantivy writer")
@@ -26252,7 +26586,7 @@ pub mod persist {
                 }
                 LexicalPopulationStrategy::IncrementalInline => {
                     if !outcome.inserted_indices.is_empty() {
-                        let packet = lexical_packet_for_persist(conv);
+                        let packet = lexical_packet_for_persist(internal_conv);
                         let positional =
                             positional_indices_for_inserted(&packet, &outcome.inserted_indices);
                         if !positional.is_empty() {
@@ -26439,12 +26773,12 @@ pub mod persist {
         conv: &NormalizedConversation,
     ) -> Result<()> {
         tracing::info!(agent = %conv.agent_slug, messages = conv.messages.len(), "persist_conversation");
+        let internal_conv = map_to_internal(conv);
         let InsertOutcome {
             conversation_id,
             conversation_inserted: _conversation_inserted,
             inserted_indices,
         } = with_ephemeral_writer(storage, false, "persist_conversation", |writer| {
-            let internal_conv = map_to_internal(conv);
             let agent = Agent {
                 id: None,
                 slug: conv.agent_slug.clone(),
@@ -26468,7 +26802,7 @@ pub mod persist {
         // ibuuh.32 sink migration; equivalence guaranteed by
         // tests::persist_packet_pipeline_matches_legacy_for_incremental_inline.
         if !defer_lexical_updates_enabled() && !inserted_indices.is_empty() {
-            let packet = lexical_packet_for_persist(conv);
+            let packet = lexical_packet_for_persist(&internal_conv);
             let positional = positional_indices_for_inserted(&packet, &inserted_indices);
             if !positional.is_empty() {
                 t_index.add_messages_from_packet(
@@ -26491,12 +26825,12 @@ pub mod persist {
     ) -> Result<()> {
         let total_started = Instant::now();
         let db_started = Instant::now();
+        let internal_conv = map_to_internal(conv);
         let InsertOutcome {
             conversation_id,
             conversation_inserted: _conversation_inserted,
             inserted_indices,
         } = with_ephemeral_writer(storage, false, "persist_conversation", |writer| {
-            let internal_conv = map_to_internal(conv);
             let agent = Agent {
                 id: None,
                 slug: conv.agent_slug.clone(),
@@ -26518,7 +26852,7 @@ pub mod persist {
 
         if !defer_lexical_updates_enabled() && !inserted_indices.is_empty() {
             let packet_started = Instant::now();
-            let packet = lexical_packet_for_persist(conv);
+            let packet = lexical_packet_for_persist(&internal_conv);
             profile.packet_duration += packet_started.elapsed();
 
             let positional_started = Instant::now();
@@ -26684,11 +27018,13 @@ pub mod persist {
                 let cache_enabled = IndexingCache::is_enabled();
                 let mut cache = IndexingCache::new();
 
-                // Prepare data for batched insert: (agent_id, workspace_id, Conversation)
-                let mut prepared: Vec<(i64, Option<i64>, Conversation)> =
+                // Prepare data for batched insert without consuming the canonical
+                // conversations: the same redacted payload must feed both SQLite
+                // and the derived lexical sink after the transaction commits.
+                let mut prepared: Vec<(i64, Option<i64>, &Conversation)> =
                     Vec::with_capacity(convs.len());
 
-                for (conv, internal_conv) in convs.iter().zip(internal_convs) {
+                for (conv, internal_conv) in convs.iter().zip(internal_convs.iter()) {
                     let agent = Agent {
                         id: None,
                         slug: conv.agent_slug.clone(),
@@ -26728,14 +27064,12 @@ pub mod persist {
                     );
                 }
 
-                let refs: Vec<(i64, Option<i64>, &Conversation)> =
-                    prepared.iter().map(|(a, w, c)| (*a, *w, c)).collect();
-                let chunk_size = serial_batch_chunk_size().min(refs.len().max(1));
-                let mut outcomes = Vec::with_capacity(refs.len());
+                let chunk_size = serial_batch_chunk_size().min(prepared.len().max(1));
+                let mut outcomes = Vec::with_capacity(prepared.len());
 
-                for start in (0..refs.len()).step_by(chunk_size) {
-                    let end = (start + chunk_size).min(refs.len());
-                    let chunk_refs = &refs[start..end];
+                for start in (0..prepared.len()).step_by(chunk_size) {
+                    let end = (start + chunk_size).min(prepared.len());
+                    let chunk_refs = &prepared[start..end];
                     outcomes.extend(writer.insert_conversations_batched(chunk_refs)?);
                 }
 
@@ -26752,7 +27086,7 @@ pub mod persist {
             // set) and IncrementalInline (positional subset derived
             // from outcome.inserted_indices).
             let mut skip_inline_lexical_updates = false;
-            for (conv, outcome) in convs.iter().zip(outcomes.iter()) {
+            for (internal_conv, outcome) in internal_convs.iter().zip(outcomes.iter()) {
                 batch_outcome.record_insert_outcome(outcome);
                 if skip_inline_lexical_updates {
                     continue;
@@ -26760,7 +27094,7 @@ pub mod persist {
                 match lexical_strategy {
                     LexicalPopulationStrategy::DeferredAuthoritativeDbRebuild => continue,
                     LexicalPopulationStrategy::InlineRebuildFromScan => {
-                        let packet = lexical_packet_for_persist(conv);
+                        let packet = lexical_packet_for_persist(internal_conv);
                         t_index
                             .as_deref_mut()
                             .expect("inline rebuild requires Tantivy writer")
@@ -26773,7 +27107,7 @@ pub mod persist {
                     }
                     LexicalPopulationStrategy::IncrementalInline => {
                         if !outcome.inserted_indices.is_empty() {
-                            let packet = lexical_packet_for_persist(conv);
+                            let packet = lexical_packet_for_persist(internal_conv);
                             let positional =
                                 positional_indices_for_inserted(&packet, &outcome.inserted_indices);
                             if !positional.is_empty() {
@@ -28504,6 +28838,140 @@ pub mod persist {
 
         #[test]
         #[serial]
+        fn incremental_lexical_redaction_matches_canonical_rebuild() {
+            use crate::search::query::{FieldMask, SearchClient, SearchFilters};
+
+            let _begin_guard = set_env("CASS_INDEXER_BEGIN_CONCURRENT", "0");
+            let _defer_guard = set_env("CASS_DEFER_LEXICAL_UPDATES", "0");
+            let _redact_guard = set_env("CASS_REDACT_SECRETS", "1");
+
+            let dir = tempfile::TempDir::new().unwrap();
+            let data_dir = dir.path().join("data");
+            std::fs::create_dir_all(&data_dir).unwrap();
+            let db_path = data_dir.join("agent_search.db");
+            let index_path = crate::search::tantivy::index_dir(&data_dir).unwrap();
+
+            let storage = create_franken_db(&db_path);
+            let mut t_index = TantivyIndex::open_or_create(&index_path).unwrap();
+            // Joined at compile time from two literals (no contiguous source literal)
+            // so the value still exercises redaction without tripping secret scanners.
+            let secret = concat!("sk_live_", "ABCdef0123456789AAAAbbbb0007");
+            let secret_tail = "ABCdef0123456789AAAAbbbb0007";
+            let safe_canary = "canary0007";
+            let conv = NormalizedConversation {
+                agent_slug: "codex".to_string(),
+                external_id: Some("incremental-redaction".to_string()),
+                title: Some(format!("Sensitive title {secret}")),
+                workspace: Some(std::path::PathBuf::from("/work/private")),
+                source_path: std::path::PathBuf::from("/logs/private-session.jsonl"),
+                started_at: Some(1_700_000_000_000),
+                ended_at: Some(1_700_000_001_000),
+                metadata: serde_json::json!({
+                    "cass": {
+                        "origin": {
+                            "source_id": "work-laptop",
+                            "kind": "ssh",
+                            "host": "devbox"
+                        }
+                    }
+                }),
+                messages: vec![NormalizedMessage {
+                    idx: 0,
+                    role: "user".to_string(),
+                    author: Some("tester".to_string()),
+                    created_at: Some(1_700_000_000_000),
+                    content: format!("safe marker {safe_canary}; secret {secret}"),
+                    extra: serde_json::json!({"credential": secret}),
+                    snippets: Vec::new(),
+                    invocations: Vec::new(),
+                }],
+            };
+
+            persist_conversations_batched(
+                &storage,
+                Some(&mut t_index),
+                &[conv],
+                LexicalPopulationStrategy::IncrementalInline,
+                false,
+            )
+            .expect("incremental persistence should succeed");
+            t_index.commit().unwrap();
+            drop(t_index);
+
+            let stable_hit = |client: &SearchClient| {
+                let leaked = client
+                    .search(
+                        secret_tail,
+                        SearchFilters::default(),
+                        10,
+                        0,
+                        FieldMask::FULL,
+                    )
+                    .unwrap();
+                assert!(
+                    leaked.is_empty(),
+                    "the raw secret tail must not be searchable: {leaked:?}"
+                );
+
+                let hits = client
+                    .search(
+                        safe_canary,
+                        SearchFilters::default(),
+                        10,
+                        0,
+                        FieldMask::FULL,
+                    )
+                    .unwrap();
+                assert_eq!(hits.len(), 1, "safe canary should find one redacted hit");
+                let hit = &hits[0];
+                for (field, value) in [
+                    ("title", hit.title.as_str()),
+                    ("snippet", hit.snippet.as_str()),
+                    ("content", hit.content.as_str()),
+                ] {
+                    assert!(
+                        !value.contains(secret) && !value.contains(secret_tail),
+                        "{field} leaked raw secret material: {value}"
+                    );
+                }
+                (
+                    hit.title.clone(),
+                    hit.snippet.clone(),
+                    hit.content.clone(),
+                    hit.source_path.clone(),
+                    hit.agent.clone(),
+                    hit.workspace.clone(),
+                    hit.workspace_original.clone(),
+                    hit.created_at,
+                    hit.line_number,
+                    hit.source_id.clone(),
+                    hit.origin_kind.clone(),
+                    hit.origin_host.clone(),
+                )
+            };
+
+            let incremental_client = SearchClient::open(&index_path, None)
+                .unwrap()
+                .expect("incremental lexical reader");
+            let incremental_hit = stable_hit(&incremental_client);
+            drop(incremental_client);
+
+            let rebuild = crate::indexer::rebuild_tantivy_from_db(&db_path, &data_dir, 1, None)
+                .expect("canonical lexical rebuild should succeed");
+            assert_eq!(rebuild.indexed_docs, 1);
+
+            let rebuilt_client = SearchClient::open(&index_path, None)
+                .unwrap()
+                .expect("rebuilt lexical reader");
+            let rebuilt_hit = stable_hit(&rebuilt_client);
+            assert_eq!(
+                incremental_hit, rebuilt_hit,
+                "incremental and canonical-rebuild hits must agree on stable fields"
+            );
+        }
+
+        #[test]
+        #[serial]
         fn persist_conversations_batched_parallel_pre_map_preserves_content_in_begin_concurrent_path()
          {
             // Mirror of the serial-path regression test: prove that the
@@ -29485,7 +29953,7 @@ pub mod persist {
                 ],
             };
 
-            let packet = lexical_packet_for_persist(&conv);
+            let packet = lexical_packet_for_persist(&map_to_internal(&conv));
             assert_eq!(
                 packet.payload.messages.len(),
                 3,
@@ -38751,23 +39219,48 @@ mod tests {
         Ok(())
     }
 
-    /// #292 ask #3: `cass quarantine retry` (bounded). Dry-run classifies without
-    /// mutating; `--apply` clears the version-eligible entries (so the next
-    /// index re-ingests them) while leaving irreducible same-version entries
-    /// quarantined.
+    /// xaztn: dry-run classifies without mutation; apply reparses exactly the
+    /// keyed source conversation and persists it before clearing quarantine.
     #[test]
     #[serial]
-    fn run_quarantine_retry_dry_run_then_apply_clears_only_eligible() -> Result<()> {
+    fn xaztn_targeted_quarantine_retry_reingests_exact_conversation() -> Result<()> {
         let tmp = TempDir::new()?;
         let data_dir = tmp.path().join("data");
         std::fs::create_dir_all(&data_dir)?;
+        let source_path = tmp
+            .path()
+            .join(".codex/sessions/2026/07/rollout-retry.jsonl");
+        std::fs::create_dir_all(source_path.parent().context("source parent")?)?;
+        std::fs::write(
+            &source_path,
+            r#"{"timestamp":"2026-07-22T05:00:00.000Z","type":"session_meta","payload":{"id":"targeted-retry","cwd":"/data/projects/cass"}}
+{"timestamp":"2026-07-22T05:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"xaztn targeted quarantine retry"}]}}
+{"timestamp":"2026-07-22T05:00:02.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"targeted retry complete"}]}}
+"#,
+        )?;
+
+        let connector = CodexConnector::new();
+        let root = ScanRoot::local(source_path.clone());
+        let context =
+            crate::connectors::ScanContext::with_roots(source_path.clone(), vec![root], None);
+        let mut scanned = connector.scan(&context)?;
+        anyhow::ensure!(scanned.len() == 1, "fixture must parse one conversation");
+        let scanned_conversation = scanned
+            .first_mut()
+            .context("missing fixture conversation")?;
+        scanned_conversation.external_id = Some("sessions/2026/07/rollout-retry".to_string());
+        let conversation_id = poison_conversation_id(scanned_conversation);
+        let schema_version = u32::try_from(crate::storage::sqlite::CURRENT_SCHEMA_VERSION)?;
 
         let now = chrono::Utc::now();
         let mut state = QuarantineState::default();
         // One eligible (version-stale) entry + one irreducible (same-version).
-        let eligible = QuarantineKey::new("conv-eligible", 3);
+        let eligible = QuarantineKey::new(&conversation_id, schema_version);
+        let eligible_storage_key = format!("{conversation_id}::v{schema_version}");
         state.record_attempt(&eligible, "index-ingest-out-of-memory: out of memory", now);
-        let irreducible = QuarantineKey::new("conv-irreducible", 3);
+        let irreducible_schema_version = schema_version.checked_add(1).context("schema version")?;
+        let irreducible = QuarantineKey::new(&conversation_id, irreducible_schema_version);
+        let irreducible_storage_key = format!("{conversation_id}::v{irreducible_schema_version}");
         state.record_attempt(
             &irreducible,
             "index-ingest-out-of-memory: out of memory",
@@ -38775,34 +39268,61 @@ mod tests {
         );
         // Demote the eligible entry to an older version so it is retry-eligible;
         // the irreducible entry keeps the current version.
-        if let Some(record) = state.entries.get_mut("conv-eligible::v3") {
+        if let Some(record) = state.entries.get_mut(&eligible_storage_key) {
             record.cass_version_at_quarantine = Some("0.0.1-old".to_string());
         }
         state.save(&data_dir)?;
+        let quarantine_dir = data_dir.join("quarantine");
+        std::fs::create_dir_all(&quarantine_dir)?;
+        std::fs::write(
+            quarantine_dir.join(INDEX_INGEST_POISON_FILE),
+            format!(
+                "{}\n{}\n",
+                serde_json::json!({
+                    "conversation_id": conversation_id,
+                    "schema_version_at_quarantine": schema_version,
+                    "cass_version_at_quarantine": "0.0.1-old",
+                    "reason": "index-ingest-out-of-memory",
+                    "agent_slug": "codex",
+                    "external_id": scanned_conversation.external_id,
+                    "source_path": source_path.display().to_string(),
+                    "workspace": scanned_conversation.workspace.as_ref().map(|path| path.display().to_string()),
+                    "started_at": scanned_conversation.started_at,
+                    "ended_at": scanned_conversation.ended_at,
+                    "message_count": scanned_conversation.messages.len(),
+                }),
+                serde_json::json!({
+                    "conversation_id": conversation_id,
+                    "schema_version_at_quarantine": irreducible_schema_version,
+                    "cass_version_at_quarantine": env!("CARGO_PKG_VERSION"),
+                    "reason": "index-ingest-out-of-memory",
+                    "agent_slug": "codex",
+                    "external_id": scanned_conversation.external_id,
+                    "source_path": source_path.display().to_string(),
+                    "workspace": scanned_conversation.workspace.as_ref().map(|path| path.display().to_string()),
+                    "started_at": scanned_conversation.started_at,
+                    "ended_at": scanned_conversation.ended_at,
+                    "message_count": scanned_conversation.messages.len(),
+                }),
+            ),
+        )?;
 
         let config = quarantine_retry::RetryConfig::default();
 
-        // Dry-run: report classification, mutate nothing.
-        let dry = run_quarantine_retry(&data_dir, &config, false)?;
-        anyhow::ensure!(dry.total_quarantined_before == 2);
+        let dry = plan_quarantine_retry(&data_dir, &config);
+        anyhow::ensure!(dry.total_quarantined == 2);
+        anyhow::ensure!(dry.planned_attempts == 1);
         anyhow::ensure!(
-            dry.cleared == 0,
-            "dry run must not clear anything; got {}",
-            dry.cleared
-        );
-        anyhow::ensure!(
-            dry.skipped_irreducible == 1,
+            dry.skip_irreducible == 1,
             "the same-version entry is irreducible; got {}",
-            dry.skipped_irreducible
+            dry.skip_irreducible
         );
-        // Nothing removed from disk.
         anyhow::ensure!(QuarantineState::load(&data_dir).len() == 2);
 
-        // Apply: clear the eligible entry, keep the irreducible one.
         let applied = run_quarantine_retry(&data_dir, &config, true)?;
         anyhow::ensure!(
             applied.cleared == 1,
-            "apply clears the one eligible entry; got {}",
+            "apply re-ingests and clears the one eligible entry; got {}",
             applied.cleared
         );
         anyhow::ensure!(
@@ -38811,8 +39331,29 @@ mod tests {
             applied.remaining_quarantined
         );
         let after = QuarantineState::load(&data_dir);
-        anyhow::ensure!(!after.entries.contains_key("conv-eligible::v3"));
-        anyhow::ensure!(after.entries.contains_key("conv-irreducible::v3"));
+        anyhow::ensure!(!after.entries.contains_key(&eligible_storage_key));
+        anyhow::ensure!(after.entries.contains_key(&irreducible_storage_key));
+        let poison_after =
+            std::fs::read_to_string(data_dir.join("quarantine").join(INDEX_INGEST_POISON_FILE))?;
+        anyhow::ensure!(!poison_after.contains(&format!(
+            "\"schema_version_at_quarantine\":{schema_version}"
+        )));
+        anyhow::ensure!(poison_after.contains(&format!(
+            "\"schema_version_at_quarantine\":{irreducible_schema_version}"
+        )));
+        let storage = FrankenStorage::open(&data_dir.join("agent_search.db"))?;
+        let message_count: i64 =
+            storage
+                .raw()
+                .query_row_map("SELECT COUNT(*) FROM messages", &[], |row| row.get_typed(0))?;
+        anyhow::ensure!(
+            message_count == 2,
+            "targeted retry must persist two messages"
+        );
+        anyhow::ensure!(
+            source_path.is_file(),
+            "retry must not delete the source log"
+        );
         Ok(())
     }
 
@@ -45897,6 +46438,118 @@ mod tests {
             .query_row_map("SELECT COUNT(*) FROM messages", &[], |row| row.get_typed(0))
             .unwrap();
         assert_eq!(message_count, 2);
+    }
+
+    #[test]
+    #[serial]
+    fn connector_diagnostics_mixed_corpus_indexes_valid_records_and_quarantines_bad_line() {
+        use crate::search::query::{FieldMask, SearchClient, SearchFilters};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("cass-data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        let codex_session = tmp
+            .path()
+            .join(".codex/sessions/2026/07/22/rollout-mixed.jsonl");
+        std::fs::create_dir_all(codex_session.parent().unwrap()).unwrap();
+        std::fs::write(
+            &codex_session,
+            r#"{"timestamp":"2026-07-22T06:00:00.000Z","type":"session_meta","payload":{"id":"mixed-codex","cwd":"/workspace/mixed"}}
+{"timestamp":"2026-07-22T06:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"stmh6-codex-searchable"}]}}
+{malformed connector line}
+{"timestamp":"2026-07-22T06:00:02.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"stmh6-codex-tail-searchable"}]}}
+"#,
+        )
+        .unwrap();
+
+        let amp_threads = tmp.path().join("amp/threads");
+        std::fs::create_dir_all(&amp_threads).unwrap();
+        let amp_session = amp_threads.join("未来-thread-名前.json");
+        std::fs::write(
+            &amp_session,
+            r#"{"id":"mixed-amp","messages":[{"role":"user","content":"stmh6-amp-searchable"}]}"#,
+        )
+        .unwrap();
+
+        let progress = Arc::new(IndexingProgress::default());
+        let opts = super::IndexOptions {
+            full: false,
+            watch: false,
+            force_rebuild: false,
+            watch_once_paths: Some(vec![codex_session.clone(), amp_session.clone()]),
+            db_path: data_dir.join("db.sqlite"),
+            data_dir: data_dir.clone(),
+            semantic: false,
+            build_hnsw: false,
+            embedder: "fastembed".to_string(),
+            progress: Some(Arc::clone(&progress)),
+            watch_interval_secs: 30,
+        };
+        let storage = FrankenStorage::open(&opts.db_path).unwrap();
+        let index_path = index_dir(&opts.data_dir).unwrap();
+        let state = Mutex::new(HashMap::new());
+        let storage = Mutex::new(storage);
+        let t_index = Mutex::new(None);
+        let roots = vec![
+            (
+                ConnectorKind::Codex,
+                ScanRoot::local(codex_session.parent().unwrap().to_path_buf()),
+            ),
+            (ConnectorKind::Amp, ScanRoot::local(amp_threads)),
+        ];
+
+        let indexed = reindex_paths(
+            &opts,
+            vec![codex_session, amp_session],
+            &roots,
+            &state,
+            &storage,
+            &t_index,
+            &index_path,
+            false,
+        )
+        .unwrap();
+        assert_eq!(indexed, 2);
+
+        let message_count: i64 = storage
+            .lock()
+            .unwrap()
+            .raw()
+            .query_row_map("SELECT COUNT(*) FROM messages", &[], |row| row.get_typed(0))
+            .unwrap();
+        assert_eq!(message_count, 3);
+
+        let stats = progress.stats.lock().unwrap();
+        let codex = stats.connector_summary.get("codex").unwrap();
+        assert_eq!(codex.partially_indexed, 1);
+        let amp = stats.connector_summary.get("amp").unwrap();
+        assert_eq!(amp.indexed, 1);
+        assert_eq!(stats.connector_diagnostics.len(), 1);
+        assert_eq!(
+            stats.connector_diagnostics[0].failure_kind,
+            crate::connector_ingest_diagnostics::IngestFailureKind::MalformedJsonLine
+        );
+        assert_eq!(stats.connector_diagnostics[0].line_or_row, Some(3));
+        drop(stats);
+        drop(t_index);
+
+        let client = SearchClient::open(&index_path, None).unwrap().unwrap();
+        for marker in ["stmh6-codex-tail-searchable", "stmh6-amp-searchable"] {
+            let hits = client
+                .search(marker, SearchFilters::default(), 10, 0, FieldMask::FULL)
+                .unwrap();
+            assert!(
+                !hits.is_empty(),
+                "missing searchable mixed-corpus marker: {marker}"
+            );
+        }
+
+        let quarantine =
+            std::fs::read_to_string(data_dir.join("quarantine/connector_ingest_lines.json"))
+                .unwrap();
+        assert!(!quarantine.contains("{malformed connector line}"));
+        assert!(quarantine.contains("payload_blake3"));
     }
 
     #[test]

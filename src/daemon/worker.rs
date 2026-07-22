@@ -172,13 +172,9 @@ fn resolve_embedder_kind(
 
     let normalized_name = match model_name.to_ascii_lowercase().as_str() {
         "fastembed" | "minilm" | "minilm-384" | "all-minilm-l6-v2" => DEFAULT_SEMANTIC_MODEL,
-        "snowflake-arctic-s" | "snowflake-arctic-s-384" | "snowflake-arctic-embed-s" => {
-            "snowflake-arctic-s"
-        }
-        "nomic-embed" | "nomic-embed-768" | "nomic-embed-text-v1.5" => "nomic-embed",
         _ => {
             anyhow::bail!(
-                "unsupported semantic model '{model_name}' for daemon embedding worker; supported: minilm, snowflake-arctic-s, nomic-embed"
+                "unsupported semantic model '{model_name}' for daemon embedding worker; the pure-Rust native backend supports only minilm (all-MiniLM-L6-v2)"
             );
         }
     };
@@ -709,7 +705,7 @@ mod tests {
     /// short-circuit would still be rescued by the name match and
     /// silently pass. This test pins the flag-only contract by
     /// passing semantic model names with `use_semantic=false`: every
-    /// registered FastEmbedder name MUST resolve to `Hash` purely
+    /// any configured name MUST resolve to `Hash` purely
     /// because the flag is false, regardless of name.
     #[test]
     fn test_resolve_embedder_kind_use_semantic_false_short_circuits_regardless_of_name() {
@@ -718,10 +714,7 @@ mod tests {
             "minilm-384",
             "all-minilm-l6-v2",
             "fastembed",
-            "snowflake-arctic-s",
-            "snowflake-arctic-embed-s",
-            "nomic-embed",
-            "nomic-embed-text-v1.5",
+            "legacy-unavailable-model",
             "MINILM",
         ] {
             assert_eq!(
@@ -751,15 +744,12 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_embedder_kind_registered_fastembed_models() {
-        assert_eq!(
-            resolve_embedder_kind("snowflake-arctic-s", true).unwrap(),
-            fast_embed_kind("snowflake-arctic-s", "snowflake-arctic-s-384")
-        );
-        assert_eq!(
-            resolve_embedder_kind("nomic-embed-text-v1.5", true).unwrap(),
-            fast_embed_kind("nomic-embed", "nomic-embed-768")
-        );
+    fn test_resolve_embedder_kind_rejects_unverified_native_topologies() {
+        for model in ["snowflake-arctic-s", "nomic-embed-text-v1.5"] {
+            let error = resolve_embedder_kind(model, true).unwrap_err();
+            let message = format!("{error:#}");
+            assert!(message.contains("supports only minilm"), "{message}");
+        }
     }
 
     #[test]

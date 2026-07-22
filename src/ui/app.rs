@@ -13595,7 +13595,7 @@ impl CassApp {
         push_metric(
             &mut spans,
             "cov",
-            format!("{:.0}%", data.coverage_pct),
+            crate::ui::analytics_charts::format_metric_percent(data.coverage_metric, 0),
             meta_style,
         );
         let filter_count = self.analytics_filter_count();
@@ -40813,8 +40813,11 @@ not jsonl",
         data.total_content_tokens = 800_000;
         data.total_plan_messages = 200;
         data.coverage_pct = 85.0;
+        data.coverage_metric = crate::metric_integrity::MetricOutcome::Value(85.0);
         data.plan_message_pct = 4.0;
+        data.plan_message_metric = crate::metric_integrity::MetricOutcome::Value(4.0);
         data.plan_api_token_share = 6.5;
+        data.plan_api_token_metric = crate::metric_integrity::MetricOutcome::Value(6.5);
         data.agent_tokens = vec![
             ("claude_code".into(), 600_000.0),
             ("codex".into(), 300_000.0),
