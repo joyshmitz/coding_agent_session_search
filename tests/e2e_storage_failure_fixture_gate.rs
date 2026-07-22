@@ -560,6 +560,17 @@ fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
+fn sha256_open_file_from_start(file: &mut std::fs::File) -> Result<String, String> {
+    use std::io::{Read as _, Seek as _};
+
+    file.seek(std::io::SeekFrom::Start(0))
+        .map_err(|err| format!("seek retained fixture DB reader: {err}"))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|err| format!("read retained fixture DB reader: {err}"))?;
+    Ok(sha256_hex(&bytes))
+}
+
 // =============================================================================
 // Baseline build + corruption application
 // =============================================================================
@@ -2239,12 +2250,30 @@ fn prove_dedicated_fixture_surfaces(
         DedicatedFixtureSetup::ExclusiveWriter => {}
     }
 
-    let hash_before = sha256_hex(
-        &std::fs::read(&db).map_err(|err| format!("{}: read fixture DB: {err}", fixture.id))?,
-    );
+    // Classic POSIX record locks are owned by the process and closing *any*
+    // descriptor for the same inode releases them. Open the writer fixture's
+    // hash reader before acquiring the lock, then retain it until rollback so
+    // byte-identity checks cannot accidentally unlock the writer.
+    let mut retained_db_reader = match fixture.setup {
+        DedicatedFixtureSetup::ExclusiveWriter => Some(
+            std::fs::File::open(&db)
+                .map_err(|err| format!("{}: open retained fixture DB reader: {err}", fixture.id))?,
+        ),
+        _ => None,
+    };
     let exclusive_writer = match fixture.setup {
         DedicatedFixtureSetup::ExclusiveWriter => Some(hold_probe_fixture_exclusive_writer(&db)?),
         _ => None,
+    };
+    // For the writer fixture the transaction's forced uncommitted write is
+    // setup, not a read-surface effect. Capture the byte window only after the
+    // lock is physically held, then compare before rollback below.
+    let hash_before = if let Some(reader) = retained_db_reader.as_mut() {
+        sha256_open_file_from_start(reader).map_err(|err| format!("{}: {err}", fixture.id))?
+    } else {
+        sha256_hex(
+            &std::fs::read(&db).map_err(|err| format!("{}: read fixture DB: {err}", fixture.id))?,
+        )
     };
     let dd = data_dir
         .to_str()
@@ -2291,14 +2320,32 @@ fn prove_dedicated_fixture_surfaces(
     )?;
     assert_dedicated_surface_state(&search, "/_meta/storage_integrity", fixture, "search")?;
 
+    let preservation = if let Some(reader) = retained_db_reader.as_mut() {
+        sha256_open_file_from_start(reader)
+            .map_err(|why| format!("{}: {why}", fixture.id))
+            .and_then(|hash_after| {
+                if hash_after.as_str().cmp(&hash_before).is_eq() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{}: canonical DB was rewritten by a read surface: hash {hash_before} -> \
+                         {hash_after} (source-of-truth must be byte-identical)",
+                        fixture.id
+                    ))
+                }
+            })
+    } else {
+        check_db_preserved(&data_dir, &hash_before, true)
+            .map_err(|why| format!("{}: {why}", fixture.id))
+    };
     if let Some(mut writer) = exclusive_writer {
         let _ = writer.execute("ROLLBACK;");
         if writer.close_without_checkpoint_in_place().is_err() {
             writer.close_best_effort_in_place();
         }
     }
-    check_db_preserved(&data_dir, &hash_before, true)
-        .map_err(|why| format!("{}: {why}", fixture.id))
+    drop(retained_db_reader);
+    preservation
 }
 
 /// The four probe-dependent states have dedicated, openable fixtures and are
