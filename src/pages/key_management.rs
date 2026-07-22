@@ -1468,6 +1468,7 @@ mod tests {
     };
     use crate::pages::bundle::BundleBuilder;
     use crate::pages::encrypt::{DecryptionEngine, EncryptionEngine, MAX_CHUNK_SIZE, PayloadMeta};
+    use crate::pages::errors::DecryptError;
     use crate::pages::verify::verify_bundle;
     use std::cell::Cell;
     use tempfile::TempDir;
@@ -1555,11 +1556,13 @@ mod tests {
         write_json_pretty(&site_dir.join("config.json"), &config).unwrap();
     }
 
-    fn assert_unsupported_payload_format_error(err: anyhow::Error, compression: &str) {
-        let rendered = err.to_string();
+    fn assert_unsupported_payload_format_error(err: anyhow::Error, _compression: &str) {
         assert!(
-            rendered.contains("supports only deflate") && rendered.contains(compression),
-            "unexpected unsupported-format error: {err:#}"
+            matches!(
+                err.downcast_ref::<DecryptError>(),
+                Some(DecryptError::UnsupportedMetadata(field)) if field == "compression"
+            ),
+            "unexpected unsupported-metadata taxonomy: {err:#}"
         );
     }
 
