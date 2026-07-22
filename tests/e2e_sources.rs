@@ -1897,6 +1897,285 @@ paths = ["~/.claude/projects"]
     tracker.complete();
 }
 
+#[derive(Clone, Copy)]
+enum ReachableDoctorSyncFixture {
+    None,
+    Failed,
+    FutureSuccessful,
+}
+
+#[derive(Clone, Copy)]
+struct ReachableDoctorScenario {
+    expected_state: &'static str,
+    cass_version: Option<&'static str>,
+    remote_path: &'static str,
+    local_mirror_nonempty: bool,
+    sync: ReachableDoctorSyncFixture,
+}
+
+/// Bead hv29t: drive every reachable source-doctor failure state through the
+/// real `cass` binary while injecting only the external SSH probe facts. The
+/// live reducers still assess version skew, gather cass-owned local sync/index
+/// evidence, apply preservation precedence, build the health report, and
+/// serialize the robot envelope.
+#[test]
+fn sources_doctor_reachable_states_use_live_real_binary_reduction() -> Result<(), String> {
+    let scenarios = [
+        ReachableDoctorScenario {
+            expected_state: "cass_missing",
+            cass_version: None,
+            remote_path: "nonempty",
+            local_mirror_nonempty: false,
+            sync: ReachableDoctorSyncFixture::None,
+        },
+        ReachableDoctorScenario {
+            expected_state: "old_cass",
+            cass_version: Some("0.0.1"),
+            remote_path: "nonempty",
+            local_mirror_nonempty: false,
+            sync: ReachableDoctorSyncFixture::None,
+        },
+        ReachableDoctorScenario {
+            expected_state: "mirror_ahead",
+            cass_version: Some(env!("CARGO_PKG_VERSION")),
+            remote_path: "empty",
+            local_mirror_nonempty: true,
+            sync: ReachableDoctorSyncFixture::None,
+        },
+        ReachableDoctorScenario {
+            expected_state: "mirror_behind",
+            cass_version: Some(env!("CARGO_PKG_VERSION")),
+            remote_path: "nonempty",
+            local_mirror_nonempty: false,
+            sync: ReachableDoctorSyncFixture::Failed,
+        },
+        ReachableDoctorScenario {
+            expected_state: "stale_index",
+            cass_version: Some(env!("CARGO_PKG_VERSION")),
+            remote_path: "nonempty",
+            local_mirror_nonempty: false,
+            sync: ReachableDoctorSyncFixture::FutureSuccessful,
+        },
+        ReachableDoctorScenario {
+            expected_state: "remote_pruned",
+            cass_version: Some(env!("CARGO_PKG_VERSION")),
+            remote_path: "missing",
+            local_mirror_nonempty: true,
+            sync: ReachableDoctorSyncFixture::Failed,
+        },
+    ];
+    let tmp = tempfile::tempdir().map_err(|err| format!("create fixture root: {err}"))?;
+
+    for scenario in scenarios {
+        let case_root = tmp.path().join(scenario.expected_state);
+        let config_dir = case_root.join("config");
+        let data_dir = case_root.join("data");
+        let mirror_dir = data_dir.join("remotes").join("fixture-source");
+        fs::create_dir_all(&config_dir)
+            .map_err(|err| format!("{}: create config dir: {err}", scenario.expected_state))?;
+        fs::create_dir_all(&mirror_dir)
+            .map_err(|err| format!("{}: create mirror dir: {err}", scenario.expected_state))?;
+        create_sources_config(
+            &config_dir,
+            r#"
+[[sources]]
+name = "fixture-source"
+type = "ssh"
+host = "fixture@reachable.test"
+paths = ["~/.claude/projects"]
+"#,
+        );
+
+        let mirror_marker = mirror_dir.join("retained-session.jsonl");
+        if scenario.local_mirror_nonempty {
+            fs::write(&mirror_marker, b"retained source evidence\n").map_err(|err| {
+                format!("{}: write mirror marker: {err}", scenario.expected_state)
+            })?;
+        }
+
+        let db_path = data_dir.join("agent_search.db");
+        if matches!(scenario.sync, ReachableDoctorSyncFixture::FutureSuccessful) {
+            seed_archive_conversation(&db_path, "codex", "source-doctor-stale-index");
+        }
+        let db_before =
+            if db_path.exists() {
+                Some(fs::read(&db_path).map_err(|err| {
+                    format!("{}: read fixture DB: {err}", scenario.expected_state)
+                })?)
+            } else {
+                None
+            };
+
+        let sync_status_path = data_dir.join("sync_status.json");
+        match scenario.sync {
+            ReachableDoctorSyncFixture::None => {}
+            ReachableDoctorSyncFixture::Failed => {
+                let payload = serde_json::json!({
+                    "sources": {
+                        "fixture-source": {
+                            "last_sync": 1,
+                            "last_result": { "failed": "bounded fixture failure" },
+                            "files_synced": 0,
+                            "bytes_transferred": 0,
+                            "duration_ms": 1
+                        }
+                    }
+                });
+                fs::write(
+                    &sync_status_path,
+                    serde_json::to_vec_pretty(&payload)
+                        .map_err(|err| format!("serialize failed-sync fixture: {err}"))?,
+                )
+                .map_err(|err| format!("{}: write sync status: {err}", scenario.expected_state))?;
+            }
+            ReachableDoctorSyncFixture::FutureSuccessful => {
+                let payload = serde_json::json!({
+                    "sources": {
+                        "fixture-source": {
+                            "last_sync": i64::MAX,
+                            "last_result": "success",
+                            "files_synced": 1,
+                            "bytes_transferred": 1,
+                            "duration_ms": 1
+                        }
+                    }
+                });
+                fs::write(
+                    &sync_status_path,
+                    serde_json::to_vec_pretty(&payload)
+                        .map_err(|err| format!("serialize stale-index fixture: {err}"))?,
+                )
+                .map_err(|err| format!("{}: write sync status: {err}", scenario.expected_state))?;
+            }
+        }
+        let sync_before =
+            if sync_status_path.exists() {
+                Some(fs::read(&sync_status_path).map_err(|err| {
+                    format!("{}: read sync status: {err}", scenario.expected_state)
+                })?)
+            } else {
+                None
+            };
+
+        let probe_path = case_root.join("source-doctor-probe.json");
+        let probe_payload = serde_json::json!({
+            "host": "fixture@reachable.test",
+            "os": "Linux",
+            "cass_version": scenario.cass_version,
+            "remote_path": scenario.remote_path,
+        });
+        fs::write(
+            &probe_path,
+            serde_json::to_vec_pretty(&probe_payload)
+                .map_err(|err| format!("serialize source-doctor probe: {err}"))?,
+        )
+        .map_err(|err| format!("{}: write probe: {err}", scenario.expected_state))?;
+
+        let config_before = fs::read(config_dir.join("cass/sources.toml"))
+            .map_err(|err| format!("{}: read config: {err}", scenario.expected_state))?;
+        let probe_before = fs::read(&probe_path)
+            .map_err(|err| format!("{}: read probe: {err}", scenario.expected_state))?;
+
+        let mut cmd = Command::new(util::cass_bin());
+        cmd.args(["sources", "doctor", "--json"])
+            .current_dir(&case_root)
+            .env("HOME", &case_root)
+            .env("XDG_CONFIG_HOME", &config_dir)
+            .env("CASS_DATA_DIR", &data_dir)
+            .env("CASS_TEST_SOURCES_DOCTOR_PROBE", &probe_path)
+            .env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1")
+            .env("NO_COLOR", "1");
+        let output = util::timeout::spawn_with_timeout_or_diag(
+            cmd,
+            scenario.expected_state,
+            Some(&data_dir),
+            std::time::Duration::from_secs(10),
+        );
+        let exit = output
+            .status
+            .code()
+            .ok_or_else(|| format!("{}: cass terminated by signal", scenario.expected_state))?;
+        if !matches!(exit, 0 | 1) {
+            return Err(format!(
+                "{}: unexpected exit={exit}, stdout={}, stderr={}",
+                scenario.expected_state,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        let payload: Value = serde_json::from_slice(&output.stdout).map_err(|err| {
+            format!(
+                "{}: stdout was not JSON: {err}; stdout={}",
+                scenario.expected_state,
+                String::from_utf8_lossy(&output.stdout)
+            )
+        })?;
+        let entry = payload
+            .get("sources")
+            .and_then(Value::as_array)
+            .and_then(|sources| sources.first())
+            .ok_or_else(|| format!("{}: missing sources[0]", scenario.expected_state))?;
+        let state = entry.get("state").and_then(Value::as_str);
+        if state != Some(scenario.expected_state) {
+            return Err(format!(
+                "{}: observed state {state:?}; payload={payload}",
+                scenario.expected_state
+            ));
+        }
+        if entry.get("host_reached").and_then(Value::as_bool) != Some(true)
+            || payload.get("mutation_free").and_then(Value::as_bool) != Some(true)
+            || payload
+                .pointer("/summary/unhealthy")
+                .and_then(Value::as_u64)
+                != Some(1)
+            || payload
+                .pointer("/summary/unreached")
+                .and_then(Value::as_u64)
+                != Some(0)
+        {
+            return Err(format!(
+                "{}: reachable/mutation-free summary contract failed: {payload}",
+                scenario.expected_state
+            ));
+        }
+        let safe_next = entry
+            .get("safe_next_command")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{}: missing safe_next_command", scenario.expected_state))?;
+        let safe_lower = safe_next.to_ascii_lowercase();
+        if [
+            "--delete",
+            "rm -rf",
+            "rm -r ",
+            "shred",
+            "--remove-source-files",
+        ]
+        .iter()
+        .any(|needle| safe_lower.contains(needle))
+        {
+            return Err(format!(
+                "{}: destructive safe_next_command {safe_next:?}",
+                scenario.expected_state
+            ));
+        }
+
+        if fs::read(config_dir.join("cass/sources.toml")).ok().as_ref() != Some(&config_before)
+            || fs::read(&probe_path).ok().as_ref() != Some(&probe_before)
+            || sync_status_path.exists()
+                && fs::read(&sync_status_path).ok().as_ref() != sync_before.as_ref()
+            || db_path.exists() && fs::read(&db_path).ok().as_ref() != db_before.as_ref()
+            || scenario.local_mirror_nonempty && !mirror_marker.exists()
+        {
+            return Err(format!(
+                "{}: sources doctor mutated fixture evidence",
+                scenario.expected_state
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 // =============================================================================
 // sources sync tests
 // =============================================================================

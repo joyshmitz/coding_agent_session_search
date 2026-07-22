@@ -96225,6 +96225,133 @@ struct SourcesDoctorOutput<'a> {
     diagnostics: &'a [SourceDiagnostics],
 }
 
+const SOURCE_DOCTOR_FIXTURE_MAX_BYTES: u64 = 16 * 1024;
+
+/// Test-only external-probe facts for deterministic real-binary source-doctor
+/// E2E coverage. The seam replaces only the SSH-dependent observations; the
+/// live check-to-observation reduction, version-skew assessment, local sync
+/// evidence, state precedence, and JSON projection remain unchanged.
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SourceDoctorFixtureRemotePath {
+    Nonempty,
+    Empty,
+    Missing,
+}
+
+#[derive(serde::Deserialize)]
+struct SourceDoctorFixtureProbe {
+    host: String,
+    os: String,
+    cass_version: Option<String>,
+    remote_path: SourceDoctorFixtureRemotePath,
+}
+
+impl SourceDoctorFixtureProbe {
+    fn ssh_check(&self) -> DiagnosticCheck {
+        DiagnosticCheck {
+            name: "SSH Connectivity".into(),
+            status: "pass".into(),
+            message: format!("Connected to {} successfully", self.host),
+            remediation: None,
+        }
+    }
+
+    fn rsync_check(&self) -> DiagnosticCheck {
+        DiagnosticCheck {
+            name: "rsync Available".into(),
+            status: "pass".into(),
+            message: "rsync fixture 3.2.7".into(),
+            remediation: None,
+        }
+    }
+
+    fn remote_path_check(&self, path: &str) -> DiagnosticCheck {
+        let (status, message, remediation) = match self.remote_path {
+            SourceDoctorFixtureRemotePath::Nonempty => ("pass", "Path exists, 1 items found", None),
+            SourceDoctorFixtureRemotePath::Empty => (
+                "warn",
+                "Path exists but is empty",
+                Some("No agent sessions on this machine yet"),
+            ),
+            SourceDoctorFixtureRemotePath::Missing => (
+                "fail",
+                "Path does not exist",
+                Some("Remove this path or create it on the remote"),
+            ),
+        };
+        DiagnosticCheck {
+            name: format!("Remote Path: {path}"),
+            status: status.into(),
+            message: message.into(),
+            remediation: remediation.map(str::to_string),
+        }
+    }
+
+    fn remote_cass_probe(&self) -> RemoteCassProbe {
+        RemoteCassProbe {
+            os: Some(self.os.clone()),
+            cass_found: self.cass_version.is_some(),
+            cass_version: self.cass_version.clone(),
+        }
+    }
+}
+
+fn source_doctor_fixture_error(message: String) -> CliError {
+    CliError {
+        code: 9,
+        kind: CliErrorKind::Config.kind_str(),
+        message,
+        hint: Some("Fix or unset CASS_TEST_SOURCES_DOCTOR_PROBE".into()),
+        retryable: false,
+    }
+}
+
+/// Load an explicitly requested, size-bounded probe fixture. Invalid fixtures
+/// fail closed instead of silently falling through to a real SSH connection.
+fn load_source_doctor_fixture_probe(host: &str) -> CliResult<Option<SourceDoctorFixtureProbe>> {
+    let Ok(raw_path) = dotenvy::var("CASS_TEST_SOURCES_DOCTOR_PROBE") else {
+        return Ok(None);
+    };
+    let fixture_path = std::path::Path::new(raw_path.trim());
+    if raw_path.trim().is_empty() {
+        return Err(source_doctor_fixture_error(
+            "CASS_TEST_SOURCES_DOCTOR_PROBE is empty".into(),
+        ));
+    }
+    let metadata = std::fs::symlink_metadata(fixture_path).map_err(|err| {
+        source_doctor_fixture_error(format!(
+            "Failed to inspect source-doctor probe fixture {}: {err}",
+            fixture_path.display()
+        ))
+    })?;
+    if !metadata.file_type().is_file() || metadata.len() > SOURCE_DOCTOR_FIXTURE_MAX_BYTES {
+        return Err(source_doctor_fixture_error(format!(
+            "Source-doctor probe fixture must be a regular file no larger than {} bytes",
+            SOURCE_DOCTOR_FIXTURE_MAX_BYTES
+        )));
+    }
+    let bytes = std::fs::read(fixture_path).map_err(|err| {
+        source_doctor_fixture_error(format!(
+            "Failed to read source-doctor probe fixture {}: {err}",
+            fixture_path.display()
+        ))
+    })?;
+    let fixture: SourceDoctorFixtureProbe = serde_json::from_slice(&bytes).map_err(|err| {
+        source_doctor_fixture_error(format!(
+            "Invalid source-doctor probe fixture {}: {err}",
+            fixture_path.display()
+        ))
+    })?;
+    if fixture.host != host {
+        return Err(source_doctor_fixture_error(format!(
+            "Source-doctor probe fixture host {:?} does not match configured host {host:?}",
+            fixture.host
+        )));
+    }
+    Ok(Some(fixture))
+}
+
 /// Project the read-only per-source checks gathered by `run_sources_doctor` into
 /// a [`crate::source_doctor_health::SourceDoctorObservation`] (bead uojcg.8.6).
 ///
@@ -96346,11 +96473,16 @@ fn run_sources_doctor(
 
         // Check 1: SSH connectivity
         let host = source.host.as_deref().unwrap_or("unknown");
-        let ssh_check = check_ssh_connectivity(host);
+        let fixture_probe = load_source_doctor_fixture_probe(host)?;
+        let ssh_check = fixture_probe
+            .as_ref()
+            .map_or_else(|| check_ssh_connectivity(host), |probe| probe.ssh_check());
         checks.push(ssh_check);
 
         // Check 2: rsync availability on remote
-        let rsync_check = check_rsync_available(host);
+        let rsync_check = fixture_probe
+            .as_ref()
+            .map_or_else(|| check_rsync_available(host), |probe| probe.rsync_check());
         checks.push(rsync_check);
 
         // Check 3: Remote paths exist
@@ -96363,7 +96495,10 @@ fn run_sources_doctor(
                     remediation: Some("Fix or remove this path in sources.toml".into()),
                 });
             } else {
-                checks.push(check_remote_path(host, path));
+                checks.push(fixture_probe.as_ref().map_or_else(
+                    || check_remote_path(host, path),
+                    |probe| probe.remote_path_check(path),
+                ));
             }
         }
 
@@ -96412,7 +96547,10 @@ fn run_sources_doctor(
         // not-observed defaults so the report never claims an unprobed axis.
         if observation.host_reachable {
             if source.host.is_some() {
-                let probe = check_remote_cass(host);
+                let probe = fixture_probe.as_ref().map_or_else(
+                    || check_remote_cass(host),
+                    SourceDoctorFixtureProbe::remote_cass_probe,
+                );
                 if let Some(uname) = probe.os.as_deref() {
                     host_report.platform = platform_from_uname(uname);
                 }

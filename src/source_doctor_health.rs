@@ -272,12 +272,14 @@ pub fn classify_source_doctor_state(obs: &SourceDoctorObservation) -> SourceDoct
         return SourceDoctorState::OldCass;
     }
 
-    // 3) Source path problems (preserve evidence — pruned is not a local fault).
-    if obs.source_root_readable == Some(false) {
-        return SourceDoctorState::SourceRootUnreadable;
-    }
+    // 3) Source path problems. A confirmed prune with locally retained data is
+    // more specific than the generic unreadable-path signal produced by the
+    // same missing-path probe, so preservation evidence wins.
     if obs.remote_pruned {
         return SourceDoctorState::RemotePruned;
+    }
+    if obs.source_root_readable == Some(false) {
+        return SourceDoctorState::SourceRootUnreadable;
     }
 
     // 4) Index health.
@@ -717,8 +719,10 @@ mod tests {
     #[test]
     fn apply_sync_evidence_prefers_preservation_for_pruned_remote() {
         // Remote path gone but local mirror retained -> remote_pruned, and it
-        // wins over any mirror_behind signal (preservation first).
+        // wins over both the generic unreadable-path projection and any
+        // mirror_behind signal (preservation first).
         let mut o = reachable_healthy("retired");
+        o.source_root_readable = Some(false);
         apply_sync_evidence(
             &mut o,
             &SourceSyncEvidence {
