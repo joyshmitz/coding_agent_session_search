@@ -3,7 +3,7 @@
 Bead: `coding_agent_session_search-cass-fleet-resilience-20260608-uojcg.15.5`.
 
 > Generated from `src/subsystem_coverage_matrix.rs`. Do not edit by hand —
-> run `UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-golden-target \
+> run `UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-golden-target \
 > cargo test --lib subsystem_coverage_matrix` to regenerate after changing
 > the matrix, and review the diff.
 

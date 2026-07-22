@@ -8,7 +8,7 @@
 //! ## Regenerate
 //!
 //! ```bash
-//! UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-swarm-status-golden-target cargo test --test swarm_status_contract
+//! UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-swarm-status-golden-target cargo test --test swarm_status_contract
 //! git diff -- tests/fixtures/swarm_status tests/golden/swarm_status tests/swarm_status_contract.rs
 //! ```
 
@@ -24,7 +24,7 @@ use tempfile::TempDir;
 
 const FIXTURE_ROOT: &str = "tests/fixtures/swarm_status";
 const MANIFEST_PATH: &str = "tests/fixtures/swarm_status/manifest.json";
-const GOLDEN_UPDATE_COMMAND_SHAPE: &str = "UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-swarm-status-golden-target cargo test --test swarm_status_contract";
+const GOLDEN_UPDATE_COMMAND_SHAPE: &str = "UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-swarm-status-golden-target cargo test --test swarm_status_contract";
 const GOLDEN_REVIEW_COMMAND_SHAPE: &str = "git diff -- tests/fixtures/swarm_status tests/golden/swarm_status tests/swarm_status_contract.rs";
 const STRESS_SAMPLE_COUNT: usize = 5;
 
@@ -670,7 +670,7 @@ fn integrated_clear_proof_sources() -> Value {
                 "kind": "rch-test",
                 "bead_id": "cass-integrated-clear",
                 "commit_id": "abc123",
-                "command_shape": "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-proof cargo test --test swarm_status_contract",
+                "command_shape": "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-proof cargo test --test swarm_status_contract",
                 "status": "passed",
                 "remote_exit_status": 0,
                 "changed_paths": ["tests/swarm_status_contract.rs"],
@@ -1561,7 +1561,7 @@ fn swarm_evidence_cli_links_committed_bead_to_proof_and_mail() -> Result<(), Box
                     "kind": "rch-test",
                     "bead_id": "cass-proof-1",
                     "commit_id": "abc123",
-                    "command_shape": "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-proof cargo test --test cli_robot",
+                    "command_shape": "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-proof cargo test --test cli_robot",
                     "status": "passed",
                     "remote_exit_status": 0,
                     "changed_paths": ["src/lib.rs", "tests/cli_robot.rs"],
@@ -1833,7 +1833,7 @@ fn swarm_proof_debt_cli_reports_clear_complete_fixture() -> Result<(), Box<dyn E
                     "kind": "rch-test",
                     "bead_id": "cass-proof-clear",
                     "commit_id": "abc123",
-                    "command_shape": "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-proof cargo test --test swarm_status_contract",
+                    "command_shape": "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-proof cargo test --test swarm_status_contract",
                     "status": "passed",
                     "remote_exit_status": 0,
                     "changed_paths": ["src/lib.rs", "tests/swarm_status_contract.rs"],
@@ -1929,7 +1929,7 @@ fn swarm_proof_debt_cli_prioritizes_and_suppresses_debt() -> Result<(), Box<dyn 
                         "kind": "rch-clippy",
                         "bead_id": "cass-clippy-only",
                         "commit_id": "bbb222",
-                        "command_shape": "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-proof cargo clippy --all-targets -- -D warnings",
+                        "command_shape": "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-proof cargo clippy --all-targets -- -D warnings",
                         "status": "passed",
                         "remote_exit_status": 0,
                         "changed_paths": ["src/clippy.rs"]
@@ -1938,7 +1938,7 @@ fn swarm_proof_debt_cli_prioritizes_and_suppresses_debt() -> Result<(), Box<dyn 
                         "kind": "rch-stress",
                         "bead_id": "cass-ignored-stress",
                         "commit_id": "ccc333",
-                        "command_shape": "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-proof cargo test --test swarm_status_contract swarm_status_large_fixture_stress_artifact_10k -- --ignored",
+                        "command_shape": "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-proof cargo test --test swarm_status_contract swarm_status_large_fixture_stress_artifact_10k -- --ignored",
                         "status": "ignored",
                         "changed_paths": ["tests/stress.rs"],
                         "artifact_refs": ["docs/artifacts/swarm/stress-proof.json"],
@@ -1957,7 +1957,7 @@ fn swarm_proof_debt_cli_prioritizes_and_suppresses_debt() -> Result<(), Box<dyn 
                         "kind": "rch-test",
                         "bead_id": "cass-mail-missing",
                         "commit_id": "eee555",
-                        "command_shape": "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-proof cargo test --test swarm_status_contract",
+                        "command_shape": "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-proof cargo test --test swarm_status_contract",
                         "status": "passed",
                         "remote_exit_status": 0,
                         "changed_paths": ["src/mail.rs"]
@@ -2094,7 +2094,7 @@ fn swarm_failure_patterns_cli_reports_no_patterns_for_clean_fixture() -> Result<
                     "kind": "rch-test",
                     "bead_id": "cass-pattern-clear",
                     "commit_id": "abc123",
-                    "command_shape": "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-pattern cargo test --test swarm_status_contract",
+                    "command_shape": "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-pattern cargo test --test swarm_status_contract",
                     "status": "passed",
                     "remote_exit_status": 0,
                     "changed_paths": ["src/lib.rs"]
@@ -2198,7 +2198,7 @@ fn swarm_failure_patterns_cli_ranks_test_suggestions_and_redacts_sessions()
                     {
                         "kind": "rch-stress",
                         "bead_id": "cass-flaky",
-                        "command_shape": "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-pattern cargo test --test e2e_large_dataset -- --ignored",
+                        "command_shape": "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-pattern cargo test --test e2e_large_dataset -- --ignored",
                         "status": "ignored",
                         "failure_signature": "e2e_large_dataset timeout during stress proof"
                     }
@@ -2309,7 +2309,7 @@ fn swarm_dependency_drift_cli_reports_clean_read_only_fixture() -> Result<(), Bo
                     "dirty": false,
                     "sibling_status": "clean",
                     "required_downstream_tests": [
-                        "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-strict-target cargo check --features strict-path-dep-validation"
+                        "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-strict-target cargo check --features strict-path-dep-validation"
                     ]
                 }]
             }
@@ -2460,7 +2460,7 @@ fn swarm_dependency_drift_cli_flags_pin_dirty_missing_and_network_risks()
     )?;
     require(
         serde_json::to_string(&output)?.contains(
-            "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-strict-target cargo check --features strict-path-dep-validation",
+            "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-strict-target cargo check --features strict-path-dep-validation",
         ),
         "strict validation command missing",
     )?;
@@ -2561,7 +2561,7 @@ fn swarm_resource_plan_reports_many_core_full_index_fixture() -> Result<(), Box<
     )?;
     require_value_eq(
         get_path(&output, &["offload", "target_dir"]),
-        json!("/tmp/cass-resource-plan-target"),
+        json!("/data/tmp/cass-resource-plan-target"),
         "target dir",
     )?;
     require_value_eq(
@@ -3411,7 +3411,7 @@ fn swarm_status_large_fixture_stress_artifact_10k() -> Result<(), Box<dyn Error>
     let artifact = json!({
         "schema_version": "cass.swarm.status.large_swarm_perf.v1",
         "fixture_id": "large-stress-10k",
-        "command_shape": "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-swarm-large-target cargo test --test swarm_status_contract swarm_status_large_fixture_stress_artifact_10k -- --ignored --nocapture",
+        "command_shape": "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-swarm-large-target cargo test --test swarm_status_contract swarm_status_large_fixture_stress_artifact_10k -- --ignored --nocapture",
         "sample_count": samples.len(),
         "scale": {
             "beads": scale.total_bead_count(),

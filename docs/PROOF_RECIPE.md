@@ -20,7 +20,7 @@ All commands follow `AGENTS.md`: remote compilation via `rch`, an isolated
 
 - **Remote build/test:** prefix cargo with
   `rch exec -- env CARGO_TARGET_DIR=<isolated-dir> ...`. Use a per-agent dir
-  (e.g. `/tmp/cass-check-target`) so concurrent agents don't collide.
+  (e.g. `/data/tmp/cass-check-target`) so concurrent agents don't collide.
 - **Success signal:** grep the output for `Finished` and the
   `test result: ok.` line — do **not** trust a piped exit code (a `| tail`
   pipeline masks cargo's status).
@@ -31,9 +31,9 @@ All commands follow `AGENTS.md`: remote compilation via `rch`, an isolated
 
 ```sh
 # Full compile of every target (lib, tests, benches):
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target cargo check --all-targets
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-check-target cargo check --all-targets
 # Lint, warnings-as-errors, crate-wide:
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-check-target cargo clippy --all-targets -- -D warnings
 # Format check:
 cargo fmt --check
 # Bug scan on changed files (exit 0 required; #[cfg(test)] helper panics and
@@ -80,7 +80,7 @@ Golden artifacts (pinned JSON/JSONL wire forms) change **only** through a
 reviewed run:
 
 ```sh
-UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target cargo test <golden-target>
+UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-check-target cargo test <golden-target>
 ```
 
 A `UPDATE_GOLDENS=1` diff must be reviewed as an intentional contract change
@@ -150,10 +150,10 @@ handbook) slip past every golden/unit check, because those checked the right
 
 ```sh
 # Routine (sub-second per surface against an isolated empty data dir):
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target \
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-check-target \
   cargo test --test e2e_robot_smoke_gate
 # CI proof artifacts (.12.3 structured log + manifest via PhaseTracker):
-E2E_LOG=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target \
+E2E_LOG=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-check-target \
   cargo test --test e2e_robot_smoke_gate
 ```
 
@@ -218,7 +218,7 @@ Wiring into a gate (reference adopter):
 
 ```sh
 # Each scenario emits one `<label>.proof.json` into $CASS_PROOF_DIR:
-CASS_PROOF_DIR=<dir> rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target \
+CASS_PROOF_DIR=<dir> rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-check-target \
   cargo test --test e2e_repro_capsule_gate
 ```
 
@@ -268,9 +268,9 @@ escaping, long-path behavior, empty/partial/blocked states, redaction, and the
 no-network/no-mutation contract with:
 
 ```sh
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-dashboard-target \
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-dashboard-target \
   cargo test --lib operations_dashboard
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-dashboard-target \
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-dashboard-target \
   cargo test --test operations_dashboard_contract
 ```
 
@@ -285,7 +285,7 @@ scrubbed robot rollup and reviewed command matrix live under
 `tests/golden/guided_ops/`.
 
 ```sh
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-guided-golden-target \
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-guided-golden-target \
   cargo test --test e2e_guided_ops_golden_gate
 ```
 
@@ -336,6 +336,6 @@ Proof the real CLI contract, fixture no-mutation guarantee, deterministic
 transcript, and the readiness/privacy/cost/rch/stop/confirmation gates with:
 
 ```sh
-RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-guide-apply-target \
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-guide-apply-target \
   cargo test --locked --test e2e_guide_apply_gate
 ```

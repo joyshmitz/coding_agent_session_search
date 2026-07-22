@@ -20,12 +20,15 @@
 //! reparses and persists the exact quarantine key without touching its source.
 //! No network access is required.
 
+mod util;
+
 use std::collections::BTreeSet;
 use std::fs;
-use std::time::Instant;
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, ensure};
-use assert_cmd::cargo::cargo_bin_cmd;
+use assert_cmd::cargo::cargo_bin;
 use chrono::{DateTime, Utc};
 use coding_agent_search::connectors::codex::CodexConnector;
 use coding_agent_search::connectors::{Connector, ScanContext, ScanRoot};
@@ -34,15 +37,17 @@ use coding_agent_search::indexer::quarantine_retry::{AttemptResult, RetryConfig,
 use coding_agent_search::storage::sqlite::{CURRENT_SCHEMA_VERSION, FrankenStorage};
 use frankensqlite::compat::{ConnectionExt, RowExt};
 use tempfile::tempdir;
+use util::timeout::spawn_with_timeout_or_diag;
 
 /// The version `execute_retry` compares against. Using the package version here
 /// matches what `QuarantineState::record_attempt` stamps (`CARGO_PKG_VERSION`),
 /// so a re-quarantined entry becomes "same-version" relative to this string and
 /// the suppression assertions hold regardless of the current release number.
 const CURRENT: &str = env!("CARGO_PKG_VERSION");
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 
-fn ts(secs: i64) -> DateTime<Utc> {
-    DateTime::<Utc>::from_timestamp(secs, 0).expect("valid timestamp")
+fn ts(secs: i64) -> anyhow::Result<DateTime<Utc>> {
+    DateTime::<Utc>::from_timestamp(secs, 0).context("fixture timestamp is representable")
 }
 
 /// `storage_key` shape is `"{conversation_id}::v{schema_version}"`. Built in a
@@ -52,14 +57,14 @@ fn conv_key(i: usize) -> String {
 }
 
 /// An eligible (legacy: `cass_version_at_quarantine = None`) ingest-OOM record.
-fn legacy_oom(attempts: u64) -> QuarantineRecord {
-    QuarantineRecord {
-        first_attempt_at: ts(1_700_000_000),
-        last_attempt_at: ts(1_700_000_000),
+fn legacy_oom(attempts: u64) -> anyhow::Result<QuarantineRecord> {
+    Ok(QuarantineRecord {
+        first_attempt_at: ts(1_700_000_000)?,
+        last_attempt_at: ts(1_700_000_000)?,
         attempt_count: attempts,
         last_reason: "ingest_oom".to_string(),
         cass_version_at_quarantine: None,
-    }
+    })
 }
 
 fn no_missing() -> BTreeSet<String> {
@@ -68,19 +73,20 @@ fn no_missing() -> BTreeSet<String> {
 
 /// Seed `n` eligible legacy OOM entries into a fresh data dir, persisted through
 /// the production atomic save path.
-fn seed(dir: &std::path::Path, n: usize) {
+fn seed(dir: &std::path::Path, n: usize) -> anyhow::Result<()> {
     let mut state = QuarantineState::default();
     for i in 0..n {
-        state.entries.insert(conv_key(i), legacy_oom(1));
+        state.entries.insert(conv_key(i), legacy_oom(1)?);
     }
-    state.save(dir).expect("seed save");
+    state.save(dir)
 }
 
 #[test]
-fn repeated_oom_retry_never_grows_durable_state_and_converges_to_suppression() {
-    let dir = tempdir().expect("tempdir");
+fn repeated_oom_retry_never_grows_durable_state_and_converges_to_suppression() -> anyhow::Result<()>
+{
+    let dir = tempdir()?;
     let n = 8usize;
-    seed(dir.path(), n);
+    seed(dir.path(), n)?;
 
     // Pass 1: load → retry (every attempt OOMs again) → save. All N are
     // attempted, none cleared, each re-quarantined IN PLACE (no append).
@@ -90,10 +96,10 @@ fn repeated_oom_retry_never_grows_durable_state_and_converges_to_suppression() {
         CURRENT,
         &RetryConfig::default(),
         &no_missing(),
-        ts(1_800_000_000),
+        ts(1_800_000_000)?,
         |_key| AttemptResult::OutOfMemory,
     );
-    state.save(dir.path()).expect("save pass 1");
+    state.save(dir.path())?;
     assert_eq!(r1.attempted, n, "all eligible entries attempted");
     assert_eq!(r1.cleared, 0);
     assert_eq!(r1.re_quarantined_oom, n);
@@ -113,10 +119,10 @@ fn repeated_oom_retry_never_grows_durable_state_and_converges_to_suppression() {
         CURRENT,
         &RetryConfig::default(),
         &no_missing(),
-        ts(1_800_000_100),
+        ts(1_800_000_100)?,
         |_key| AttemptResult::OutOfMemory,
     );
-    state2.save(dir.path()).expect("save pass 2");
+    state2.save(dir.path())?;
     assert_eq!(
         r2.attempted, 0,
         "same-version entries are suppressed on resume"
@@ -127,13 +133,15 @@ fn repeated_oom_retry_never_grows_durable_state_and_converges_to_suppression() {
         n,
         "no unbounded growth across resumes"
     );
+    Ok(())
 }
 
 #[test]
-fn bounded_budget_drains_eligible_backlog_across_resumes_each_attempted_once() {
-    let dir = tempdir().expect("tempdir");
+fn bounded_budget_drains_eligible_backlog_across_resumes_each_attempted_once() -> anyhow::Result<()>
+{
+    let dir = tempdir()?;
     let n = 5usize;
-    seed(dir.path(), n);
+    seed(dir.path(), n)?;
 
     let config = RetryConfig {
         max_attempts: Some(2),
@@ -157,13 +165,13 @@ fn bounded_budget_drains_eligible_backlog_across_resumes_each_attempted_once() {
             CURRENT,
             &config,
             &no_missing(),
-            ts(1_800_000_000),
+            ts(1_800_000_000)?,
             |key| {
                 attempted.push(key.conversation_id.clone());
                 AttemptResult::Reindexed
             },
         );
-        state.save(dir.path()).expect("save resume pass");
+        state.save(dir.path())?;
         assert!(report.attempted <= 2, "budget caps attempts per pass");
     }
 
@@ -180,6 +188,7 @@ fn bounded_budget_drains_eligible_backlog_across_resumes_each_attempted_once() {
     };
     assert_eq!(attempted.len(), n, "every entry attempted");
     assert_eq!(unique.len(), n, "no entry attempted twice across resumes");
+    Ok(())
 }
 
 #[test]
@@ -234,7 +243,7 @@ fn cli_dry_run_plans_then_apply_reingests_exact_quarantine_key() -> anyhow::Resu
     let mut state = QuarantineState::default();
     state.entries.insert(
         format!("{conversation_id}::v{schema_version}"),
-        legacy_oom(1),
+        legacy_oom(1)?,
     );
     state.save(&data_dir)?;
     let quarantine_dir = data_dir.join("quarantine");
@@ -263,9 +272,24 @@ fn cli_dry_run_plans_then_apply_reingests_exact_quarantine_key() -> anyhow::Resu
     let started_at_ms = Utc::now().timestamp_millis();
     let command_started = Instant::now();
 
-    let dry = cargo_bin_cmd!("cass")
+    let mut dry_command = Command::new(cargo_bin("cass"));
+    dry_command
         .args(["quarantine", "retry", "--data-dir", data_dir_arg, "--json"])
-        .output()?;
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .env("XDG_DATA_HOME", dir.path().join("xdg-data"))
+        .env("XDG_CONFIG_HOME", dir.path().join("xdg-config"))
+        .env("XDG_CACHE_HOME", dir.path().join("xdg-cache"))
+        .env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1")
+        .env("CASS_IGNORE_SOURCES_CONFIG", "1")
+        .env("NO_COLOR", "1")
+        .env_remove("CLAUDE_CONFIG_DIR");
+    let dry = spawn_with_timeout_or_diag(
+        dry_command,
+        "quarantine-retry-dry-run",
+        Some(&data_dir),
+        COMMAND_TIMEOUT,
+    );
     ensure!(
         dry.status.success(),
         "dry-run stderr: {}",
@@ -283,7 +307,8 @@ fn cli_dry_run_plans_then_apply_reingests_exact_quarantine_key() -> anyhow::Resu
         "dry-run must be read-only"
     );
 
-    let applied = cargo_bin_cmd!("cass")
+    let mut apply_command = Command::new(cargo_bin("cass"));
+    apply_command
         .args([
             "quarantine",
             "retry",
@@ -292,7 +317,21 @@ fn cli_dry_run_plans_then_apply_reingests_exact_quarantine_key() -> anyhow::Resu
             "--apply",
             "--json",
         ])
-        .output()?;
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .env("XDG_DATA_HOME", dir.path().join("xdg-data"))
+        .env("XDG_CONFIG_HOME", dir.path().join("xdg-config"))
+        .env("XDG_CACHE_HOME", dir.path().join("xdg-cache"))
+        .env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1")
+        .env("CASS_IGNORE_SOURCES_CONFIG", "1")
+        .env("NO_COLOR", "1")
+        .env_remove("CLAUDE_CONFIG_DIR");
+    let applied = spawn_with_timeout_or_diag(
+        apply_command,
+        "quarantine-retry-apply",
+        Some(&data_dir),
+        COMMAND_TIMEOUT,
+    );
     ensure!(
         applied.status.success(),
         "apply stderr: {}",

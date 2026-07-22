@@ -227,13 +227,13 @@ All console output should be **informative, detailed, stylish, and colorful** by
 
 ```bash
 # Check for compiler errors and warnings
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target cargo check --all-targets
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-check-target cargo check --all-targets
 
 # Check for clippy lints
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-check-target cargo clippy --all-targets -- -D warnings
 
 # Verify formatting
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target cargo fmt --check
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-check-target cargo fmt --check
 ```
 
 If you see errors, **carefully understand and resolve each issue**. Read sufficient context to fix them the RIGHT way.
@@ -362,16 +362,16 @@ Integration and E2E tests live in the `tests/` directory. Benchmarks live in `be
 
 ```bash
 # Run all tests
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-test-target cargo test
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-test-target cargo test
 
 # Run with output
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-test-target cargo test -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-test-target cargo test -- --nocapture
 
 # Run a specific test
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-test-target cargo test test_name
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-test-target cargo test test_name
 
 # Run tests with all features enabled
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-test-target cargo test --all-features
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-test-target cargo test --all-features
 ```
 
 ### Test Categories
@@ -440,7 +440,7 @@ Provides unified full-text and semantic search across all local coding agent ses
 ### Schema Stability and Golden-Freeze Gates
 
 - Every JSON contract surface is pinned by golden-file regression tests under `tests/golden/robot/` (JSON) and `tests/golden/robot_docs/` (plain-text docs topics). The full set: capabilities, health, status, diag, diag_quarantine, models_status, models_verify, models_check_update, introspect, doctor, doctor_quarantine, api_version, stats (missing-db error envelope), robot_docs topics (paths, env, exit-codes, schemas, guide, robot_help).
-- **If you add a new field or change a type**, run `UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-golden-target cargo test --test golden_robot_json --test golden_robot_docs`, review the diff via `git diff tests/golden/`, and commit both the code + golden in one change. Do not regenerate goldens without reviewing — every diff is either an intentional schema change or a bug.
+- **If you add a new field or change a type**, run `UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-golden-target cargo test --test golden_robot_json --test golden_robot_docs`, review the diff via `git diff tests/golden/`, and commit both the code + golden in one change. Do not regenerate goldens without reviewing — every diff is either an intentional schema change or a bug.
 - `cass introspect --json`'s `response_schemas` is `BTreeMap`-backed so the serialized key order is alphabetical and deterministic (bead 8sl73).
 - Error envelopes use **kebab-case `err.kind`** values. For codes 0-9 the numeric code is sufficient; for codes ≥ 10 the code is ambiguous (e.g. 10 covers both `config` and `timeout`) — always branch on `err.kind`. Full taxonomy in src/lib.rs `CliError` literals + the Exit Codes table below (bead wan21).
 
@@ -1002,9 +1002,9 @@ RCH offloads `cargo build`, `cargo test`, `cargo clippy`, and other compilation 
 
 To manually offload a build:
 ```bash
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-rch-target cargo build --release
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-rch-target cargo test
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-rch-target cargo clippy
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-rch-target cargo build --release
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-rch-target cargo test
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-rch-target cargo clippy
 ```
 
 Quick commands:

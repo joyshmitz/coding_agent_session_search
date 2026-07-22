@@ -14,7 +14,7 @@
 //! ## Regenerating a golden
 //!
 //! ```bash
-//! UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-golden-target cargo test --test golden_robot_json
+//! UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-golden-target cargo test --test golden_robot_json
 //! git diff tests/golden/        # review EVERY change
 //! git add tests/golden/
 //! git commit -m "Update robot-mode goldens: <reason>"
@@ -844,7 +844,7 @@ fn assert_golden(name: &str, actual: &str) {
         panic!(
             "Golden file missing or unreadable: {}\n{err}\n\n\
              Run with UPDATE_GOLDENS=1 to create it, then review and commit:\n\
-             \tUPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-golden-target cargo test --test golden_robot_json\n\
+             \tUPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-golden-target cargo test --test golden_robot_json\n\
              \tgit diff tests/golden/\n\
              \tgit add tests/golden/",
             golden_path.display(),
@@ -861,7 +861,7 @@ fn assert_golden(name: &str, actual: &str) {
              Actual:   {}\n\n\
              diff the two files to see the drift, then either:\n\
              \t- fix the code if this was unintentional, or\n\
-             \t- regenerate: UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-golden-target cargo test --test golden_robot_json \\\n\
+             \t- regenerate: UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-golden-target cargo test --test golden_robot_json \\\n\
              \t              && git diff tests/golden/ && git add tests/golden/",
             golden_path.display(),
             actual_path.display(),

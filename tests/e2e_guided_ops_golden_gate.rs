@@ -315,7 +315,7 @@ fn robot_safe(command: &str) -> bool {
         return command.contains("--fixture-only")
             && command.contains("--data-dir /tmp/cass-repro-fixture-data");
     }
-    if command == "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-resource-plan-target" {
+    if command == "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-resource-plan-target" {
         return true;
     }
     if command.starts_with("rch exec -- env CARGO_TARGET_DIR=/tmp/") {

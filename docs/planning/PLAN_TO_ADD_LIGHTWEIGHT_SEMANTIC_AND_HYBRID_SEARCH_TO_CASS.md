@@ -1760,7 +1760,7 @@ semantic = ["fastembed", "half", "memmap2"]
 
 This allows building without semantic search for minimal binary size:
 ```bash
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-semantic-minimal-target cargo build --release --no-default-features
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-semantic-minimal-target cargo build --release --no-default-features
 ```
 
 ### Binary Size Impact

@@ -13,12 +13,12 @@ machine target cache.
 
 ```bash
 # Regenerate every golden
-UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-golden-target cargo test --test golden_robot_json
-UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-golden-target cargo test --test pages_export_golden
+UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-golden-target cargo test --test golden_robot_json
+UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-golden-target cargo test --test pages_export_golden
 
 # Regenerate a specific test
-UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-golden-target cargo test --test golden_robot_json -- capabilities_json
-UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-golden-target cargo test --test pages_export_golden -- basic_export_html
+UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-golden-target cargo test --test golden_robot_json -- capabilities_json
+UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-golden-target cargo test --test pages_export_golden -- basic_export_html
 
 # After regeneration, review and commit
 git diff tests/golden/
@@ -149,7 +149,7 @@ Regenerate only through the focused remote gate, then review every byte:
 
 ```sh
 UPDATE_GUIDED_OPS_GOLDENS=1 rch exec -- \
-  env CARGO_TARGET_DIR=/tmp/cass-guided-golden-target \
+  env CARGO_TARGET_DIR=/data/tmp/cass-guided-golden-target \
   cargo test --test e2e_guided_ops_golden_gate
 git diff -- tests/golden/guided_ops/
 ```
@@ -169,7 +169,7 @@ Regenerate and review only through the focused golden test:
 
 ```sh
 UPDATE_GOLDENS=1 rch exec -- \
-  env CARGO_TARGET_DIR=/tmp/cass-quarantine-retry-golden-target \
+  env CARGO_TARGET_DIR=/data/tmp/cass-quarantine-retry-golden-target \
   cargo test --test golden_robot_json -- quarantine_retry_shape_matches_golden
 git diff -- tests/golden/robot/quarantine_retry_shape.json.golden
 ```

@@ -100,7 +100,7 @@ cass sources agents include openclaw
 - Lexical generation cleanup uses a dispositions + inspection-required-first policy. Operators running `cass doctor --fix` never have a generation reclaimed silently — every quarantine stays on disk until an explicit derived-asset rebuild (`cass models backfill` or an index refresh recommended by `cass health --json`) supersedes it.
 
 **Schema stability guarantees**
-- The JSON contract surfaces (`triage`, `capabilities`, `health`, `status`, `diag`, `models status`, `models verify`, `models check-update`, `introspect`, `doctor`, `api-version`, `stats`, `sessions`, `search`, `pack`, `swarm status`, `swarm work-packet`, `swarm lint`) are pinned by golden-file regression tests under `tests/golden/robot/`. A change to any field name, type, or nullability fails the golden test suite and requires a deliberate regeneration pass (`UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-golden-target cargo test --test golden_robot_json --test golden_robot_docs`).
+- The JSON contract surfaces (`triage`, `capabilities`, `health`, `status`, `diag`, `models status`, `models verify`, `models check-update`, `introspect`, `doctor`, `api-version`, `stats`, `sessions`, `search`, `pack`, `swarm status`, `swarm work-packet`, `swarm lint`) are pinned by golden-file regression tests under `tests/golden/robot/`. A change to any field name, type, or nullability fails the golden test suite and requires a deliberate regeneration pass (`UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-golden-target cargo test --test golden_robot_json --test golden_robot_docs`).
 - `cass introspect --json`'s `response_schemas` block enumerates every schema in a stable alphabetical order (`BTreeMap`-backed — see bead coding_agent_session_search-8sl73).
 - Error envelopes (`{error: {code, kind, message, hint, retryable}}`) have a fixed shape. `kind` values are kebab-case; branch on `err.kind`, not on the numeric code, for codes ≥ 10 (see the Error Handling section below).
 
@@ -2999,7 +2999,7 @@ Update check state is stored in the data directory:
 **Build-time validation**
 - `build.rs` validates the committed dependency source contract against the expected package name, package version, Cargo feature/default-features contract, and git source where applicable.
 - If an active git-pinned sibling checkout has drifted away from the pinned revision or has a dirty worktree, the build emits a warning instead of silently trusting it. Crates.io-only pins are validated by package version.
-- Enable strict enforcement with `rch exec -- env CARGO_TARGET_DIR=/tmp/cass-strict-target cargo check --features strict-path-dep-validation` or `rch exec -- env CARGO_TARGET_DIR=/tmp/cass-strict-target CASS_STRICT_PATH_DEP_VALIDATION=1 cargo check`. Strict mode upgrades drift warnings to hard errors and also validates the optional sibling repos before you switch them to local path overrides.
+- Enable strict enforcement with `rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-strict-target cargo check --features strict-path-dep-validation` or `rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-strict-target CASS_STRICT_PATH_DEP_VALIDATION=1 cargo check`. Strict mode upgrades drift warnings to hard errors and also validates the optional sibling repos before you switch them to local path overrides.
 - Use `cass swarm dependency-drift --json` for a fast read-only preflight. It reports each manifest pin, optional sibling checkout HEAD/dirty state, upstream status as `not_checked`, and the exact strict-validation commands to run; it never fetches remotes or mutates files.
 
 **Expected interface contract**
@@ -3043,16 +3043,16 @@ offload build, test, lint, and snapshot commands with `rch`.
 
 ```bash
 # Format & Lint
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-dev-target cargo fmt --check
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-dev-target cargo clippy --all-targets -- -D warnings
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-dev-target cargo fmt --check
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-dev-target cargo clippy --all-targets -- -D warnings
 
 # Build & Test
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-dev-target cargo build --release
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-dev-target cargo test
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-dev-target cargo build --release
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-dev-target cargo test
 
 # Run End-to-End Tests
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-dev-target cargo test --test e2e_index_tui
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-dev-target cargo test --test install_scripts
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-dev-target cargo test --test e2e_index_tui
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-dev-target cargo test --test install_scripts
 ```
 
 ### Snapshot Baseline Workflow (FrankenTUI)
@@ -3061,12 +3061,12 @@ Use targeted snapshot runs; do not blindly bless everything:
 
 ```bash
 # Verify current baselines
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-snapshot-target cargo test snapshot_baseline_ -- --nocapture
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-snapshot-target cargo test snapshot_search_surface_ -- --nocapture
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-snapshot-target cargo test --test ftui_harness_snapshots -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-snapshot-target cargo test snapshot_baseline_ -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-snapshot-target cargo test snapshot_search_surface_ -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-snapshot-target cargo test --test ftui_harness_snapshots -- --nocapture
 
 # Regenerate only the suite you intentionally changed
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-snapshot-target BLESS=1 cargo test snapshot_baseline_ -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-snapshot-target BLESS=1 cargo test snapshot_baseline_ -- --nocapture
 ```
 
 The full regeneration/review protocol (required reviewer checklist, behavioral guard tests,
@@ -3122,10 +3122,10 @@ The CI pipeline (`.github/workflows/ci.yml`) runs on every PR and push to main:
 ```bash
 # Generate coverage through rch
 # Ensure cargo-llvm-cov is already installed before agent-run gates.
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-coverage-target cargo llvm-cov --all-features --workspace --text
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-coverage-target cargo llvm-cov --all-features --workspace --text
 
 # Run specific e2e tests
-rch exec -- env CARGO_TARGET_DIR=/tmp/cass-e2e-target cargo test --test e2e_filters -- --test-threads=1
+rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-e2e-target cargo test --test e2e_filters -- --test-threads=1
 ```
 
 ## About Contributions

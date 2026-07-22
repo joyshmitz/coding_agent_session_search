@@ -63,9 +63,9 @@
     "cass swarm repro-capsule --json",
     "cass swarm resource-plan --json",
     "cass-repro --incident ci-failure --capsule-id capsule-blake3:f1bd3cda3ec27617761b2a5c9abc0a9d1b98480f9ebe7e72612ccecf387c5283 --data-dir /tmp/cass-repro-fixture-data --fixture-only",
-    "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target cargo check --all-targets",
-    "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-resource-plan-target",
-    "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-strict-target cargo check --features strict-path-dep-validation"
+    "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-check-target cargo check --all-targets",
+    "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-resource-plan-target",
+    "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-strict-target cargo check --features strict-path-dep-validation"
   ],
   "redaction_report": {
     "dashboard": {
@@ -358,8 +358,8 @@
           "name": "frankensearch",
           "package": "frankensearch",
           "required_downstream_tests": [
-            "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-strict-target cargo check --features strict-path-dep-validation",
-            "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target cargo check --all-targets"
+            "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-strict-target cargo check --features strict-path-dep-validation",
+            "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-check-target cargo check --all-targets"
           ],
           "risk": {
             "kind": "manifest-pin-missing",
@@ -401,7 +401,7 @@
       "recommendations": [
         {
           "commands": [
-            "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-strict-target cargo check --features strict-path-dep-validation"
+            "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-strict-target cargo check --features strict-path-dep-validation"
           ],
           "kind": "strict-path-dep-validation",
           "requires_human_confirmation": false,
@@ -410,8 +410,8 @@
         },
         {
           "commands": [
-            "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-strict-target cargo check --features strict-path-dep-validation",
-            "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-check-target cargo check --all-targets"
+            "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-strict-target cargo check --features strict-path-dep-validation",
+            "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-check-target cargo check --all-targets"
           ],
           "kind": "review-drift-before-release",
           "requires_human_confirmation": false,
@@ -565,10 +565,10 @@
         "touches_network": false
       },
       "offload": {
-        "command_prefix": "rch exec -- env CARGO_TARGET_DIR=/tmp/cass-resource-plan-target",
+        "command_prefix": "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-resource-plan-target",
         "reason": "use a dedicated target dir per agent and keep expensive work off the interactive pane",
         "recommended": true,
-        "target_dir": "/tmp/cass-resource-plan-target"
+        "target_dir": "/data/tmp/cass-resource-plan-target"
       },
       "plans": [
         {

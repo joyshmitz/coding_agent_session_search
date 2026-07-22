@@ -555,7 +555,7 @@ fn subsystem_coverage_matrix_is_gap_free_and_every_artifact_exists() -> TestResu
 
 /// Golden: the integrated coverage descriptor names every matrix subsystem and
 /// matches its pinned snapshot. Regenerate after a deliberate change with:
-/// `UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/tmp/cass-golden-target
+/// `UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-golden-target
 /// cargo test --test e2e_resilience_capstone_gate`.
 #[test]
 fn integrated_coverage_descriptor_matches_golden_and_covers_every_subsystem() -> TestResult {
