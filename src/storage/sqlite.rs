@@ -14485,6 +14485,53 @@ fn franken_update_daily_stats_batched_in_tx_for_target(
     // INSERT...SELECT in fsqlite-core, which rejects UPSERT/RETURNING during
     // real cass indexing.
     for (day_id, agent, source, delta) in entries {
+        // The rebuild stage is connection-local and already serialized by the
+        // caller. Avoid routing its repeated aggregate keys through
+        // `INSERT ... ON CONFLICT`: FrankenSQLite currently reports the
+        // primary-key conflict before applying the DO UPDATE arm for this TEMP
+        // table shape. An explicit update-then-insert keeps the same additive
+        // semantics without extending the legacy SQLite fallback.
+        if matches!(target, DailyStatsBatchTarget::RebuildStage) {
+            let rows_changed = tx.execute_compat(
+                "UPDATE daily_stats_rebuild_stage
+                 SET session_count = session_count + ?4,
+                     message_count = message_count + ?5,
+                     total_chars = total_chars + ?6,
+                     last_updated = ?7
+                 WHERE day_id = ?1 AND agent_slug = ?2 AND source_id = ?3",
+                fparams![
+                    *day_id,
+                    agent.as_str(),
+                    source.as_str(),
+                    delta.session_count_delta,
+                    delta.message_count_delta,
+                    delta.total_chars_delta,
+                    now
+                ],
+            )?;
+            if rows_changed > 0 {
+                total_affected += rows_changed;
+                continue;
+            }
+
+            total_affected += tx.execute_compat(
+                "INSERT INTO daily_stats_rebuild_stage (
+                     day_id, agent_slug, source_id, session_count,
+                     message_count, total_chars, last_updated
+                 ) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                fparams![
+                    *day_id,
+                    agent.as_str(),
+                    source.as_str(),
+                    delta.session_count_delta,
+                    delta.message_count_delta,
+                    delta.total_chars_delta,
+                    now
+                ],
+            )?;
+            continue;
+        }
+
         total_affected += tx.execute_compat(
             upsert_sql,
             fparams![
@@ -21908,44 +21955,41 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("daily-stats-many-pages.db");
         let bootstrap = SqliteStorage::open(&db_path).unwrap();
-        drop(bootstrap);
 
-        // Build the fixture outside the measured region with the repository's
-        // existing stock-SQLite interop test dependency. Batch size one forces
+        // Build the fixture outside the measured region through the same
+        // FrankenSQLite compatibility transaction used by production storage.
+        // Batch size one forces
         // 512 executions of the same prepared FrankenSQLite statement; the
         // pre-#329 ad-hoc materialization path retained enough per-execution
         // state to reach ~10.4 GiB on the 967k-message field corpus.
-        let mut sqlite = rusqlite::Connection::open(&db_path).unwrap();
-        let tx = sqlite.transaction().unwrap();
-        tx.execute(
-            "INSERT INTO agents(id, slug, name, kind, created_at, updated_at)
+        let mut fixture_tx = bootstrap.conn.transaction().unwrap();
+        fixture_tx
+            .execute(
+                "INSERT INTO agents(id, slug, name, kind, created_at, updated_at)
              VALUES(1, 'codex', 'Codex', 'cli', 0, 0)",
-            [],
-        )
-        .unwrap();
-        tx.execute(
-            "INSERT INTO conversations(
-                 id, agent_id, source_id, external_id, source_path, started_at
-             ) VALUES(1, 1, 'local', 'cass-329-many-pages', '/tmp/cass-329.jsonl', ?1)",
-            rusqlite::params![1_700_000_000_000_i64],
-        )
-        .unwrap();
+            )
+            .unwrap();
+        fixture_tx
+            .execute_compat(
+                "INSERT INTO conversations(
+                     id, agent_id, source_id, external_id, source_path, started_at
+                 ) VALUES(1, 1, 'local', 'cass-329-many-pages', '/tmp/cass-329.jsonl', ?1)",
+                fparams![1_700_000_000_000_i64],
+            )
+            .unwrap();
         let content = "x".repeat(CONTENT_BYTES);
-        {
-            let mut insert = tx
-                .prepare(
+        for message_id in 1..=MESSAGE_COUNT {
+            fixture_tx
+                .execute_compat(
                     "INSERT INTO messages(id, conversation_id, idx, role, content)
                      VALUES(?1, 1, ?2, 'user', ?3)",
+                    fparams![message_id, message_id - 1, content.as_str()],
                 )
                 .unwrap();
-            for message_id in 1..=MESSAGE_COUNT {
-                insert
-                    .execute(rusqlite::params![message_id, message_id - 1, &content])
-                    .unwrap();
-            }
         }
-        tx.commit().unwrap();
-        drop(sqlite);
+        fixture_tx.commit().unwrap();
+        drop(fixture_tx);
+        drop(bootstrap);
 
         let storage = SqliteStorage::open(&db_path).unwrap();
         let plan_details: Vec<String> = storage
