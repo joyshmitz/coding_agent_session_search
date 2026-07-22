@@ -74,6 +74,15 @@ fn fleet_command(home: &Path, args: &[&str], ignore_sources: bool) -> Command {
 /// Run the rehearsal and parse stdout as one pure JSON object. The parse failing
 /// is itself the stdout-hygiene assertion.
 fn run_rehearsal_json(home: &Path, args: &[&str], ignore_sources: bool) -> Value {
+    run_rehearsal_json_with_expected_status(home, args, ignore_sources, true)
+}
+
+fn run_rehearsal_json_with_expected_status(
+    home: &Path,
+    args: &[&str],
+    ignore_sources: bool,
+    expect_success: bool,
+) -> Value {
     let data_dir = home.join("xdg-data").join("coding-agent-search");
     let cmd = fleet_command(home, args, ignore_sources);
     let out = spawn_with_timeout_or_diag(
@@ -82,9 +91,10 @@ fn run_rehearsal_json(home: &Path, args: &[&str], ignore_sources: bool) -> Value
         Some(&data_dir),
         REHEARSAL_TIMEOUT,
     );
-    assert!(
+    assert_eq!(
         out.status.success(),
-        "cass {args:?} exited non-zero: {:?}\nstdout:\n{}\nstderr:\n{}",
+        expect_success,
+        "cass {args:?} had unexpected status {:?}\nstdout:\n{}\nstderr:\n{}",
         out.status,
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
@@ -154,6 +164,14 @@ fn is_safe_command(cmd: &str) -> bool {
         || head.contains("scoop ")
         || head.contains("self-update");
     nondestructive && recognized
+}
+
+fn write_unreachable_remote_source(home: &Path) {
+    let config_dir = home.join("xdg-config").join("cass");
+    std::fs::create_dir_all(&config_dir).expect("create config dir");
+    let sources_toml = config_dir.join("sources.toml");
+    let toml = "[[sources]]\nname = \"unreachable-host\"\ntype = \"ssh\"\nhost = \"nobody@unreachable.invalid\"\npaths = [\"~/.claude/projects\"]\n";
+    std::fs::write(sources_toml, toml).expect("write sources.toml");
 }
 
 #[test]
@@ -284,10 +302,11 @@ fn every_emitted_next_command_is_a_safe_cass_invocation() {
 #[test]
 fn verify_drives_the_bounded_local_post_upgrade_battery() {
     let home = tempfile::tempdir().expect("temp home");
-    let v = run_rehearsal_json(
+    let v = run_rehearsal_json_with_expected_status(
         home.path(),
         &["fleet", "upgrade-rehearsal", "--verify", "--json"],
         true,
+        false,
     );
 
     assert_envelope_invariants(&v, "fixture");
@@ -334,9 +353,10 @@ fn verify_drives_the_bounded_local_post_upgrade_battery() {
             "unknown proof status: {status}"
         );
     }
-    assert!(
-        verification["overall_status"].as_str().is_some(),
-        "verification must roll up an overall status"
+    assert_ne!(
+        verification["overall_status"].as_str(),
+        Some("pass"),
+        "an isolated empty archive must not claim a trustworthy verification pass"
     );
     assert!(
         verification["summary"]
@@ -395,4 +415,54 @@ fn remote_source_is_named_but_not_contacted_without_live() {
         before, after,
         "sources.toml must be byte-identical after a rehearsal"
     );
+}
+
+#[test]
+fn live_all_unreachable_emits_complete_json_then_exits_one() {
+    let home = tempfile::tempdir().expect("temp home");
+    write_unreachable_remote_source(home.path());
+
+    let v = run_rehearsal_json_with_expected_status(
+        home.path(),
+        &["fleet", "upgrade-rehearsal", "--live", "--json"],
+        false,
+        false,
+    );
+
+    assert_envelope_invariants(&v, "live");
+    assert_eq!(v["probed_remote_hosts"].as_bool(), Some(true));
+    assert_eq!(v["rehearsal"]["hosts_unreachable"].as_u64(), Some(1));
+    assert!(
+        v["rehearsal"]["hosts"]
+            .as_array()
+            .is_some_and(|hosts| hosts.iter().any(|host| {
+                host["host_alias"].as_str() == Some("unreachable-host")
+                    && host["disposition"].as_str() == Some("unreachable")
+            })),
+        "the non-zero payload must preserve the unreachable host evidence"
+    );
+}
+
+#[test]
+fn live_all_unreachable_emits_human_report_before_exit_one() {
+    let home = tempfile::tempdir().expect("temp home");
+    write_unreachable_remote_source(home.path());
+    let data_dir = home.path().join("xdg-data").join("coding-agent-search");
+    let cmd = fleet_command(
+        home.path(),
+        &["fleet", "upgrade-rehearsal", "--live"],
+        false,
+    );
+    let out = spawn_with_timeout_or_diag(
+        cmd,
+        "fleet-upgrade-rehearsal-human-unreachable",
+        Some(&data_dir),
+        REHEARSAL_TIMEOUT,
+    );
+
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = String::from_utf8(out.stdout).expect("utf8 human stdout");
+    assert!(stdout.contains("Fleet upgrade rehearsal"));
+    assert!(stdout.contains("unreachable-host [unreachable]"));
+    assert!(stdout.contains("mutation-free"));
 }

@@ -98097,6 +98097,8 @@ fn run_fleet_upgrade_rehearsal(
     // Remote sources are probed live only with `--live`; otherwise they are named
     // in `deferred_remote_sources` and never contacted.
     let mut probed_remote_hosts = false;
+    let mut live_remote_hosts_requested = 0usize;
+    let mut live_remote_hosts_unreachable = 0usize;
     let mut deferred_remote_sources: Vec<String> = Vec::new();
     // A malformed sources.toml must fail loudly, not silently shrink the fleet
     // to the local host: `load()` only errors on parse/validation failure (a
@@ -98129,7 +98131,11 @@ fn run_fleet_upgrade_rehearsal(
                 deferred_remote_sources.push(source.name.clone());
                 continue;
             }
+            live_remote_hosts_requested += 1;
             let (report, coverage) = probe_remote_host_for_rehearsal(&source.name, host);
+            if report.unreachable {
+                live_remote_hosts_unreachable += 1;
+            }
             probed_remote_hosts = true;
             let assessment = crate::fleet_version_skew::assess_host(&report, &target);
             host_data.push((report, assessment, coverage));
@@ -98170,11 +98176,76 @@ fn run_fleet_upgrade_rehearsal(
 
     if let Some(format) = output_format {
         let payload = serde_json::to_value(&output).unwrap_or(serde_json::Value::Null);
-        return output_structured_value(payload, format);
+        output_structured_value(payload, format)?;
+    } else {
+        print_fleet_upgrade_rehearsal_human(&output);
     }
 
-    print_fleet_upgrade_rehearsal_human(&output);
+    // Emit the complete structured or human report before setting the process
+    // status. A requested proof battery that did not achieve a trustworthy
+    // pass, or a live run where every requested remote was unreachable, is an
+    // operational failure even though the rehearsal itself remained read-only.
+    if fleet_upgrade_rehearsal_failed(
+        live,
+        live_remote_hosts_requested,
+        live_remote_hosts_unreachable,
+        output
+            .local_verification
+            .as_ref()
+            .map(|report| report.overall_status),
+    ) {
+        std::process::exit(1);
+    }
+
     Ok(())
+}
+
+fn fleet_upgrade_rehearsal_failed(
+    live: bool,
+    live_remote_hosts_requested: usize,
+    live_remote_hosts_unreachable: usize,
+    verification_status: Option<crate::proof_artifact::ProofStatus>,
+) -> bool {
+    let verification_failed =
+        verification_status.is_some_and(|status| !status.is_trustworthy_pass());
+    let all_requested_remotes_unreachable = live
+        && live_remote_hosts_requested > 0
+        && live_remote_hosts_unreachable == live_remote_hosts_requested;
+    verification_failed || all_requested_remotes_unreachable
+}
+
+#[cfg(test)]
+mod fleet_upgrade_rehearsal_exit_tests {
+    use super::*;
+    use crate::proof_artifact::ProofStatus;
+
+    #[test]
+    fn requested_verification_requires_a_trustworthy_pass() {
+        assert!(!fleet_upgrade_rehearsal_failed(
+            false,
+            0,
+            0,
+            Some(ProofStatus::Pass),
+        ));
+        for status in [
+            ProofStatus::Fail,
+            ProofStatus::PartialProof,
+            ProofStatus::GeneratedOnly,
+            ProofStatus::Skipped,
+            ProofStatus::StaleArtifact,
+            ProofStatus::Timeout,
+        ] {
+            assert!(fleet_upgrade_rehearsal_failed(false, 0, 0, Some(status),));
+        }
+    }
+
+    #[test]
+    fn live_rehearsal_fails_only_when_every_requested_remote_is_unreachable() {
+        assert!(!fleet_upgrade_rehearsal_failed(true, 0, 0, None));
+        assert!(fleet_upgrade_rehearsal_failed(true, 2, 2, None));
+        assert!(!fleet_upgrade_rehearsal_failed(true, 2, 1, None));
+        assert!(!fleet_upgrade_rehearsal_failed(false, 2, 2, None));
+    }
 }
 
 /// Build the local host's bounded doctor report from cass-owned local evidence:
