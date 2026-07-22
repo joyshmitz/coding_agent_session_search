@@ -6,7 +6,7 @@
 | Workflow macros | `cass swarm macros --json --fixture <fixture>` | blocked facts remain advisory |
 | Blocked privacy risk | `cass swarm privacy-preview --json --fixture <fixture>` | opt-in is required and samples are redacted |
 | Stale search trust | `cass swarm dashboard --json --fixture <fixture>` | stale trust is metadata-only |
-| Failed command repro | `cass swarm repro-capsule --json --fixture <fixture>` | rerun targets generated fixture data |
+| Failed command repro | `cass swarm repro-capsule --json --fixture <fixture>` | rerun uses a real share-safe fixture template |
 | Release channel drift | `cass release-verify --json --from <fixture>` | stale channels block readiness |
 | Dependency pin risk | `cass swarm dependency-drift --json --fixture <fixture>` | incomplete pins block release readiness |
 | Low-resource host | `cass swarm resource-plan --json --fixture <fixture>` | unsafe work is deferred |

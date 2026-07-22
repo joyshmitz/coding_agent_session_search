@@ -4,8 +4,8 @@
 //! failure into a minimal, scrubbed reproduction artifact: a manifest, the
 //! (redacted) command transcript, an environment summary, cass version, relevant
 //! health/diag excerpts, evidence refs, a redaction report, expected/actual
-//! behavior, and a one-command rerun script that targets *generated fixture
-//! data only* — never live data dirs.
+//! behavior, and a one-command rerun template that accepts a recipient-local
+//! shared fixture path — never a live data dir.
 //!
 //! Privacy is the default: raw private prompt/session text is dropped to an
 //! omission marker unless the operator explicitly opts into the `full` privacy
@@ -17,13 +17,10 @@ use chrono::Utc;
 use serde_json::{Map, Value, json};
 
 /// Schema identifier for the repro capsule payload.
-pub const SCHEMA_VERSION: &str = "cass.swarm.repro_capsule.v1";
+pub const SCHEMA_VERSION: &str = "cass.swarm.repro_capsule.v2";
 
 /// Marker substituted for dropped private session/prompt text.
 const OMITTED: &str = "[OMITTED_PRIVATE_SESSION_TEXT]";
-
-/// Data dir the rerun script is pinned to — generated fixture data, never live.
-const RERUN_DATA_DIR: &str = "/tmp/cass-repro-fixture-data";
 
 /// Recognized incident kinds, in stable order.
 const INCIDENT_KINDS: &[&str] = &[
@@ -38,7 +35,6 @@ const INCIDENT_KINDS: &[&str] = &[
 #[derive(Debug, Clone)]
 struct CapsuleFacts {
     fixture_problem: Option<String>,
-    capsule_id_seed: String,
     incident_kind: String,
     cass_version: String,
     command: String,
@@ -99,6 +95,7 @@ fn redact_value(value: &Value, tally: &mut RedactionTally) -> Value {
 
 fn render_payload(fixture_id: &str, source_kind: &str, facts: CapsuleFacts) -> Value {
     let mut tally = RedactionTally::default();
+    let share_safe_fixture_id = redact(fixture_id, &mut RedactionTally::default());
 
     let opted_into_full = facts.privacy_tier.eq_ignore_ascii_case("full");
     // Private session text is dropped to a marker unless the operator opts into
@@ -135,8 +132,22 @@ fn render_payload(fixture_id: &str, source_kind: &str, facts: CapsuleFacts) -> V
         "actual": actual,
         "session_text": session_text,
     });
-    let capsule_id = canonical_hash(&body, &facts.capsule_id_seed);
-    let rerun = rerun_script(&facts.incident_kind, &capsule_id);
+    let capsule_id = canonical_hash(&body);
+    let rerun = rerun_script(&capsule_id);
+    let replay_value = |key: &str| body.get(key).cloned().unwrap_or(Value::Null);
+    let replay_source = json!({
+        "incident_kind": replay_value("incident_kind"),
+        "cass_version": redact(&facts.cass_version, &mut RedactionTally::default()),
+        "command": replay_value("command"),
+        "transcript": replay_value("transcript"),
+        "env": replay_value("env_summary"),
+        "health_excerpt": replay_value("health_excerpt"),
+        "evidence_refs": replay_value("evidence_refs"),
+        "expected": replay_value("expected"),
+        "actual": replay_value("actual"),
+        "private_session_text": replay_value("session_text"),
+        "privacy_tier": if opted_into_full { "full" } else { "redacted" }
+    });
 
     let summary = summarize(&facts, &tally);
     let status = summary
@@ -150,8 +161,13 @@ fn render_payload(fixture_id: &str, source_kind: &str, facts: CapsuleFacts) -> V
         "_meta": {
             "generated_at": Utc::now().to_rfc3339(),
             "source": source_kind,
-            "fixture_id": fixture_id,
+            "fixture_id": share_safe_fixture_id,
             "contract": "redacted reproduction capsule"
+        },
+        "fixture_id": share_safe_fixture_id,
+        "description": "Self-contained redacted input for cass swarm repro-capsule",
+        "sources": {
+            "repro_capsule": replay_source
         },
         "manifest": {
             "capsule_id": capsule_id,
@@ -193,22 +209,17 @@ fn render_payload(fixture_id: &str, source_kind: &str, facts: CapsuleFacts) -> V
     })
 }
 
-/// The one-command rerun script. It always targets the generated fixture data
-/// dir and carries an explicit no-live-data guard so it can never touch a real
-/// data dir.
-fn rerun_script(incident_kind: &str, capsule_id: &str) -> Value {
+/// The one-command rerun template uses the real read-only CLI surface while
+/// deliberately omitting the operator's local fixture path. The emitted payload
+/// is itself a valid fixture; save it under the fixed safe filename and run the
+/// command verbatim from that directory.
+fn rerun_script(capsule_id: &str) -> Value {
     json!({
-        "data_dir": RERUN_DATA_DIR,
         "targets_live_data": false,
         "no_live_data_guard": true,
         "capsule_id": capsule_id,
-        "command_template": format!(
-            "cass-repro --incident {} --capsule-id {} --data-dir {} --fixture-only",
-            normalize_kind(incident_kind),
-            capsule_id,
-            RERUN_DATA_DIR
-        ),
-        "note": "Reruns against generated fixture data only; refuses live data dirs."
+        "command_template": "cass swarm repro-capsule --json --fixture repro-capsule.fixture.json",
+        "note": "Save this capsule as repro-capsule.fixture.json, then run the command from that directory; the operator's original path is intentionally omitted."
     })
 }
 
@@ -241,6 +252,8 @@ fn summarize(facts: &CapsuleFacts, tally: &RedactionTally) -> Value {
 fn normalize_kind(kind: &str) -> String {
     if INCIDENT_KINDS.contains(&kind) {
         kind.to_string()
+    } else if kind.starts_with("other:") {
+        kind.to_string()
     } else {
         format!("other:{kind}")
     }
@@ -248,11 +261,11 @@ fn normalize_kind(kind: &str) -> String {
 
 // ---- canonical JSON + hashing (cross-machine stable) ----
 
-fn canonical_hash(value: &Value, seed: &str) -> String {
+fn canonical_hash(value: &Value) -> String {
     let mut canonical = String::new();
     write_canonical(value, &mut canonical);
     canonical.push_str("::");
-    canonical.push_str(seed);
+    canonical.push_str(SCHEMA_VERSION);
     format!(
         "capsule-blake3:{}",
         blake3::hash(canonical.as_bytes()).to_hex()
@@ -292,7 +305,6 @@ fn write_canonical(value: &Value, out: &mut String) {
 fn live_facts() -> CapsuleFacts {
     CapsuleFacts {
         fixture_problem: None,
-        capsule_id_seed: "live".to_string(),
         incident_kind: "unspecified".to_string(),
         cass_version: env!("CARGO_PKG_VERSION").to_string(),
         command: String::new(),
@@ -325,7 +337,6 @@ fn fixture_facts(source: Option<&Value>) -> CapsuleFacts {
 
     CapsuleFacts {
         fixture_problem: None,
-        capsule_id_seed: string_field("capsule_id_seed", "fixture"),
         incident_kind: string_field("incident_kind", "unspecified"),
         cass_version: string_field("cass_version", env!("CARGO_PKG_VERSION")),
         command: string_field("command", ""),
@@ -422,14 +433,23 @@ mod tests {
     }
 
     #[test]
-    fn rerun_targets_fixture_data_never_live() {
+    fn rerun_uses_real_share_safe_fixture_surface() {
         let out = render_repro_capsule_fixture("capsule", Some(&risky_source("redacted")));
         assert_eq!(out["rerun"]["targets_live_data"], json!(false));
         assert_eq!(out["rerun"]["no_live_data_guard"], json!(true));
-        assert_eq!(out["rerun"]["data_dir"], json!(RERUN_DATA_DIR));
+        assert!(out["rerun"].get("data_dir").is_none());
         let cmd = out["rerun"]["command_template"].as_str().unwrap();
-        assert!(cmd.contains("--fixture-only"));
-        assert!(cmd.contains(RERUN_DATA_DIR));
+        assert_eq!(
+            cmd,
+            "cass swarm repro-capsule --json --fixture repro-capsule.fixture.json"
+        );
+        let fictional = ["cass-repro", "--incident", "--capsule-id", "--data-dir"]
+            .into_iter()
+            .find(|fragment| cmd.contains(fragment));
+        assert!(
+            fictional.is_none(),
+            "fictional rerun fragment: {fictional:?}"
+        );
     }
 
     #[test]
@@ -443,6 +463,24 @@ mod tests {
                 .unwrap()
                 .starts_with("capsule-blake3:")
         );
+    }
+
+    #[test]
+    fn emitted_capsule_is_its_own_redacted_replay_fixture() -> Result<(), String> {
+        let first = render_repro_capsule_fixture("capsule", Some(&risky_source("redacted")));
+        if first.pointer("/fixture_id").and_then(Value::as_str) != Some("capsule") {
+            return Err("emitted capsule lost source fixture provenance".to_string());
+        }
+        let Some(replay_source) = first.pointer("/sources/repro_capsule") else {
+            return Err("emitted capsule omitted replay source".to_string());
+        };
+        let second = render_repro_capsule_fixture("repro-capsule", Some(replay_source));
+        if first.pointer("/manifest/capsule_id") != second.pointer("/manifest/capsule_id") {
+            return Err("self-replay changed the capsule id".to_string());
+        }
+        assert_no_leak(&first);
+        assert_no_leak(&second);
+        Ok(())
     }
 
     #[test]

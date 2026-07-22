@@ -181,9 +181,7 @@ fn scrub_dynamic(value: &mut Value) {
                     Value::String("<generated-at>".to_string()),
                 );
             }
-            if let Some(Value::String(data_dir)) = object.get_mut("data_dir")
-                && data_dir != "/tmp/cass-repro-fixture-data"
-            {
+            if let Some(Value::String(data_dir)) = object.get_mut("data_dir") {
                 *data_dir = "<isolated-data-dir>".to_string();
             }
             for child in object.values_mut() {
@@ -311,10 +309,6 @@ fn robot_safe(command: &str) -> bool {
     {
         return false;
     }
-    if command.starts_with("cass-repro ") {
-        return command.contains("--fixture-only")
-            && command.contains("--data-dir /tmp/cass-repro-fixture-data");
-    }
     if command == "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-resource-plan-target" {
         return true;
     }
@@ -388,7 +382,7 @@ fn docs_contract() -> String {
          | Workflow macros | `cass swarm macros --json --fixture <fixture>` | blocked facts remain advisory |\n\
          | Blocked privacy risk | `cass swarm privacy-preview --json --fixture <fixture>` | opt-in is required and samples are redacted |\n\
          | Stale search trust | `cass swarm dashboard --json --fixture <fixture>` | stale trust is metadata-only |\n\
-         | Failed command repro | `cass swarm repro-capsule --json --fixture <fixture>` | rerun targets generated fixture data |\n\
+         | Failed command repro | `cass swarm repro-capsule --json --fixture <fixture>` | rerun uses a real share-safe fixture template |\n\
          | Release channel drift | `cass release-verify --json --from <fixture>` | stale channels block readiness |\n\
          | Dependency pin risk | `cass swarm dependency-drift --json --fixture <fixture>` | incomplete pins block release readiness |\n\
          | Low-resource host | `cass swarm resource-plan --json --fixture <fixture>` | unsafe work is deferred |\n\

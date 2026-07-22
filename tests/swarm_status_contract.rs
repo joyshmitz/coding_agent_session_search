@@ -3187,7 +3187,7 @@ fn swarm_macros_blocked_case_lists_missing_facts() -> Result<(), Box<dyn Error>>
 }
 
 #[test]
-fn swarm_repro_capsule_scrubs_and_targets_fixture_data() -> Result<(), Box<dyn Error>> {
+fn swarm_repro_capsule_scrubs_and_emits_real_rerun_surface() -> Result<(), Box<dyn Error>> {
     let private_session_text = "user secret: my key is sk-ant-AAA and pw hunter2";
     let (_tmp, fixture_path) = write_swarm_evidence_fixture(
         "repro-capsule-redacted",
@@ -3211,7 +3211,7 @@ fn swarm_repro_capsule_scrubs_and_targets_fixture_data() -> Result<(), Box<dyn E
 
     require_value_eq(
         get_path(&output, &["schema_version"]),
-        json!("cass.swarm.repro_capsule.v1"),
+        json!("cass.swarm.repro_capsule.v2"),
         "schema version",
     )?;
     require_value_eq(get_path(&output, &["status"]), json!("ok"), "status")?;
@@ -3227,6 +3227,15 @@ fn swarm_repro_capsule_scrubs_and_targets_fixture_data() -> Result<(), Box<dyn E
         get_path(&output, &["rerun", "targets_live_data"]),
         json!(false),
         "rerun must not target live data",
+    )?;
+    require_value_eq(
+        get_path(&output, &["rerun", "command_template"]),
+        json!("cass swarm repro-capsule --json --fixture repro-capsule.fixture.json"),
+        "rerun must use the real share-safe fixture surface",
+    )?;
+    require(
+        get_path(&output, &["rerun", "data_dir"]).is_none(),
+        "rerun must not advertise a fictional data directory",
     )?;
     require_value_eq(
         get_path(&output, &["mutation_contract", "read_only"]),

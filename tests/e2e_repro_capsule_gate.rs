@@ -14,9 +14,9 @@
 //!     text seeded into the fixture never appear in the emitted capsule;
 //!   * the redaction report self-attests that private session text was dropped
 //!     (redacted tier) or kept-but-scrubbed (explicit `full` opt-in);
-//!   * the generated one-command rerun is *fixture-only* — it pins the generated
-//!     fixture data dir, carries the no-live-data guard, and never embeds a live
-//!     data dir or the operator's home path;
+//!   * the generated one-command rerun names the real read-only CASS surface,
+//!     uses a fixed recipient-local filename, and never embeds a live data dir
+//!     or the operator's home path;
 //!   * the surface is read-only: re-running it against a pre-populated XDG data
 //!     dir leaves the archive DB byte-identical and creates no files;
 //!   * the capsule id is deterministic, so the documented rerun reproduces the
@@ -50,7 +50,7 @@ use serde_json::{Value, json};
 
 use util::timeout::spawn_with_timeout_or_diag;
 
-type TestResult = Result<(), Box<dyn Error>>;
+type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
 const CAPSULE_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -171,6 +171,21 @@ fn capsule_argv(fixture: &Path) -> Vec<String> {
     ]
 }
 
+/// Convert the emitted, share-safe command template into argv without invoking
+/// a shell. The exact shape check makes parser drift fail before execution.
+fn rerun_argv_from_template(payload: &Value) -> TestResult<Vec<String>> {
+    let template = as_str(payload, "/rerun/command_template").unwrap_or_default();
+    let expected = "cass swarm repro-capsule --json --fixture repro-capsule.fixture.json";
+    ensure(template.cmp(expected).is_eq(), || {
+        format!("rerun template must name the real CASS surface: `{template}`")
+    })?;
+    Ok(template
+        .split_ascii_whitespace()
+        .skip(1)
+        .map(str::to_string)
+        .collect())
+}
+
 /// A stable proof-artifact label for an argv (keyed by the fixture stem).
 fn proof_label(argv: &str) -> String {
     argv.split_whitespace()
@@ -229,6 +244,14 @@ fn run_capsule(
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
+    ensure(out.status.success(), || {
+        format!(
+            "repro-capsule exited {:?}; argv: {argv}; stdout head: {}; stderr head: {}",
+            out.status.code(),
+            head(&stdout),
+            head(&stderr)
+        )
+    })?;
     let value: Value = serde_json::from_str(stdout.trim()).map_err(|e| {
         format!(
             "repro-capsule stdout not JSON: {e}; argv: {argv}; stdout head: {}; stderr head: {}",
@@ -293,11 +316,12 @@ fn assert_kind_capsule(payload: &Value, home: &Path, kind: &str) -> TestResult {
     assert_safe_contract(payload, home)
 }
 
-/// Every capsule must be read-only and its rerun must be fixture-only.
+/// Every capsule must be read-only and its rerun must be a share-safe command
+/// for the real fixture surface.
 fn assert_safe_contract(payload: &Value, home: &Path) -> TestResult {
     ensure(
-        str_is(payload, "/schema_version", "cass.swarm.repro_capsule.v1"),
-        || "schema_version must be cass.swarm.repro_capsule.v1".to_string(),
+        str_is(payload, "/schema_version", "cass.swarm.repro_capsule.v2"),
+        || "schema_version must be cass.swarm.repro_capsule.v2".to_string(),
     )?;
     ensure(
         bool_is(payload, "/mutation_contract/read_only", true),
@@ -314,16 +338,36 @@ fn assert_safe_contract(payload: &Value, home: &Path) -> TestResult {
     ensure(bool_is(payload, "/privacy/redaction_applied", true), || {
         "capsule must report redaction_applied=true".to_string()
     })?;
-    // Rerun is fixture-only and never points at live data.
+    // Rerun accepts a recipient-local shared fixture and never points at live
+    // data or an operator-specific path.
     ensure(bool_is(payload, "/rerun/targets_live_data", false), || {
         "rerun must not target live data".to_string()
     })?;
     ensure(bool_is(payload, "/rerun/no_live_data_guard", true), || {
         "rerun must carry the no-live-data guard".to_string()
     })?;
+    ensure(payload.pointer("/rerun/data_dir").is_none(), || {
+        "rerun must not advertise a fictional data directory".to_string()
+    })?;
     let template = as_str(payload, "/rerun/command_template").unwrap_or_default();
-    ensure(template.contains("--fixture-only"), || {
-        format!("rerun command must be fixture-only, got `{template}`")
+    ensure(
+        template
+            .cmp("cass swarm repro-capsule --json --fixture repro-capsule.fixture.json")
+            .is_eq(),
+        || format!("rerun command must use the real fixture surface, got `{template}`"),
+    )?;
+    let fictional = [
+        "cass-repro",
+        "--fixture-only",
+        "--incident",
+        "--capsule-id",
+        "--data-dir",
+        "/tmp",
+    ]
+    .into_iter()
+    .find(|fragment| template.contains(fragment));
+    ensure(fictional.is_none(), || {
+        format!("rerun command contains fictional or private fragment `{fictional:?}`")
     })?;
     // The rerun must not leak the operator's home or any live data dir into the
     // shareable capsule.
@@ -352,7 +396,7 @@ fn log_scenario(argv: &str, payload: &Value, assertion: &str) {
 }
 
 #[test]
-fn every_incident_kind_redacts_and_is_fixture_only() -> TestResult {
+fn every_incident_kind_redacts_and_uses_share_safe_rerun() -> TestResult {
     let (_tmp, home, xdg_data) = isolated_home()?;
     let fx = tempfile::TempDir::new()?;
     for kind in INCIDENT_KINDS {
@@ -360,7 +404,7 @@ fn every_incident_kind_redacts_and_is_fixture_only() -> TestResult {
         let args = capsule_argv(&fixture);
         let (payload, argv) = run_capsule(&home, &xdg_data, &args)?;
         assert_kind_capsule(&payload, &home, kind)?;
-        log_scenario(&argv, &payload, "redacted + fixture-only");
+        log_scenario(&argv, &payload, "redacted + share-safe rerun");
     }
     Ok(())
 }
@@ -451,10 +495,13 @@ fn capsule_is_deterministic_so_rerun_reproduces() -> TestResult {
     let fixture = write_inputs(fx.path(), "ci-failure", "redacted")?;
     let args = capsule_argv(&fixture);
 
-    // First render, then the documented rerun: re-invoke the same real surface
-    // against the same capsule fixture and prove it succeeds + reproduces.
+    // First render, save that redacted capsule under its advertised stable
+    // filename, then execute the documented template itself verbatim.
     let (first, _) = run_capsule(&home, &xdg_data, &args)?;
-    let (second, argv) = run_capsule(&home, &xdg_data, &args)?;
+    let replay_path = home.join("repro-capsule.fixture.json");
+    std::fs::write(&replay_path, serde_json::to_vec_pretty(&first)?)?;
+    let rerun_args = rerun_argv_from_template(&first)?;
+    let (second, argv) = run_capsule(&home, &xdg_data, &rerun_args)?;
 
     let id_a = as_str(&first, "/manifest/capsule_id")
         .unwrap_or_default()

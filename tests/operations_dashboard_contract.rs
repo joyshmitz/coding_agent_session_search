@@ -83,7 +83,7 @@ fn dashboard_source() -> Value {
             "local_ref": long_ref,
             "payload": {"status": "ok", "manifest": {
                 "capsule_id": "capsule-blake3:abc123", "incident_kind": "ci-failure"
-            }, "rerun": {"targets_live_data": false, "command_template": "cass-repro --fixture-only"}}
+            }, "rerun": {"targets_live_data": false, "command_template": "cass swarm repro-capsule --json --fixture repro-capsule.fixture.json"}}
         }],
         "search_results": {"results": [{"trust": {
             "trust_tier": "stale", "confidence": "medium", "stale_reason": "aged_out",

@@ -110,7 +110,7 @@
       "evidence_refs": [
         "/home/private-user/work/session.jsonl:42"
       ],
-      "expected": "fixture-only reproduction succeeds",
+      "expected": "shared fixture reproduction succeeds",
       "actual": "failed command observed",
       "private_session_text": "PRIVATE_SESSION_MARKER_NEVER_EMIT private-user@example.invalid",
       "privacy_tier": "redacted"
@@ -187,7 +187,7 @@
             },
             "rerun": {
               "targets_live_data": false,
-              "command_template": "cass-repro --data-dir [fixture-data] --fixture-only"
+              "command_template": "cass swarm repro-capsule --json --fixture repro-capsule.fixture.json"
             }
           }
         }

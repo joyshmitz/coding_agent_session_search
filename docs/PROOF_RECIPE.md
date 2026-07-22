@@ -257,6 +257,16 @@ cass search <query> --robot --robot-meta
 cass swarm evidence --json
 ```
 
+The capsule's `rerun.command_template` is the real read-only surface:
+`cass swarm repro-capsule --json --fixture repro-capsule.fixture.json`.
+The emitted capsule is itself a valid, redacted input fixture. Save it under
+that fixed filename and run the command from the same directory. The operator's
+original path is intentionally omitted, and the capsule id remains provenance
+metadata rather than a command-line flag.
+Replay guarantees the same scrubbed capsule body and capsule id. Run-local
+timestamps, redaction counters, and diagnostic status are regenerated and may
+differ from the first render.
+
 Use `cass swarm dashboard --json` only when automation needs the normalized
 cross-surface rollup (current goal, blockers, warning counts, recent capsule
 metadata, and the next proof command). Search/session content is never copied

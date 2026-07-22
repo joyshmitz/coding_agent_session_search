@@ -717,7 +717,7 @@ mod tests {
                 "local_ref": "reports/capsule.json",
                 "payload": {"status": "ok", "manifest": {
                     "capsule_id": "capsule-blake3:abc123", "incident_kind": "ci-failure"
-                }, "rerun": {"targets_live_data": false, "command_template": "cass-repro --fixture-only"}}
+                }, "rerun": {"targets_live_data": false, "command_template": "cass swarm repro-capsule --json --fixture repro-capsule.fixture.json"}}
             }],
             "search_results": {"results": [{"trust": {
                 "trust_tier": "trusted", "confidence": "high",

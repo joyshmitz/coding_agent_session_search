@@ -41,8 +41,8 @@
         "name": "empty.inputs.json"
       },
       {
-        "blake3": "be10f68be1fcd277c78a41f641658edb64b0d36831a04bcee9307891ec6899e9",
-        "bytes": 6343,
+        "blake3": "e941f916879a14464df767b71e7f1d01cf045471d3419185016f1ac0ded0d617",
+        "bytes": 6362,
         "name": "integrated.inputs.json"
       },
       {
@@ -61,8 +61,8 @@
     "cass swarm macros --json",
     "cass swarm privacy-preview --json",
     "cass swarm repro-capsule --json",
+    "cass swarm repro-capsule --json --fixture repro-capsule.fixture.json",
     "cass swarm resource-plan --json",
-    "cass-repro --incident ci-failure --capsule-id capsule-blake3:f1bd3cda3ec27617761b2a5c9abc0a9d1b98480f9ebe7e72612ccecf387c5283 --data-dir /tmp/cass-repro-fixture-data --fixture-only",
     "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-check-target cargo check --all-targets",
     "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-resource-plan-target",
     "rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-strict-target cargo check --features strict-path-dep-validation"
@@ -455,7 +455,7 @@
         "evidence_refs": [
           "[REDACTED_PATH]"
         ],
-        "expected": "fixture-only reproduction succeeds",
+        "expected": "shared fixture reproduction succeeds",
         "health_excerpt": {
           "index_present": false,
           "path": "[REDACTED_PATH]"
@@ -464,6 +464,8 @@
         "session_text": "[OMITTED_PRIVATE_SESSION_TEXT]",
         "transcript": "failed command referenced private session content at [REDACTED_PATH]"
       },
+      "description": "Self-contained redacted input for cass swarm repro-capsule",
+      "fixture_id": "guided-ops-integrated",
       "guided_workflow": {
         "apply_mode_available": false,
         "bead_id": "coding_agent_session_search-guided-ops-repro-trust-5u82n.2",
@@ -471,12 +473,12 @@
         "surface": "cass swarm repro-capsule --json"
       },
       "manifest": {
-        "capsule_id": "capsule-blake3:f1bd3cda3ec27617761b2a5c9abc0a9d1b98480f9ebe7e72612ccecf387c5283",
+        "capsule_id": "capsule-blake3:2b10a8075a81cd681e448e7fe9780ec92256288e3776a7046457d3f705b25be8",
         "cass_version": "0.6.22",
         "evidence_ref_count": 1,
         "incident_kind": "ci-failure",
         "privacy_tier": "redacted",
-        "schema_version": "cass.swarm.repro_capsule.v1"
+        "schema_version": "cass.swarm.repro_capsule.v2"
       },
       "mutation_contract": {
         "mutates_db": false,
@@ -499,14 +501,37 @@
         "strings_seen": 9
       },
       "rerun": {
-        "capsule_id": "capsule-blake3:f1bd3cda3ec27617761b2a5c9abc0a9d1b98480f9ebe7e72612ccecf387c5283",
-        "command_template": "cass-repro --incident ci-failure --capsule-id capsule-blake3:f1bd3cda3ec27617761b2a5c9abc0a9d1b98480f9ebe7e72612ccecf387c5283 --data-dir /tmp/cass-repro-fixture-data --fixture-only",
-        "data_dir": "/tmp/cass-repro-fixture-data",
+        "capsule_id": "capsule-blake3:2b10a8075a81cd681e448e7fe9780ec92256288e3776a7046457d3f705b25be8",
+        "command_template": "cass swarm repro-capsule --json --fixture repro-capsule.fixture.json",
         "no_live_data_guard": true,
-        "note": "Reruns against generated fixture data only; refuses live data dirs.",
+        "note": "Save this capsule as repro-capsule.fixture.json, then run the command from that directory; the operator's original path is intentionally omitted.",
         "targets_live_data": false
       },
-      "schema_version": "cass.swarm.repro_capsule.v1",
+      "schema_version": "cass.swarm.repro_capsule.v2",
+      "sources": {
+        "repro_capsule": {
+          "actual": "failed command observed",
+          "cass_version": "0.6.22",
+          "command": "search [REDACTED_PATH]",
+          "env": {
+            "email": "[EMAIL_REDACTED]",
+            "home": "[REDACTED_PATH]",
+            "os": "linux"
+          },
+          "evidence_refs": [
+            "[REDACTED_PATH]"
+          ],
+          "expected": "shared fixture reproduction succeeds",
+          "health_excerpt": {
+            "index_present": false,
+            "path": "[REDACTED_PATH]"
+          },
+          "incident_kind": "ci-failure",
+          "privacy_tier": "redacted",
+          "private_session_text": "[OMITTED_PRIVATE_SESSION_TEXT]",
+          "transcript": "failed command referenced private session content at [REDACTED_PATH]"
+        }
+      },
       "status": "ok",
       "summary": {
         "evidence_ref_count": 1,
@@ -805,7 +830,7 @@
             "capsule_id": "capsule-blake3:guidedopsfixture",
             "incident_kind": "ci-failure",
             "local_ref": "artifacts/repro-capsule.json",
-            "rerun_command": "cass-repro --data-dir [fixture-data] --fixture-only",
+            "rerun_command": "cass swarm repro-capsule --json --fixture repro-capsule.fixture.json",
             "status": "ok",
             "targets_live_data": false
           }
