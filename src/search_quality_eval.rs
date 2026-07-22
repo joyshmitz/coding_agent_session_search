@@ -233,6 +233,19 @@ pub fn sanitize_doc_ref(value: &str) -> String {
         .collect()
 }
 
+/// Accept only a document reference that is already in canonical report-safe
+/// form. Sanitizing a raw path or free-form value in place can preserve its
+/// identifying text after merely dropping separators (for example an email
+/// address loses `@` but remains recognizable). At the scoring boundary that
+/// is not safe enough: callers must supply a canonical identifier, otherwise
+/// the report records the invalid-reference sentinel instead of transformed
+/// private text.
+fn canonical_doc_ref(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let sanitized = sanitize_doc_ref(trimmed);
+    (!sanitized.is_empty() && sanitized == trimmed).then_some(sanitized)
+}
+
 /// Distinct expected refs as a set of borrowed strs.
 fn distinct(refs: &[String]) -> BTreeSet<&str> {
     refs.iter().map(String::as_str).collect()
@@ -290,14 +303,7 @@ fn observed_refs_ranked(observed: &[ObservedHit]) -> Vec<String> {
     let mut hits: Vec<&ObservedHit> = observed.iter().collect();
     hits.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.doc_ref.cmp(&b.doc_ref)));
     hits.into_iter()
-        .map(|hit| {
-            let sanitized = sanitize_doc_ref(&hit.doc_ref);
-            if sanitized.is_empty() {
-                INVALID_DOC_REF.to_string()
-            } else {
-                sanitized
-            }
-        })
+        .map(|hit| canonical_doc_ref(&hit.doc_ref).unwrap_or_else(|| INVALID_DOC_REF.to_string()))
         .collect()
 }
 
@@ -307,8 +313,7 @@ pub fn evaluate(run: &QueryRun) -> QueryEvaluation {
     let expected_refs: Vec<String> = qrel
         .expected_refs
         .iter()
-        .map(|doc_ref| sanitize_doc_ref(doc_ref))
-        .filter(|doc_ref| !doc_ref.is_empty())
+        .filter_map(|doc_ref| canonical_doc_ref(doc_ref))
         .collect();
     let observed_refs = observed_refs_ranked(&run.observed);
 
@@ -824,6 +829,24 @@ mod tests {
     }
 
     #[test]
+    fn evaluate_rejects_noncanonical_expected_refs_without_echoing_them() {
+        let private = "/private/session/private.user@example.invalid";
+        let run = QueryRun {
+            qrel: qrel("q-private-expected", "bar", &[private], 5),
+            observed: vec![hit(1, private, None)],
+            realized_mode: None,
+            fallback_tier: None,
+            latency_ms: 3,
+        };
+        let evaluation = evaluate(&run);
+        assert!(evaluation.expected_refs.is_empty());
+        assert_eq!(evaluation.observed_refs, refs(&[INVALID_DOC_REF]));
+        assert!(!evaluation.passed);
+        let encoded = serde_json::to_string(&evaluation).unwrap();
+        assert!(!encoded.contains("private.user"));
+    }
+
+    #[test]
     fn evaluate_sorts_observed_by_rank() {
         // Hits supplied out of order are scored in rank order.
         let run = QueryRun {
@@ -1018,7 +1041,8 @@ mod tests {
     }
 
     /// Even a caller that violates the metadata contract cannot preserve a raw
-    /// path/email-shaped value in the report's document-ref fields.
+    /// path/email-shaped value, including a recognizable separator-stripped
+    /// transformation, in the report's document-ref fields.
     #[test]
     fn report_holds_no_session_body() {
         let private = "private.user@example.invalid";
@@ -1041,12 +1065,16 @@ mod tests {
         let md = render_markdown(&report);
         assert_eq!(
             report.queries[0].observed_refs,
-            refs(&["privatesessionprivate.userexample.invalid"]),
-            "the report must contain only the sanitized metadata projection"
+            refs(&[INVALID_DOC_REF]),
+            "non-canonical metadata must become the stable invalid-ref sentinel"
         );
         assert!(
             !json.contains(private),
             "JSON report must not leak body text"
+        );
+        assert!(
+            !json.contains("private.userexample.invalid"),
+            "JSON report must not leak a separator-stripped private marker"
         );
         assert!(
             !md.contains(private),

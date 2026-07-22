@@ -96228,7 +96228,7 @@ struct SourcesDoctorOutput<'a> {
     diagnostics: &'a [SourceDiagnostics],
 }
 
-const SOURCE_DOCTOR_FIXTURE_MAX_BYTES: u64 = 16 * 1024;
+const SOURCE_DOCTOR_FIXTURE_MAX_BYTES: usize = 16 * 1024;
 
 /// Test-only external-probe facts for deterministic real-binary source-doctor
 /// E2E coverage. The seam replaces only the SSH-dependent observations; the
@@ -96328,18 +96328,38 @@ fn load_source_doctor_fixture_probe(host: &str) -> CliResult<Option<SourceDoctor
             fixture_path.display()
         ))
     })?;
-    if !metadata.file_type().is_file() || metadata.len() > SOURCE_DOCTOR_FIXTURE_MAX_BYTES {
+    let fixture_max_bytes = u64::try_from(SOURCE_DOCTOR_FIXTURE_MAX_BYTES).map_err(|_| {
+        source_doctor_fixture_error(
+            "Source-doctor probe fixture size limit exceeds this platform's file-size range".into(),
+        )
+    })?;
+    if !metadata.file_type().is_file() || metadata.len() > fixture_max_bytes {
         return Err(source_doctor_fixture_error(format!(
             "Source-doctor probe fixture must be a regular file no larger than {} bytes",
             SOURCE_DOCTOR_FIXTURE_MAX_BYTES
         )));
     }
-    let bytes = std::fs::read(fixture_path).map_err(|err| {
+    let file = std::fs::File::open(fixture_path).map_err(|err| {
         source_doctor_fixture_error(format!(
             "Failed to read source-doctor probe fixture {}: {err}",
             fixture_path.display()
         ))
     })?;
+    let mut bytes = Vec::new();
+    file.take(fixture_max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|err| {
+            source_doctor_fixture_error(format!(
+                "Failed to read source-doctor probe fixture {}: {err}",
+                fixture_path.display()
+            ))
+        })?;
+    if bytes.len() > SOURCE_DOCTOR_FIXTURE_MAX_BYTES {
+        return Err(source_doctor_fixture_error(format!(
+            "Source-doctor probe fixture grew beyond {} bytes while being read",
+            SOURCE_DOCTOR_FIXTURE_MAX_BYTES
+        )));
+    }
     let fixture: SourceDoctorFixtureProbe = serde_json::from_slice(&bytes).map_err(|err| {
         source_doctor_fixture_error(format!(
             "Invalid source-doctor probe fixture {}: {err}",
@@ -96852,47 +96872,148 @@ fn check_remote_path(host: &str, path: &str) -> DiagnosticCheck {
     }
 }
 
-/// Check if local storage directory is writable
+/// Conservatively assess local storage from metadata without mutating it.
 fn check_local_storage(source_name: &str) -> DiagnosticCheck {
     let data_dir = default_data_dir();
     let source_dir = data_dir.join("remotes").join(source_name);
+    check_local_storage_path(&source_dir)
+}
 
-    // Try to create the directory if it doesn't exist
-    if !source_dir.exists() {
-        if std::fs::create_dir_all(&source_dir).is_ok() {
-            return DiagnosticCheck {
-                name: "Local Storage".into(),
-                status: "pass".into(),
-                message: format!("{} is writable", source_dir.display()),
-                remediation: None,
-            };
-        } else {
-            return DiagnosticCheck {
-                name: "Local Storage".into(),
-                status: "fail".into(),
-                message: format!("Cannot create {}", source_dir.display()),
-                remediation: Some("Check file permissions on data directory".into()),
-            };
+fn check_local_storage_path(source_dir: &Path) -> DiagnosticCheck {
+    let mut inspected = None;
+    for candidate in source_dir.ancestors() {
+        match std::fs::metadata(candidate) {
+            Ok(metadata) => {
+                inspected = Some((candidate, metadata));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return DiagnosticCheck {
+                    name: "Local Storage".into(),
+                    status: "fail".into(),
+                    message: format!(
+                        "Cannot inspect {} without writing: {error}",
+                        candidate.display()
+                    ),
+                    remediation: Some("Check file permissions on data directory".into()),
+                };
+            }
         }
     }
 
-    // Directory exists, check if writable
-    let test_file = source_dir.join(".doctor_test");
-    if std::fs::write(&test_file, b"test").is_ok() {
-        let _ = std::fs::remove_file(&test_file);
+    let Some((inspected_path, metadata)) = inspected else {
+        return DiagnosticCheck {
+            name: "Local Storage".into(),
+            status: "fail".into(),
+            message: format!(
+                "No existing ancestor of {} could be inspected without writing",
+                source_dir.display()
+            ),
+            remediation: Some("Check the configured data directory path".into()),
+        };
+    };
+
+    if !metadata.is_dir() {
+        return DiagnosticCheck {
+            name: "Local Storage".into(),
+            status: "fail".into(),
+            message: format!(
+                "{} is not a directory (read-only check; no write attempted)",
+                inspected_path.display()
+            ),
+            remediation: Some("Replace the path with a writable directory".into()),
+        };
+    }
+
+    let target_context = if inspected_path == source_dir {
+        String::new()
+    } else {
+        format!(" for target {}", source_dir.display())
+    };
+    if metadata.permissions().readonly() {
         DiagnosticCheck {
             name: "Local Storage".into(),
-            status: "pass".into(),
-            message: format!("{} is writable", source_dir.display()),
-            remediation: None,
+            status: "fail".into(),
+            message: format!(
+                "{} appears read-only from permission metadata{} (read-only check; no write \
+                 attempted; effective ACL access was not tested)",
+                inspected_path.display(),
+                target_context
+            ),
+            remediation: Some("Check file permissions on data directory".into()),
         }
     } else {
         DiagnosticCheck {
             name: "Local Storage".into(),
-            status: "fail".into(),
-            message: format!("{} is not writable", source_dir.display()),
-            remediation: Some("Check file permissions on data directory".into()),
+            status: "pass".into(),
+            message: format!(
+                "{} appears writable from permission metadata{} (read-only check; no write \
+                 attempted; effective ACL access was not tested)",
+                inspected_path.display(),
+                target_context
+            ),
+            remediation: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod source_doctor_local_storage_tests {
+    use super::*;
+
+    #[test]
+    fn existing_directory_check_is_explicitly_non_mutating() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source_dir = temp.path().join("fixture-source");
+        std::fs::create_dir(&source_dir).expect("create source directory");
+        let members_before = std::fs::read_dir(&source_dir)
+            .expect("list source directory before check")
+            .count();
+
+        let check = check_local_storage_path(&source_dir);
+
+        assert_eq!(check.status, "pass");
+        assert!(check.message.contains("appears writable"));
+        assert!(check.message.contains("no write attempted"));
+        assert_eq!(
+            std::fs::read_dir(&source_dir)
+                .expect("list source directory after check")
+                .count(),
+            members_before
+        );
+    }
+
+    #[test]
+    fn missing_target_uses_nearest_existing_ancestor_without_creating_it() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source_dir = temp.path().join("remotes").join("fixture-source");
+
+        let check = check_local_storage_path(&source_dir);
+
+        assert_eq!(check.status, "pass");
+        assert!(check.message.contains(&temp.path().display().to_string()));
+        assert!(check.message.contains("no write attempted"));
+        assert!(!source_dir.exists());
+        assert!(!temp.path().join("remotes").exists());
+    }
+
+    #[test]
+    fn non_directory_target_fails_without_writing() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source_dir = temp.path().join("fixture-source");
+        std::fs::write(&source_dir, b"not a directory").expect("write fixture file");
+        let contents_before = std::fs::read(&source_dir).expect("read fixture before check");
+
+        let check = check_local_storage_path(&source_dir);
+
+        assert_eq!(check.status, "fail");
+        assert!(check.message.contains("is not a directory"));
+        assert!(check.message.contains("no write attempted"));
+        assert_eq!(
+            std::fs::read(&source_dir).expect("read fixture after check"),
+            contents_before
+        );
     }
 }
 
