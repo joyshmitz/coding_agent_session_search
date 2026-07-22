@@ -1,6 +1,449 @@
 {
   "api_version": 1,
   "contract_version": "1",
+  "subsystem_coverage": {
+    "schema_version": 1,
+    "subsystem_count": 15,
+    "complete": true,
+    "subsystems": [
+      {
+        "subsystem": "analytics",
+        "owning_beads": [
+          ".15.4",
+          ".9.4"
+        ],
+        "failure_modes": [
+          "fm-analytics-rebuild-grouped-aggregate",
+          "fm-analytics-charts-saturating-zero"
+        ],
+        "mandatory_proofs": [
+          "unit",
+          "golden"
+        ],
+        "proof_artifacts": [
+          "src/metric_integrity.rs",
+          "tests/analytics_cost_pricing_table_contract.rs"
+        ],
+        "optional_diagnostics": [
+          "live analytics rollup tail under doctor --fix"
+        ],
+        "fixture_provenance": "synthetic usage-ledger rows; no real session content",
+        "log_expectation": "deterministic --lib result line; proof-log when wired into doctor rebuild",
+        "redaction": "no-user-content",
+        "closure_evidence": "cargo test --lib metric_integrity + analytics contract test path/count"
+      },
+      {
+        "subsystem": "bookmarks",
+        "owning_beads": [
+          ".15.4"
+        ],
+        "failure_modes": [
+          "fm-bookmarks-silent-row-decode",
+          "fm-bookmarks-import-non-atomic"
+        ],
+        "mandatory_proofs": [
+          "unit",
+          "integration"
+        ],
+        "proof_artifacts": [
+          "src/bookmarks.rs",
+          "src/metric_integrity.rs"
+        ],
+        "optional_diagnostics": [],
+        "fixture_provenance": "synthetic bookmark rows; labels may embed workspace paths",
+        "log_expectation": "deterministic --lib result line; no structured log required for pure core",
+        "redaction": "local-only",
+        "closure_evidence": "cargo test --lib bookmarks result line"
+      },
+      {
+        "subsystem": "cache",
+        "owning_beads": [
+          ".15.2"
+        ],
+        "failure_modes": [
+          "fm-cache-tantivy-searcher-stale"
+        ],
+        "mandatory_proofs": [
+          "integration"
+        ],
+        "proof_artifacts": [
+          "src/daemon_runtime_state.rs",
+          "tests/search_caching.rs",
+          "tests/regex_cache.rs"
+        ],
+        "optional_diagnostics": [
+          "live searcher generation/reload tail"
+        ],
+        "fixture_provenance": "synthetic generation counters; no user content",
+        "log_expectation": "deterministic --lib result line for SearcherCacheOutcome",
+        "redaction": "no-user-content",
+        "closure_evidence": "cargo test --lib daemon_runtime_state + search_caching"
+      },
+      {
+        "subsystem": "cli_robot",
+        "owning_beads": [
+          ".2.4",
+          ".11.1",
+          ".11.5",
+          ".12.6"
+        ],
+        "failure_modes": [
+          "fm-cli-robot-schema-drift",
+          "fm-cli-exit-code-regression",
+          "fm-cli-golden-snapshot-drift"
+        ],
+        "mandatory_proofs": [
+          "e2e",
+          "golden",
+          "logs"
+        ],
+        "proof_artifacts": [
+          "tests/e2e_robot_smoke_gate.rs",
+          "tests/cli_robot.rs",
+          "tests/cli_robot_log_hygiene.rs"
+        ],
+        "optional_diagnostics": [],
+        "fixture_provenance": "isolated empty data dir; real cass binary dispatch",
+        "log_expectation": "PhaseTracker structured log + manifest per .12.3 (E2E_LOG=1)",
+        "redaction": "no-user-content",
+        "closure_evidence": "cargo test --test e2e_robot_smoke_gate + golden robot JSON diff"
+      },
+      {
+        "subsystem": "connectors",
+        "owning_beads": [
+          ".15.1",
+          ".3.1",
+          ".14.1"
+        ],
+        "failure_modes": [
+          "fm-connectors-jsonl-parse-error",
+          "fm-connectors-cursor-vscdb-locked",
+          "fm-connectors-chatgpt-encrypted-undecipherable",
+          "fm-connectors-amp-stem-prefix-unsafe",
+          "fm-indexer-aider-external-id-collision"
+        ],
+        "mandatory_proofs": [
+          "unit",
+          "integration",
+          "golden"
+        ],
+        "proof_artifacts": [
+          "src/connector_ingest_diagnostics.rs",
+          "tests/connector_cursor.rs",
+          "tests/connector_chatgpt.rs",
+          "tests/connector_aider.rs",
+          "tests/connector_amp.rs"
+        ],
+        "optional_diagnostics": [
+          "per-provider live ingest probe"
+        ],
+        "fixture_provenance": "per-provider synthetic session files; encrypted blob is non-decipherable by design",
+        "log_expectation": "deterministic --lib result line; per-provider conformance fixtures",
+        "redaction": "local-only",
+        "closure_evidence": "cargo test --lib connector_ingest_diagnostics + per-provider conformance"
+      },
+      {
+        "subsystem": "daemon",
+        "owning_beads": [
+          ".15.2",
+          ".2.2",
+          ".4.1"
+        ],
+        "failure_modes": [
+          "fm-daemon-stale-pidfile-socket",
+          "fm-daemon-fd-leak-on-tryclone"
+        ],
+        "mandatory_proofs": [
+          "integration"
+        ],
+        "proof_artifacts": [
+          "src/daemon_runtime_state.rs",
+          "tests/daemon_client_integration.rs"
+        ],
+        "optional_diagnostics": [
+          "live socket bind/stale-cleanup observation"
+        ],
+        "fixture_provenance": "synthetic runtime artifacts; flock .spawnlock, no pidfile",
+        "log_expectation": "deterministic --lib result line for DaemonRuntimeState",
+        "redaction": "no-user-content",
+        "closure_evidence": "cargo test --lib daemon_runtime_state + daemon_client_integration"
+      },
+      {
+        "subsystem": "html_export",
+        "owning_beads": [
+          ".15.3",
+          ".10.5",
+          ".12.3",
+          ".13.3"
+        ],
+        "failure_modes": [
+          "fm-html-export-markdown-injection",
+          "fm-html-export-encryption-failure",
+          "fm-encryption-nonce-type-safety",
+          "fm-encryption-utf8-byte-slicing"
+        ],
+        "mandatory_proofs": [
+          "integration",
+          "golden",
+          "e2e"
+        ],
+        "proof_artifacts": [
+          "tests/html_export_sanitization_security.rs",
+          "tests/html_export_integration.rs",
+          "tests/html_export_e2e.rs"
+        ],
+        "optional_diagnostics": [],
+        "fixture_provenance": "synthetic malicious markdown/script inputs; encrypted body is ciphertext",
+        "log_expectation": "structured proof-log for the real-binary export run; encrypted bodies stay ciphertext",
+        "redaction": "redact-required",
+        "closure_evidence": "cargo test --test html_export_sanitization_security + golden html_export diff"
+      },
+      {
+        "subsystem": "indexer",
+        "owning_beads": [
+          ".1",
+          ".4",
+          ".11.2",
+          ".12.5",
+          ".14.4"
+        ],
+        "failure_modes": [
+          "fm-indexer-stale-lexical-publish-backups",
+          "fm-indexer-tantivy-corrupt-or-stale",
+          "fm-indexer-fsvi-vector-orphan",
+          "fm-indexer-zero-results-regression",
+          "fm-indexer-edge-ngram-mismatch",
+          "fm-indexer-double-saturating-sub"
+        ],
+        "mandatory_proofs": [
+          "integration",
+          "golden"
+        ],
+        "proof_artifacts": [
+          "tests/indexer_tantivy.rs",
+          "tests/atomic_swap_publish_crash_window.rs",
+          "src/search/regression_corpus.rs"
+        ],
+        "optional_diagnostics": [
+          "live publish/backup retention tail"
+        ],
+        "fixture_provenance": "synthetic index trees + crash-window fixtures; SQLite is source of truth",
+        "log_expectation": "proof-log over publish/atomic-swap runs; deterministic regression-corpus replay",
+        "redaction": "no-user-content",
+        "closure_evidence": "cargo test --lib search::regression_corpus + atomic_swap_publish_crash_window"
+      },
+      {
+        "subsystem": "models",
+        "owning_beads": [
+          ".5",
+          ".5.1",
+          ".5.5"
+        ],
+        "failure_modes": [
+          "fm-models-fastembed-missing",
+          "fm-models-onnx-load-failure",
+          "fm-models-checksum-mismatch"
+        ],
+        "mandatory_proofs": [
+          "integration"
+        ],
+        "proof_artifacts": [
+          "tests/cli_model_lifecycle_contract.rs",
+          "tests/e2e_analytics_models.rs"
+        ],
+        "optional_diagnostics": [
+          "live model download (opt-in; never CI-required)"
+        ],
+        "fixture_provenance": "missing/mismatched model dirs; no network at test time",
+        "log_expectation": "deterministic contract test result line; live download is opt-in only",
+        "redaction": "no-user-content",
+        "closure_evidence": "cargo test --test cli_model_lifecycle_contract"
+      },
+      {
+        "subsystem": "pages",
+        "owning_beads": [
+          ".15.4",
+          ".13.2",
+          ".13.4",
+          ".12.6"
+        ],
+        "failure_modes": [
+          "fm-pages-render-parity-drift",
+          "fm-pages-export-sanitization"
+        ],
+        "mandatory_proofs": [
+          "integration",
+          "golden"
+        ],
+        "proof_artifacts": [
+          "tests/pages_export_golden.rs",
+          "tests/pages_pipeline_e2e.rs",
+          "tests/pages_error_handling_e2e.rs"
+        ],
+        "optional_diagnostics": [
+          "CI-only browser E2E (never local)"
+        ],
+        "fixture_provenance": "synthetic conversations; exported page content is sanitized",
+        "log_expectation": "golden page artifact diff; CI browser logs for render fidelity",
+        "redaction": "redact-required",
+        "closure_evidence": "cargo test --test pages_export_golden result line + golden diff"
+      },
+      {
+        "subsystem": "search",
+        "owning_beads": [
+          ".1",
+          ".4",
+          ".5",
+          ".7",
+          ".11.2",
+          ".15.2"
+        ],
+        "failure_modes": [
+          "fm-search-rrf-fast-unwrap-panic",
+          "fm-search-regex-pipe-in-charclass"
+        ],
+        "mandatory_proofs": [
+          "unit",
+          "integration",
+          "golden"
+        ],
+        "proof_artifacts": [
+          "src/search/regression_corpus.rs",
+          "tests/search_pipeline.rs",
+          "tests/spec_search_determinism.rs"
+        ],
+        "optional_diagnostics": [
+          "live semantic refinement tail"
+        ],
+        "fixture_provenance": "synthetic corpus; query/results stay local",
+        "log_expectation": "deterministic regression-corpus + determinism spec result lines",
+        "redaction": "local-only",
+        "closure_evidence": "cargo test --lib search::regression_corpus + spec_search_determinism"
+      },
+      {
+        "subsystem": "sources",
+        "owning_beads": [
+          ".8",
+          ".8.1",
+          ".8.2",
+          ".8.4",
+          ".8.5"
+        ],
+        "failure_modes": [
+          "fm-sources-rsync-not-on-path",
+          "fm-sources-toml-malformed",
+          "fm-sources-toctou-existence-race"
+        ],
+        "mandatory_proofs": [
+          "unit",
+          "integration",
+          "golden"
+        ],
+        "proof_artifacts": [
+          "src/source_doctor_health.rs",
+          "tests/e2e_sources.rs",
+          "tests/setup_workflow.rs"
+        ],
+        "optional_diagnostics": [
+          "live SSH source probe (opt-in)"
+        ],
+        "fixture_provenance": "synthetic sources.toml + mirror dirs; no SSH session opened at test time",
+        "log_expectation": "deterministic --lib result line; structured logs for e2e source flows",
+        "redaction": "local-only",
+        "closure_evidence": "cargo test --lib source_doctor_health + e2e_sources"
+      },
+      {
+        "subsystem": "storage",
+        "owning_beads": [
+          ".14",
+          ".14.1",
+          ".14.4",
+          ".9.4"
+        ],
+        "failure_modes": [
+          "fm-storage-frankensqlite-openread-cursor",
+          "fm-storage-pragma-integrity-fail",
+          "fm-storage-wal-multiprocess-corruption",
+          "fm-storage-rusqlite-frankensqlite-incompat",
+          "fm-storage-schema-version-drift",
+          "fm-storage-busy-lock-timeout",
+          "fm-storage-stale-wal-orphan",
+          "fm-storage-sql-fmt-injection-risk"
+        ],
+        "mandatory_proofs": [
+          "integration",
+          "golden",
+          "e2e"
+        ],
+        "proof_artifacts": [
+          "tests/e2e_storage_failure_fixture_gate.rs",
+          "tests/storage.rs",
+          "tests/storage_migration_safety.rs"
+        ],
+        "optional_diagnostics": [
+          "live integrity-check sweep"
+        ],
+        "fixture_provenance": "deterministic raw-byte corrupt fixtures; DB preserved byte-identical",
+        "log_expectation": "structured proof-log over the real-binary storage-failure gate",
+        "redaction": "no-user-content",
+        "closure_evidence": "cargo test --test e2e_storage_failure_fixture_gate result line"
+      },
+      {
+        "subsystem": "tui",
+        "owning_beads": [
+          ".15.4",
+          ".13.2",
+          ".13.4",
+          ".12.6"
+        ],
+        "failure_modes": [
+          "fm-tui-render-parity-drift",
+          "fm-tui-human-robot-mismatch"
+        ],
+        "mandatory_proofs": [
+          "integration",
+          "golden",
+          "e2e"
+        ],
+        "proof_artifacts": [
+          "tests/e2e_human_robot_parity_gate.rs",
+          "tests/tui_smoke.rs",
+          "tests/e2e_tui_smoke_flows.rs"
+        ],
+        "optional_diagnostics": [
+          "live TUI asciicast capture"
+        ],
+        "fixture_provenance": "headless TUI fixtures; human summaries carry redacted fields verbatim",
+        "log_expectation": "structured proof-log over the human/robot parity gate",
+        "redaction": "redact-required",
+        "closure_evidence": "cargo test --test e2e_human_robot_parity_gate result line"
+      },
+      {
+        "subsystem": "update_check",
+        "owning_beads": [
+          ".15.4"
+        ],
+        "failure_modes": [
+          "fm-update-shell-injection",
+          "fm-update-clock-rollback"
+        ],
+        "mandatory_proofs": [
+          "unit"
+        ],
+        "proof_artifacts": [
+          "src/update_check.rs",
+          "src/metric_integrity.rs"
+        ],
+        "optional_diagnostics": [
+          "live update-channel probe (opt-in)"
+        ],
+        "fixture_provenance": "synthetic version strings + clock values; no network at test time",
+        "log_expectation": "deterministic --lib result line for sanitized-arg and clock-rollback paths",
+        "redaction": "no-user-content",
+        "closure_evidence": "cargo test --lib update_check result line"
+      }
+    ]
+  },
   "global_flags": [
     {
       "name": "db",
@@ -230,7 +673,7 @@
         },
         {
           "name": "semantic",
-          "description": "Build semantic vector index after text indexing",
+          "description": "Build semantic vector index after text indexing. Progress reports canonical replay, embedding, vector publish, optional HNSW, manifest publish, and finalization as distinct phases. Set CASS_INDEX_STALL_DETECT_SECS=0 to disable stall diagnostics, or CASS_INDEX_STALL_ABORT_SECS=0 to keep abort-eligible lexical stalls report-only while still reporting semantic phase progress",
           "arg_type": "flag",
           "required": false,
           "enum_values": [
@@ -240,7 +683,7 @@
         },
         {
           "name": "build-hnsw",
-          "description": "Build HNSW index for approximate nearest neighbor search (requires --semantic). Enables O(log n) search with `--approximate` flag at query time",
+          "description": "Build HNSW index for approximate nearest neighbor search (requires --semantic). Enables O(log n) search with `--approximate` at query time. Native HNSW construction is an opaque phase: cass reports its vector total but does not synthesize forward progress the backend cannot expose",
           "arg_type": "flag",
           "required": false,
           "default": "false",
@@ -1699,7 +2142,7 @@
     },
     {
       "name": "guide",
-      "description": "Intent-to-command planner for guided safe workflows. Read-only: maps an operator intent (fix-ci, investigate-search-miss, prepare-release, repair-assets, export-session, onboard-source, support-capsule) to an exact safe command plan — steps, prerequisites, proof gates, forbidden shortcuts, rch target-dir hints, cost/risk, privacy notes, and stop conditions. Never mutates and never launches a bare TUI. Omit the intent to list the known intents",
+      "description": "Intent-to-command planner and gated runner for guided safe workflows. Dry-run is the default. `--apply` automatically evaluates only closed, read-only proof adapters and requires an explicit confirmation for each mutating step; macro strings are never evaluated by a shell. Maps an operator intent (fix-ci, investigate-search-miss, prepare-release, repair-assets, export-session, onboard-source, support-capsule) to an exact safe command plan — steps, prerequisites, proof gates, forbidden shortcuts, rch target-dir hints, cost/risk, privacy notes, and stop conditions. Never launches a bare TUI. Omit the intent to list the known intents",
       "arguments": [
         {
           "name": "intent",
@@ -1722,6 +2165,69 @@
           "arg_type": "option",
           "value_type": "path",
           "required": false
+        },
+        {
+          "name": "apply",
+          "description": "Enter gated apply mode (`--run` is an alias). Without this flag the transcript is a deterministic, fully read-only dry-run",
+          "arg_type": "flag",
+          "required": false,
+          "default": "false",
+          "enum_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "name": "confirm-step",
+          "description": "Confirm one exact mutating step number. Repeat for multiple steps; confirmation never carries across steps",
+          "arg_type": "option",
+          "value_type": "string",
+          "required": false,
+          "repeatable": true
+        },
+        {
+          "name": "confirm-fact",
+          "description": "Confirm an operator-context preflight fact as true. Repeatable; the confirmation is recorded in the robot transcript",
+          "arg_type": "option",
+          "value_type": "string",
+          "required": false,
+          "repeatable": true
+        },
+        {
+          "name": "accept-privacy-tier",
+          "description": "Accept the exact declared privacy tier (`redacted` or `sensitive`). A generic yes is intentionally not accepted",
+          "arg_type": "option",
+          "value_type": "string",
+          "required": false
+        },
+        {
+          "name": "accept-cost-risk",
+          "description": "Accept the exact declared cost-risk band (`medium` or `high`) after reviewing the resource what-if result",
+          "arg_type": "option",
+          "value_type": "string",
+          "required": false
+        },
+        {
+          "name": "allow-rch",
+          "description": "Permit steps whose macro policy requires rch offload. This does not permit a shell or an unallowlisted executable",
+          "arg_type": "flag",
+          "required": false,
+          "default": "false",
+          "enum_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "name": "confirm-stop-conditions-clear",
+          "description": "Assert that every declared stop condition was checked and is clear. An observed triggered stop condition always wins over this assertion",
+          "arg_type": "flag",
+          "required": false,
+          "default": "false",
+          "enum_values": [
+            "true",
+            "false"
+          ]
         },
         {
           "name": "json",
@@ -1861,7 +2367,7 @@
         },
         {
           "name": "rebuild-canonical-fts",
-          "description": "Safely inspect or repair the canonical FTS5 shadow. Partial shadows resume in bounded batches; recreation is failure-atomic. Supports `--dry-run`; mutation requires `--yes` and never modifies canonical rows",
+          "description": "Safely inspect or repair the canonical FTS5 shadow. Exact dry-run parity uses fused covering-index parent-run counts plus bounded primary-key probes; partial shadows resume in bounded batches and recreation is failure-atomic. Supports `--dry-run`; mutation requires `--yes` and never modifies canonical rows",
           "arg_type": "flag",
           "required": false,
           "default": "false",
@@ -9323,6 +9829,36 @@
                   "read_only"
                 ]
               }
+            },
+            "checks_not_attempted": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "reason"
+                ]
+              }
+            },
+            "attestation_source": {
+              "type": "string"
+            },
+            "attested_at_ms": {
+              "type": "integer"
+            },
+            "attestation_check_depth": {
+              "type": "string"
+            },
+            "attested_db_fingerprint": {
+              "type": "string"
             }
           },
           "required": [
@@ -9330,6 +9866,10 @@
             "source_of_truth_risk",
             "archive_readability"
           ]
+        },
+        "daemon_runtime": {
+          "type": "object",
+          "additionalProperties": true
         }
       },
       "required": [
@@ -9371,7 +9911,8 @@
         "coverage_risk",
         "source_authority",
         "candidate_staging",
-        "checks"
+        "checks",
+        "daemon_runtime"
       ]
     },
     "doctor-archive-normalize": {
@@ -28690,6 +29231,103 @@
         "contract_version": {
           "type": "string"
         },
+        "subsystem_coverage": {
+          "type": "object",
+          "properties": {
+            "schema_version": {
+              "type": "integer"
+            },
+            "subsystem_count": {
+              "type": "integer"
+            },
+            "complete": {
+              "type": "boolean"
+            },
+            "subsystems": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "subsystem": {
+                    "type": "string"
+                  },
+                  "owning_beads": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "failure_modes": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "mandatory_proofs": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "unit",
+                        "integration",
+                        "golden",
+                        "e2e",
+                        "logs"
+                      ]
+                    }
+                  },
+                  "proof_artifacts": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "optional_diagnostics": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "fixture_provenance": {
+                    "type": "string"
+                  },
+                  "log_expectation": {
+                    "type": "string"
+                  },
+                  "redaction": {
+                    "type": "string",
+                    "enum": [
+                      "no-user-content",
+                      "local-only",
+                      "redact-required"
+                    ]
+                  },
+                  "closure_evidence": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "subsystem",
+                  "owning_beads",
+                  "failure_modes",
+                  "mandatory_proofs",
+                  "proof_artifacts",
+                  "optional_diagnostics",
+                  "fixture_provenance",
+                  "log_expectation",
+                  "redaction",
+                  "closure_evidence"
+                ]
+              }
+            }
+          },
+          "required": [
+            "schema_version",
+            "subsystem_count",
+            "complete",
+            "subsystems"
+          ]
+        },
         "global_flags": {
           "type": "array",
           "items": {
@@ -29555,6 +30193,29 @@
                 },
                 "shortfall": {
                   "type": "integer"
+                },
+                "outcomes": {
+                  "type": "object",
+                  "properties": {
+                    "hit": {
+                      "type": "integer"
+                    },
+                    "cold_miss": {
+                      "type": "integer"
+                    },
+                    "stale_generation_miss": {
+                      "type": "integer"
+                    },
+                    "forced_reload": {
+                      "type": "integer"
+                    },
+                    "reload_failure": {
+                      "type": "integer"
+                    },
+                    "fallback": {
+                      "type": "integer"
+                    }
+                  }
                 },
                 "prewarm_scheduled": {
                   "type": "integer"
@@ -30789,6 +31450,36 @@
                       "read_only"
                     ]
                   }
+                },
+                "checks_not_attempted": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string"
+                      },
+                      "reason": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "reason"
+                    ]
+                  }
+                },
+                "attestation_source": {
+                  "type": "string"
+                },
+                "attested_at_ms": {
+                  "type": "integer"
+                },
+                "attestation_check_depth": {
+                  "type": "string"
+                },
+                "attested_db_fingerprint": {
+                  "type": "string"
                 }
               },
               "required": [
@@ -33745,6 +34436,10 @@
             "proof_notes"
           ]
         },
+        "daemon_runtime": {
+          "type": "object",
+          "additionalProperties": true
+        },
         "doctor_summary": {
           "type": "object",
           "description": "Doctor summary block embedded by health/status so agents can decide whether doctor inspection is needed without running repair.",
@@ -34548,6 +35243,36 @@
                   "read_only"
                 ]
               }
+            },
+            "checks_not_attempted": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "reason"
+                ]
+              }
+            },
+            "attestation_source": {
+              "type": "string"
+            },
+            "attested_at_ms": {
+              "type": "integer"
+            },
+            "attestation_check_depth": {
+              "type": "string"
+            },
+            "attested_db_fingerprint": {
+              "type": "string"
             }
           },
           "required": [

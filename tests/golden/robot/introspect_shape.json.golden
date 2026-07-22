@@ -7,6 +7,73 @@
     "contract_version": {
       "type": "string"
     },
+    "subsystem_coverage": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "integer"
+        },
+        "subsystem_count": {
+          "type": "integer"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "subsystems": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "subsystem": {
+                "type": "string"
+              },
+              "owning_beads": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "failure_modes": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "mandatory_proofs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "proof_artifacts": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "optional_diagnostics": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "fixture_provenance": {
+                "type": "string"
+              },
+              "log_expectation": {
+                "type": "string"
+              },
+              "redaction": {
+                "type": "string"
+              },
+              "closure_evidence": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
     "global_flags": {
       "type": "array",
       "items": {
@@ -14423,6 +14490,81 @@
                               }
                             }
                           }
+                        },
+                        "checks_not_attempted": {
+                          "type": "object",
+                          "properties": {
+                            "type": {
+                              "type": "string"
+                            },
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string"
+                                },
+                                "properties": {
+                                  "type": "object",
+                                  "properties": {
+                                    "name": {
+                                      "type": "object",
+                                      "properties": {
+                                        "type": {
+                                          "type": "string"
+                                        }
+                                      }
+                                    },
+                                    "reason": {
+                                      "type": "object",
+                                      "properties": {
+                                        "type": {
+                                          "type": "string"
+                                        }
+                                      }
+                                    }
+                                  }
+                                },
+                                "required": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string"
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "attestation_source": {
+                          "type": "object",
+                          "properties": {
+                            "type": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "attested_at_ms": {
+                          "type": "object",
+                          "properties": {
+                            "type": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "attestation_check_depth": {
+                          "type": "object",
+                          "properties": {
+                            "type": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "attested_db_fingerprint": {
+                          "type": "object",
+                          "properties": {
+                            "type": {
+                              "type": "string"
+                            }
+                          }
                         }
                       }
                     },
@@ -14431,6 +14573,17 @@
                       "items": {
                         "type": "string"
                       }
+                    }
+                  }
+                },
+                "daemon_runtime": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {
+                      "type": "boolean"
                     }
                   }
                 }
@@ -54726,6 +54879,208 @@
                     }
                   }
                 },
+                "subsystem_coverage": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "properties": {
+                      "type": "object",
+                      "properties": {
+                        "schema_version": {
+                          "type": "object",
+                          "properties": {
+                            "type": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "subsystem_count": {
+                          "type": "object",
+                          "properties": {
+                            "type": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "complete": {
+                          "type": "object",
+                          "properties": {
+                            "type": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "subsystems": {
+                          "type": "object",
+                          "properties": {
+                            "type": {
+                              "type": "string"
+                            },
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string"
+                                },
+                                "properties": {
+                                  "type": "object",
+                                  "properties": {
+                                    "subsystem": {
+                                      "type": "object",
+                                      "properties": {
+                                        "type": {
+                                          "type": "string"
+                                        }
+                                      }
+                                    },
+                                    "owning_beads": {
+                                      "type": "object",
+                                      "properties": {
+                                        "type": {
+                                          "type": "string"
+                                        },
+                                        "items": {
+                                          "type": "object",
+                                          "properties": {
+                                            "type": {
+                                              "type": "string"
+                                            }
+                                          }
+                                        }
+                                      }
+                                    },
+                                    "failure_modes": {
+                                      "type": "object",
+                                      "properties": {
+                                        "type": {
+                                          "type": "string"
+                                        },
+                                        "items": {
+                                          "type": "object",
+                                          "properties": {
+                                            "type": {
+                                              "type": "string"
+                                            }
+                                          }
+                                        }
+                                      }
+                                    },
+                                    "mandatory_proofs": {
+                                      "type": "object",
+                                      "properties": {
+                                        "type": {
+                                          "type": "string"
+                                        },
+                                        "items": {
+                                          "type": "object",
+                                          "properties": {
+                                            "type": {
+                                              "type": "string"
+                                            },
+                                            "enum": {
+                                              "type": "array",
+                                              "items": {
+                                                "type": "string"
+                                              }
+                                            }
+                                          }
+                                        }
+                                      }
+                                    },
+                                    "proof_artifacts": {
+                                      "type": "object",
+                                      "properties": {
+                                        "type": {
+                                          "type": "string"
+                                        },
+                                        "items": {
+                                          "type": "object",
+                                          "properties": {
+                                            "type": {
+                                              "type": "string"
+                                            }
+                                          }
+                                        }
+                                      }
+                                    },
+                                    "optional_diagnostics": {
+                                      "type": "object",
+                                      "properties": {
+                                        "type": {
+                                          "type": "string"
+                                        },
+                                        "items": {
+                                          "type": "object",
+                                          "properties": {
+                                            "type": {
+                                              "type": "string"
+                                            }
+                                          }
+                                        }
+                                      }
+                                    },
+                                    "fixture_provenance": {
+                                      "type": "object",
+                                      "properties": {
+                                        "type": {
+                                          "type": "string"
+                                        }
+                                      }
+                                    },
+                                    "log_expectation": {
+                                      "type": "object",
+                                      "properties": {
+                                        "type": {
+                                          "type": "string"
+                                        }
+                                      }
+                                    },
+                                    "redaction": {
+                                      "type": "object",
+                                      "properties": {
+                                        "type": {
+                                          "type": "string"
+                                        },
+                                        "enum": {
+                                          "type": "array",
+                                          "items": {
+                                            "type": "string"
+                                          }
+                                        }
+                                      }
+                                    },
+                                    "closure_evidence": {
+                                      "type": "object",
+                                      "properties": {
+                                        "type": {
+                                          "type": "string"
+                                        }
+                                      }
+                                    }
+                                  }
+                                },
+                                "required": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string"
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "required": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
                 "global_flags": {
                   "type": "object",
                   "properties": {
@@ -56776,6 +57131,67 @@
                                   "properties": {
                                     "type": {
                                       "type": "string"
+                                    }
+                                  }
+                                },
+                                "outcomes": {
+                                  "type": "object",
+                                  "properties": {
+                                    "type": {
+                                      "type": "string"
+                                    },
+                                    "properties": {
+                                      "type": "object",
+                                      "properties": {
+                                        "hit": {
+                                          "type": "object",
+                                          "properties": {
+                                            "type": {
+                                              "type": "string"
+                                            }
+                                          }
+                                        },
+                                        "cold_miss": {
+                                          "type": "object",
+                                          "properties": {
+                                            "type": {
+                                              "type": "string"
+                                            }
+                                          }
+                                        },
+                                        "stale_generation_miss": {
+                                          "type": "object",
+                                          "properties": {
+                                            "type": {
+                                              "type": "string"
+                                            }
+                                          }
+                                        },
+                                        "forced_reload": {
+                                          "type": "object",
+                                          "properties": {
+                                            "type": {
+                                              "type": "string"
+                                            }
+                                          }
+                                        },
+                                        "reload_failure": {
+                                          "type": "object",
+                                          "properties": {
+                                            "type": {
+                                              "type": "string"
+                                            }
+                                          }
+                                        },
+                                        "fallback": {
+                                          "type": "object",
+                                          "properties": {
+                                            "type": {
+                                              "type": "string"
+                                            }
+                                          }
+                                        }
+                                      }
                                     }
                                   }
                                 },
@@ -59510,6 +59926,81 @@
                                           }
                                         }
                                       }
+                                    }
+                                  }
+                                },
+                                "checks_not_attempted": {
+                                  "type": "object",
+                                  "properties": {
+                                    "type": {
+                                      "type": "string"
+                                    },
+                                    "items": {
+                                      "type": "object",
+                                      "properties": {
+                                        "type": {
+                                          "type": "string"
+                                        },
+                                        "properties": {
+                                          "type": "object",
+                                          "properties": {
+                                            "name": {
+                                              "type": "object",
+                                              "properties": {
+                                                "type": {
+                                                  "type": "string"
+                                                }
+                                              }
+                                            },
+                                            "reason": {
+                                              "type": "object",
+                                              "properties": {
+                                                "type": {
+                                                  "type": "string"
+                                                }
+                                              }
+                                            }
+                                          }
+                                        },
+                                        "required": {
+                                          "type": "array",
+                                          "items": {
+                                            "type": "string"
+                                          }
+                                        }
+                                      }
+                                    }
+                                  }
+                                },
+                                "attestation_source": {
+                                  "type": "object",
+                                  "properties": {
+                                    "type": {
+                                      "type": "string"
+                                    }
+                                  }
+                                },
+                                "attested_at_ms": {
+                                  "type": "object",
+                                  "properties": {
+                                    "type": {
+                                      "type": "string"
+                                    }
+                                  }
+                                },
+                                "attestation_check_depth": {
+                                  "type": "object",
+                                  "properties": {
+                                    "type": {
+                                      "type": "string"
+                                    }
+                                  }
+                                },
+                                "attested_db_fingerprint": {
+                                  "type": "object",
+                                  "properties": {
+                                    "type": {
+                                      "type": "string"
                                     }
                                   }
                                 }
@@ -65856,6 +66347,17 @@
                     }
                   }
                 },
+                "daemon_runtime": {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {
+                      "type": "boolean"
+                    }
+                  }
+                },
                 "doctor_summary": {
                   "type": "object",
                   "properties": {
@@ -67526,6 +68028,81 @@
                                   }
                                 }
                               }
+                            }
+                          }
+                        },
+                        "checks_not_attempted": {
+                          "type": "object",
+                          "properties": {
+                            "type": {
+                              "type": "string"
+                            },
+                            "items": {
+                              "type": "object",
+                              "properties": {
+                                "type": {
+                                  "type": "string"
+                                },
+                                "properties": {
+                                  "type": "object",
+                                  "properties": {
+                                    "name": {
+                                      "type": "object",
+                                      "properties": {
+                                        "type": {
+                                          "type": "string"
+                                        }
+                                      }
+                                    },
+                                    "reason": {
+                                      "type": "object",
+                                      "properties": {
+                                        "type": {
+                                          "type": "string"
+                                        }
+                                      }
+                                    }
+                                  }
+                                },
+                                "required": {
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string"
+                                  }
+                                }
+                              }
+                            }
+                          }
+                        },
+                        "attestation_source": {
+                          "type": "object",
+                          "properties": {
+                            "type": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "attested_at_ms": {
+                          "type": "object",
+                          "properties": {
+                            "type": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "attestation_check_depth": {
+                          "type": "object",
+                          "properties": {
+                            "type": {
+                              "type": "string"
+                            }
+                          }
+                        },
+                        "attested_db_fingerprint": {
+                          "type": "object",
+                          "properties": {
+                            "type": {
+                              "type": "string"
                             }
                           }
                         }

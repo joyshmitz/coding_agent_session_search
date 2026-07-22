@@ -78712,11 +78712,15 @@ fn run_capabilities(output_format: Option<RobotFormat>) -> CliResult<()> {
     Ok(())
 }
 
+fn build_introspect_subsystem_coverage() -> crate::subsystem_coverage_matrix::MatrixReport {
+    crate::subsystem_coverage_matrix::matrix_report()
+}
+
 fn build_introspect_response() -> IntrospectResponse {
     IntrospectResponse {
         api_version: 1,
         contract_version: CONTRACT_VERSION.to_string(),
-        subsystem_coverage: crate::subsystem_coverage_matrix::matrix_report(),
+        subsystem_coverage: build_introspect_subsystem_coverage(),
         global_flags: build_global_flag_schemas(),
         commands: build_command_schemas(),
         response_schemas: build_response_schemas(),
@@ -84445,9 +84449,8 @@ mod response_schema_tests {
     use super::*;
 
     #[test]
-    fn introspect_embeds_the_executable_subsystem_coverage_report() -> Result<(), String> {
-        let response = build_introspect_response();
-        let embedded = serde_json::to_value(&response.subsystem_coverage)
+    fn introspect_coverage_source_is_the_executable_matrix_report() -> Result<(), String> {
+        let embedded = serde_json::to_value(build_introspect_subsystem_coverage())
             .map_err(|error| error.to_string())?;
         let expected = serde_json::to_value(crate::subsystem_coverage_matrix::matrix_report())
             .map_err(|error| error.to_string())?;
@@ -84455,11 +84458,11 @@ mod response_schema_tests {
         if !embedded.eq(&expected) {
             return Err("introspect subsystem coverage drifted from matrix_report()".to_string());
         }
-        if !response
-            .subsystem_coverage
+        let coverage = build_introspect_subsystem_coverage();
+        if !coverage
             .subsystem_count
             .eq(&crate::subsystem_coverage_matrix::REPORT_SUBSYSTEM_FILES.len())
-            || !response.subsystem_coverage.complete
+            || !coverage.complete
         {
             return Err("introspect published an incomplete subsystem coverage report".to_string());
         }
