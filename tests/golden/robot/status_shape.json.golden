@@ -774,6 +774,54 @@
         }
       }
     },
+    "daemon_runtime": {
+      "type": "object",
+      "properties": {
+        "schema_version": {
+          "type": "integer"
+        },
+        "state": {
+          "type": "string"
+        },
+        "observation": {
+          "type": "object",
+          "properties": {
+            "socket_path": {
+              "type": "string"
+            },
+            "data_dir": {
+              "type": "string"
+            },
+            "run_lock_present": {
+              "type": "boolean"
+            },
+            "socket_present": {
+              "type": "boolean"
+            },
+            "socket_connectable": {
+              "type": "boolean"
+            },
+            "connect_timed_out": {
+              "type": "boolean"
+            }
+          }
+        },
+        "recovery": {
+          "type": "object",
+          "properties": {
+            "action_needed": {
+              "type": "boolean"
+            },
+            "disposable_runtime_artifact": {
+              "type": "boolean"
+            },
+            "why": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
     "doctor_summary": {
       "type": "object",
       "properties": {

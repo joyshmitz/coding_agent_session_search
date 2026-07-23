@@ -974,8 +974,46 @@
         "timed_out": false,
         "skipped_reason": "index not initialized",
         "read_only": true
+      },
+      {
+        "name": "contention_classification",
+        "elapsed_ms": "[ELAPSED_MS]",
+        "timed_out": false,
+        "skipped_reason": "database file absent",
+        "read_only": true
+      },
+      {
+        "name": "schema_version",
+        "elapsed_ms": "[ELAPSED_MS]",
+        "timed_out": false,
+        "skipped_reason": "database file absent",
+        "read_only": true
+      },
+      {
+        "name": "wal_sidecar_shape",
+        "elapsed_ms": "[ELAPSED_MS]",
+        "timed_out": false,
+        "skipped_reason": "database file absent",
+        "read_only": true
       }
     ]
+  },
+  "daemon_runtime": {
+    "schema_version": 1,
+    "state": "not-running",
+    "observation": {
+      "socket_path": "[REPO]/.rch-tmp/semantic-daemon-ubuntu.sock",
+      "data_dir": "[TEST_HOME]/cass-data",
+      "run_lock_present": false,
+      "socket_present": false,
+      "socket_connectable": false,
+      "connect_timed_out": false
+    },
+    "recovery": {
+      "action_needed": false,
+      "disposable_runtime_artifact": false,
+      "why": "no daemon is running; an on-demand client will spawn one when needed"
+    }
   },
   "asset_taxonomy": [
     {

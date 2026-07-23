@@ -7,7 +7,7 @@
       "files": "archive_conversations",
       "lines": "archive_messages",
       "bytes": "utf8_message_content_inspected",
-      "candidate_order": "most_recent_first",
+      "candidate_order": "newest_archive_row_first",
       "message_fragment_chars": 4096
     },
     "discovery": {
@@ -125,13 +125,17 @@
           "kind": "view",
           "argv": [
             "cass",
+            "--db",
+            "[TEST_HOME]/analytics-incidents.db",
             "view",
             "[TEST_HOME]/sessions/codex-primary.jsonl",
             "--source",
             "local",
+            "--conversation-id",
+            "1",
             "--json"
           ],
-          "display": "cass view [TEST_HOME]/sessions/codex-primary.jsonl --source local --json"
+          "display": "cass --db [TEST_HOME]/analytics-incidents.db view [TEST_HOME]/sessions/codex-primary.jsonl --source local --conversation-id 1 --json"
         }
       },
       {
@@ -165,13 +169,17 @@
           "kind": "view",
           "argv": [
             "cass",
+            "--db",
+            "[TEST_HOME]/analytics-incidents.db",
             "view",
             "/remote/archive/remote-session.jsonl",
             "--source",
             "remote-fixture",
+            "--conversation-id",
+            "2",
             "--json"
           ],
-          "display": "cass view /remote/archive/remote-session.jsonl --source remote-fixture --json"
+          "display": "cass --db [TEST_HOME]/analytics-incidents.db view /remote/archive/remote-session.jsonl --source remote-fixture --conversation-id 2 --json"
         }
       }
     ],

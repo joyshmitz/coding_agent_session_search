@@ -56,6 +56,7 @@
     "copilot",
     "copilot_cli",
     "qwen",
+    "grok",
     "crush",
     "hermes"
   ],
@@ -288,7 +289,7 @@
         },
         {
           "name": "semantic",
-          "description": "Build semantic vector index after text indexing",
+          "description": "Build semantic vector index after text indexing. Progress reports canonical replay, embedding, vector publish, optional HNSW, manifest publish, and finalization as distinct phases. Set CASS_INDEX_STALL_DETECT_SECS=0 to disable stall diagnostics, or CASS_INDEX_STALL_ABORT_SECS=0 to keep abort-eligible lexical stalls report-only while still reporting semantic phase progress",
           "arg_type": "flag",
           "required": false,
           "enum_values": [
@@ -298,7 +299,7 @@
         },
         {
           "name": "build-hnsw",
-          "description": "Build HNSW index for approximate nearest neighbor search (requires --semantic). Enables O(log n) search with `--approximate` flag at query time",
+          "description": "Build HNSW index for approximate nearest neighbor search (requires --semantic). Enables O(log n) search with `--approximate` at query time. Native HNSW construction is an opaque phase: cass reports its vector total but does not synthesize forward progress the backend cannot expose",
           "arg_type": "flag",
           "required": false,
           "default": "false",
@@ -1617,6 +1618,13 @@
           "required": false
         },
         {
+          "name": "conversation-id",
+          "description": "Exact canonical archive conversation row id",
+          "arg_type": "option",
+          "value_type": "integer",
+          "required": false
+        },
+        {
           "name": "line",
           "short": "n",
           "description": "Line number to show (1-indexed)",
@@ -1757,7 +1765,7 @@
     },
     {
       "name": "guide",
-      "description": "Intent-to-command planner for guided safe workflows. Read-only: maps an operator intent (fix-ci, investigate-search-miss, prepare-release, repair-assets, export-session, onboard-source, support-capsule) to an exact safe command plan — steps, prerequisites, proof gates, forbidden shortcuts, rch target-dir hints, cost/risk, privacy notes, and stop conditions. Never mutates and never launches a bare TUI. Omit the intent to list the known intents",
+      "description": "Intent-to-command planner and gated runner for guided safe workflows. Dry-run is the default. `--apply` automatically evaluates only closed, read-only proof adapters and requires an explicit confirmation for each mutating step; macro strings are never evaluated by a shell. Maps an operator intent (fix-ci, investigate-search-miss, prepare-release, repair-assets, export-session, onboard-source, support-capsule) to an exact safe command plan — steps, prerequisites, proof gates, forbidden shortcuts, rch target-dir hints, cost/risk, privacy notes, and stop conditions. Never launches a bare TUI. Omit the intent to list the known intents",
       "arguments": [
         {
           "name": "intent",
@@ -1780,6 +1788,69 @@
           "arg_type": "option",
           "value_type": "path",
           "required": false
+        },
+        {
+          "name": "apply",
+          "description": "Enter gated apply mode (`--run` is an alias). Without this flag the transcript is a deterministic, fully read-only dry-run",
+          "arg_type": "flag",
+          "required": false,
+          "default": "false",
+          "enum_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "name": "confirm-step",
+          "description": "Confirm one exact mutating step number. Repeat for multiple steps; confirmation never carries across steps",
+          "arg_type": "option",
+          "value_type": "string",
+          "required": false,
+          "repeatable": true
+        },
+        {
+          "name": "confirm-fact",
+          "description": "Confirm an operator-context preflight fact as true. Repeatable; the confirmation is recorded in the robot transcript",
+          "arg_type": "option",
+          "value_type": "string",
+          "required": false,
+          "repeatable": true
+        },
+        {
+          "name": "accept-privacy-tier",
+          "description": "Accept the exact declared privacy tier (`redacted` or `sensitive`). A generic yes is intentionally not accepted",
+          "arg_type": "option",
+          "value_type": "string",
+          "required": false
+        },
+        {
+          "name": "accept-cost-risk",
+          "description": "Accept the exact declared cost-risk band (`medium` or `high`) after reviewing the resource what-if result",
+          "arg_type": "option",
+          "value_type": "string",
+          "required": false
+        },
+        {
+          "name": "allow-rch",
+          "description": "Permit steps whose macro policy requires rch offload. This does not permit a shell or an unallowlisted executable",
+          "arg_type": "flag",
+          "required": false,
+          "default": "false",
+          "enum_values": [
+            "true",
+            "false"
+          ]
+        },
+        {
+          "name": "confirm-stop-conditions-clear",
+          "description": "Assert that every declared stop condition was checked and is clear. An observed triggered stop condition always wins over this assertion",
+          "arg_type": "flag",
+          "required": false,
+          "default": "false",
+          "enum_values": [
+            "true",
+            "false"
+          ]
         },
         {
           "name": "json",
@@ -1919,7 +1990,7 @@
         },
         {
           "name": "rebuild-canonical-fts",
-          "description": "Safely inspect or repair the canonical FTS5 shadow. Partial shadows resume in bounded batches; recreation is failure-atomic. Supports `--dry-run`; mutation requires `--yes` and never modifies canonical rows",
+          "description": "Safely inspect or repair the canonical FTS5 shadow. Exact dry-run parity uses fused covering-index parent-run counts plus bounded primary-key probes; partial shadows resume in bounded batches and recreation is failure-atomic. Supports `--dry-run`; mutation requires `--yes` and never modifies canonical rows",
           "arg_type": "flag",
           "required": false,
           "default": "false",
@@ -3282,6 +3353,16 @@
       "name": "CASS_INDEX_NO_PROGRESS_EVENTS",
       "default": "0",
       "description": "Suppress NDJSON progress events from cass index --json when set to 1."
+    },
+    {
+      "name": "CASS_INDEX_STALL_DETECT_SECS",
+      "default": "120",
+      "description": "Seconds without measured phase progress before cass index emits diagnostics; 0 disables detection."
+    },
+    {
+      "name": "CASS_INDEX_STALL_ABORT_SECS",
+      "default": "300",
+      "description": "Seconds without progress before an abort-eligible lexical stall exits 70; 0 keeps stalls report-only. Semantic phases are report-only."
     },
     {
       "name": "CASS_SEMANTIC_EMBEDDER",

@@ -1,4 +1,38 @@
 schemas: (auto-generated from contract)
+  analytics-incidents:
+    - _meta: object
+    - command: string
+    - data: object
+      - count_scope: string
+      - discovery: object
+        - bytes_scanned: integer
+        - caps: object
+        - elapsed_ms: integer
+        - evidence: array
+        - evidence_truncated: boolean
+        - files_considered: integer
+        - files_scanned: integer
+        - lines_scanned: integer
+        - partial: boolean
+        - stop_reason: string
+        - timed_out: boolean
+      - redaction: object
+        - fields_emitted: array
+        - fields_suppressed: array
+        - hash_strategy: string
+        - opt_in_flags: array
+        - private_text_policy: string
+      - scan_units: object
+        - bytes: string
+        - candidate_order: string
+        - files: string
+        - lines: string
+        - message_fragment_chars: integer
+      - schema_version: integer
+      - top_sessions: array
+      - top_sessions_truncated: boolean
+      - total_hits: integer
+      - total_sessions: integer
   api-version:
     - api_version: integer
     - contract_version: string
@@ -207,6 +241,7 @@ schemas: (auto-generated from contract)
       - unknown_mapping_count: integer
       - visible_current_source_bytes: integer
       - visible_current_source_count: integer
+    - daemon_runtime: object
     - derived_semantic_assets: object
       - asset_class: string
       - auto_download_allowed: boolean
@@ -696,7 +731,12 @@ schemas: (auto-generated from contract)
     - status: string
     - storage_integrity: object
       - archive_readability: string
+      - attestation_check_depth: string
+      - attestation_source: string
+      - attested_at_ms: integer
+      - attested_db_fingerprint: string
       - checks_attempted: array
+      - checks_not_attempted: array
       - source_of_truth_risk: string
       - storage_state: string
     - storage_pressure: object
@@ -2965,6 +3005,11 @@ schemas: (auto-generated from contract)
     - contract_version: string
     - global_flags: array
     - response_schemas: object
+    - subsystem_coverage: object
+      - complete: boolean
+      - schema_version: integer
+      - subsystem_count: integer
+      - subsystems: array
   models-check-update:
     - current_revision: ?
     - latest_revision: ?
@@ -3068,6 +3113,7 @@ schemas: (auto-generated from contract)
       - cache_stats: object
         - hits: integer
         - misses: integer
+        - outcomes: object
         - prewarm_scheduled: integer
         - prewarm_skipped_pressure: integer
         - shortfall: integer
@@ -3147,7 +3193,12 @@ schemas: (auto-generated from contract)
         - semantic: object
       - storage_integrity: object
         - archive_readability: string
+        - attestation_check_depth: string
+        - attestation_source: string
+        - attested_at_ms: integer
+        - attested_db_fingerprint: string
         - checks_attempted: array
+        - checks_not_attempted: array
         - source_of_truth_risk: string
         - storage_state: string
       - timed_out: ?
@@ -3537,6 +3588,7 @@ schemas: (auto-generated from contract)
       - schema_version: integer
       - sole_copy_warning_count: integer
       - status: string
+    - daemon_runtime: object
     - data_dir: string
     - database: object
       - conversations: ?
@@ -3821,7 +3873,12 @@ schemas: (auto-generated from contract)
     - status: string
     - storage_integrity: object
       - archive_readability: string
+      - attestation_check_depth: string
+      - attestation_source: string
+      - attested_at_ms: integer
+      - attested_db_fingerprint: string
       - checks_attempted: array
+      - checks_not_attempted: array
       - source_of_truth_risk: string
       - storage_state: string
     - topology_budget: object
