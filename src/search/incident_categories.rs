@@ -384,7 +384,9 @@ fn structured_field_is_positive(text: &str, field: &str) -> bool {
 
 fn structured_flag_is_true_or_unstructured(text: &str, field: &str) -> bool {
     text.match_indices(field).any(|(offset, _)| {
-        let mut rest = &text[offset + field.len()..];
+        let Some(mut rest) = text.get(offset.saturating_add(field.len())..) else {
+            return false;
+        };
         rest = rest.trim_start_matches(|character: char| character.is_ascii_whitespace());
         if let Some(stripped) = rest.strip_prefix(['"', '\'']) {
             rest = stripped.trim_start_matches(|character: char| character.is_ascii_whitespace());
@@ -395,8 +397,10 @@ fn structured_flag_is_true_or_unstructured(text: &str, field: &str) -> bool {
         if !matches!(separator, ':' | '=') {
             return true;
         }
-        rest = rest[separator.len_utf8()..]
-            .trim_start_matches(|character: char| character.is_ascii_whitespace());
+        let Some(stripped) = rest.strip_prefix(separator) else {
+            return false;
+        };
+        rest = stripped.trim_start_matches(|character: char| character.is_ascii_whitespace());
         if let Some(stripped) = rest.strip_prefix(['"', '\'']) {
             rest = stripped;
         }
@@ -406,7 +410,8 @@ fn structured_flag_is_true_or_unstructured(text: &str, field: &str) -> bool {
                     || matches!(character, '"' | '\'' | ',' | '}' | ']' | ';')
             })
             .unwrap_or(rest.len());
-        matches!(&rest[..value_end], "true" | "1")
+        rest.get(..value_end)
+            .is_some_and(|value| matches!(value, "true" | "1"))
     })
 }
 
@@ -606,6 +611,20 @@ pub(crate) fn classify_text(text: &str) -> Vec<IncidentCategory> {
 mod tests {
     use super::*;
 
+    fn require_categories(
+        actual: Vec<IncidentCategory>,
+        expected: &[IncidentCategory],
+        context: &str,
+    ) -> Result<(), String> {
+        if actual.as_slice().cmp(expected).is_eq() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{context}: expected {expected:?}, found {actual:?}"
+            ))
+        }
+    }
+
     /// The eleven required category ids from the report, in order.
     const REQUIRED: &[&str] = &[
         "cass_status_health",
@@ -771,7 +790,7 @@ mod tests {
     }
 
     #[test]
-    fn classifier_requires_category_specific_failure_context() {
+    fn classifier_requires_category_specific_failure_context() -> Result<(), String> {
         assert!(
             classify_text("cass uses frankensqlite and frankensearch").is_empty(),
             "dependency names alone are not an attribution incident"
@@ -791,16 +810,17 @@ mod tests {
             .is_empty(),
             "healthy status field names and benign values must not become incidents"
         );
-        assert_eq!(
+        require_categories(
             classify_text(r#"cass semantic model missing; {"fallback_mode":"hybrid"}"#),
-            vec![IncidentCategory::Semantic],
-            "healthy structured fields must not hide an adjacent prose incident"
-        );
-        assert_eq!(
+            &[IncidentCategory::Semantic],
+            "healthy structured fields must not hide an adjacent prose incident",
+        )?;
+        require_categories(
             classify_text("cass semantic_fallback_lexical; search stayed available"),
-            vec![IncidentCategory::Semantic],
-            "the report-derived bare fallback marker remains a strong signal"
-        );
+            &[IncidentCategory::Semantic],
+            "the report-derived bare fallback marker remains a strong signal",
+        )?;
+        Ok(())
     }
 
     #[test]

@@ -790,6 +790,14 @@ where
 mod tests {
     use super::*;
 
+    fn require(condition: bool, message: &str) -> Result<()> {
+        if condition {
+            Ok(())
+        } else {
+            Err(anyhow!("{message}"))
+        }
+    }
+
     fn incident_db() -> Connection {
         let conn = Connection::open(":memory:").unwrap();
         conn.execute_batch(
@@ -1242,21 +1250,39 @@ mod tests {
     }
 
     #[test]
-    fn hard_timeout_report_claims_no_unreceived_observations() {
+    fn hard_timeout_report_claims_no_unreceived_observations() -> Result<()> {
         let caps = scan_caps();
         let report = hard_timeout_report(caps);
-        assert_eq!(report.count_scope, "no_verified_results_hard_timeout");
-        assert_eq!(report.discovery.stop_reason, StopReason::TimedOut);
-        assert!(report.discovery.timed_out);
-        assert!(report.discovery.partial);
-        assert_eq!(report.discovery.elapsed_ms, caps.budget_ms);
-        assert_eq!(report.discovery.files_considered, 0);
-        assert_eq!(report.discovery.files_scanned, 0);
-        assert!(report.top_sessions.is_empty());
+        require(
+            report.count_scope == "no_verified_results_hard_timeout",
+            "hard timeout count scope drifted",
+        )?;
+        require(
+            report.discovery.stop_reason == StopReason::TimedOut,
+            "hard timeout stop reason drifted",
+        )?;
+        require(report.discovery.timed_out, "timed_out must be true")?;
+        require(report.discovery.partial, "partial must be true")?;
+        require(
+            report.discovery.elapsed_ms == caps.budget_ms,
+            "elapsed time must equal the exhausted budget",
+        )?;
+        require(
+            report.discovery.files_considered == 0,
+            "unreceived rows must not be reported as considered",
+        )?;
+        require(
+            report.discovery.files_scanned == 0,
+            "unreceived rows must not be reported as scanned",
+        )?;
+        require(
+            report.top_sessions.is_empty(),
+            "unreceived sessions must not be reported",
+        )
     }
 
     #[test]
-    fn hard_timeout_worker_path_returns_before_slow_scan_finishes() {
+    fn hard_timeout_worker_path_returns_before_slow_scan_finishes() -> Result<()> {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::{Duration, Instant};
@@ -1270,18 +1296,23 @@ mod tests {
             std::thread::sleep(Duration::from_secs(1));
             worker_finished_in_scan.store(true, Ordering::Release);
             Ok(hard_timeout_report(caps))
-        })
-        .unwrap();
+        })?;
 
-        assert_eq!(report.count_scope, "no_verified_results_hard_timeout");
-        assert_eq!(report.discovery.stop_reason, StopReason::TimedOut);
-        assert!(
+        require(
+            report.count_scope == "no_verified_results_hard_timeout",
+            "hard timeout count scope drifted",
+        )?;
+        require(
+            report.discovery.stop_reason == StopReason::TimedOut,
+            "hard timeout stop reason drifted",
+        )?;
+        require(
             started.elapsed() < Duration::from_millis(900),
-            "hard guard waited for the one-second worker"
-        );
-        assert!(
+            "hard guard waited for the one-second worker",
+        )?;
+        require(
             !worker_finished.load(Ordering::Acquire),
-            "hard guard returned only after the slow worker completed"
-        );
+            "hard guard returned only after the slow worker completed",
+        )
     }
 }
