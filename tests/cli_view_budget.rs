@@ -5,12 +5,13 @@
 //!
 //! The report saw `cass view` fail under a 10s cap. View is a single bounded read
 //! (file fast-path or DB/archive fallback), so it sheds nothing; it now emits a
-//! `budget` block (elapsed_ms, budget_ms, timed_out) so an agent can tell whether
-//! the read exceeded its budget. Overridable via CASS_VIEW_BUDGET_MS, which these
-//! tests use to exercise both the within-budget and exceeded cases. The timeout
-//! case also sets `CASS_TEST_VIEW_SLOW_MS`, matching the deterministic slowdown
-//! pattern used by the status budget suite instead of assuming a file read must
-//! take longer than one millisecond on every host.
+//! stable `budget` block so an agent can tell whether the read exceeded its
+//! budget and which cheaper probe to run next. Overridable via
+//! CASS_VIEW_BUDGET_MS, which these tests use to exercise both the within-budget
+//! and exceeded cases. The timeout case also sets `CASS_TEST_VIEW_SLOW_MS`,
+//! matching the deterministic slowdown pattern used by the status budget suite
+//! instead of assuming a file read must take longer than one millisecond on
+//! every host.
 
 use assert_cmd::Command;
 use serde_json::Value;
@@ -66,6 +67,8 @@ fn view_emits_budget_block_within_budget() {
         budget["elapsed_ms"].as_u64().is_some(),
         "elapsed_ms present: {budget}"
     );
+    assert_eq!(budget["skipped_sections"], serde_json::json!([]));
+    assert_eq!(budget["recommended_next_probe"], Value::Null);
     // The view payload is otherwise intact.
     assert_eq!(
         json["path"], "README.md",
@@ -85,6 +88,11 @@ fn view_reports_timed_out_when_budget_exceeded() {
         budget["budget_ms"].as_u64(),
         Some(1),
         "budget_ms reflects override: {budget}"
+    );
+    assert_eq!(budget["skipped_sections"], serde_json::json!([]));
+    assert_eq!(
+        budget["recommended_next_probe"], "cass health --json",
+        "timed-out view should point at a cheaper bounded probe: {budget}"
     );
     // stdout stays a single valid JSON object even when the budget is exceeded.
     assert!(

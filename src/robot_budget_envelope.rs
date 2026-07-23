@@ -131,6 +131,51 @@ pub enum BudgetOutcome {
     TimedOut,
 }
 
+/// Additive budget metadata for robot payloads that cannot adopt
+/// [`BudgetEnvelope`] without reshaping their existing wire contract.
+///
+/// Surfaces embed this value under a top-level `budget` key. Every field is
+/// serialized, including an empty `skipped_sections` list and a `null`
+/// `recommended_next_probe`, so robot consumers can rely on one stable shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BudgetBlock {
+    /// Wall-clock spent on the operation when this block was captured.
+    pub elapsed_ms: u64,
+    /// The budget the operation was given.
+    pub budget_ms: u64,
+    /// Whether the captured elapsed time reached or exceeded the budget.
+    pub timed_out: bool,
+    /// Named sections that were skipped or shed.
+    #[serde(default)]
+    pub skipped_sections: Vec<String>,
+    /// The cheaper bounded probe that can obtain the skipped facts.
+    #[serde(default)]
+    pub recommended_next_probe: Option<String>,
+}
+
+impl BudgetBlock {
+    /// Capture an internally consistent snapshot of a [`RobotBudget`].
+    ///
+    /// `elapsed_ms` is sampled once and the timeout decision is derived from
+    /// that same value, so the serialized fields cannot disagree at a deadline
+    /// boundary.
+    pub fn from_budget(
+        budget: &RobotBudget,
+        skipped_sections: Vec<String>,
+        recommended_next_probe: Option<String>,
+    ) -> Self {
+        let elapsed_ms = budget.elapsed_ms();
+        let budget_ms = budget.total_ms();
+        Self {
+            elapsed_ms,
+            budget_ms,
+            timed_out: budget_status(elapsed_ms, budget_ms) == BudgetPhase::Exhausted,
+            skipped_sections,
+            recommended_next_probe,
+        }
+    }
+}
+
 /// A generic partial/error envelope around a robot payload. `data` always
 /// carries whatever facts completed, even on timeout, so consumers can act on a
 /// partial result instead of nothing.
@@ -293,6 +338,78 @@ mod tests {
             "should have most of the budget left"
         );
         assert_eq!(b.total_ms(), 60_000);
+    }
+
+    #[test]
+    fn budget_block_zero_budget_is_an_exhausted_boundary() {
+        let budget = RobotBudget::new(0);
+        let block = BudgetBlock::from_budget(&budget, Vec::new(), None);
+
+        assert_eq!(block.budget_ms, 0);
+        assert!(block.timed_out);
+        assert!(block.skipped_sections.is_empty());
+        assert_eq!(block.recommended_next_probe, None);
+    }
+
+    #[test]
+    fn budget_block_complete_snapshot_has_stable_wire_shape() {
+        let budget = RobotBudget::new(60_000);
+        let block = BudgetBlock::from_budget(&budget, Vec::new(), None);
+        let expected_elapsed_ms = block.elapsed_ms;
+
+        assert!(!block.timed_out);
+        assert_eq!(
+            serde_json::to_value(&block).unwrap(),
+            json!({
+                "elapsed_ms": expected_elapsed_ms,
+                "budget_ms": 60_000,
+                "timed_out": false,
+                "skipped_sections": [],
+                "recommended_next_probe": null,
+            })
+        );
+    }
+
+    #[test]
+    fn budget_block_partial_snapshot_names_skips_and_next_probe() {
+        let budget = RobotBudget::new(60_000);
+        let block = BudgetBlock::from_budget(
+            &budget,
+            vec!["semantic".to_string(), "remote".to_string()],
+            Some("cass status --json".to_string()),
+        );
+
+        assert!(!block.timed_out);
+        assert_eq!(block.skipped_sections, ["semantic", "remote"]);
+        assert_eq!(
+            block.recommended_next_probe.as_deref(),
+            Some("cass status --json")
+        );
+    }
+
+    #[test]
+    fn budget_block_timeout_snapshot_preserves_partial_guidance() {
+        let start = Instant::now()
+            .checked_sub(std::time::Duration::from_millis(25))
+            .expect("25 milliseconds before now is representable");
+        let budget = RobotBudget::with_start(10, start);
+        let block = BudgetBlock::from_budget(
+            &budget,
+            vec!["deep-probe".to_string()],
+            Some("cass health --json".to_string()),
+        );
+
+        assert!(block.timed_out);
+        assert!(block.elapsed_ms >= block.budget_ms);
+        assert_eq!(block.skipped_sections, ["deep-probe"]);
+        assert_eq!(
+            block.recommended_next_probe.as_deref(),
+            Some("cass health --json")
+        );
+
+        let value = serde_json::to_value(&block).unwrap();
+        let round_trip: BudgetBlock = serde_json::from_value(value).unwrap();
+        assert_eq!(round_trip, block);
     }
 
     #[test]

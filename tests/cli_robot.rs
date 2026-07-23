@@ -5636,6 +5636,59 @@ fn implicit_robot_pack_query_uses_pack_when_pack_only_flags_present() {
 }
 
 #[test]
+fn timed_out_robot_pack_preserves_evidence_and_names_shed_work() -> Result<(), Box<dyn Error>> {
+    let data_dir = isolated_search_demo_data()?;
+    let output = base_cmd()
+        .env("CASS_PACK_BUDGET_MS", "250")
+        .env("CASS_TEST_PACK_SLOW_MS", "350")
+        .args([
+            "pack",
+            "hello",
+            "--json",
+            "--mode",
+            "lexical",
+            "--explain-selection",
+            "--data-dir",
+            data_dir.path().to_str().ok_or("non-utf8 data dir")?,
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "timed-out pack failed: status={:?}; stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    let payload: Value = serde_json::from_slice(&output.stdout)?;
+    let budget = &payload["budget"];
+    let skipped = budget["skipped_sections"]
+        .as_array()
+        .ok_or("pack skipped_sections is not an array")?;
+    if budget["timed_out"] != true {
+        return Err(format!("pack timeout was not reported: {budget}").into());
+    }
+    if !payload["evidence"]
+        .as_array()
+        .is_some_and(|evidence| !evidence.is_empty())
+    {
+        return Err("pack timeout discarded completed evidence".into());
+    }
+    if !skipped
+        .iter()
+        .any(|section| section == "selection_explanations")
+    {
+        return Err(format!("pack timeout omitted its shed selection work: {budget}").into());
+    }
+    if payload["_meta"]["partial"] != true
+        || budget["recommended_next_probe"] != "cass health --json"
+    {
+        return Err(format!("pack partial metadata is inconsistent: {payload}").into());
+    }
+    Ok(())
+}
+
+#[test]
 fn explicit_search_pack_only_flags_run_pack_in_robot_mode() {
     for command in ["search", "find"] {
         let mut cmd = base_cmd();

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::indexer::redact_secrets::redact_text;
+use crate::robot_budget_envelope::BudgetBlock;
 
 use super::query::{MatchType, SearchHit};
 
@@ -457,6 +458,7 @@ pub struct PackRenderRequest {
     pub normalized_query: String,
     pub generated_at_ms: i64,
     pub elapsed_ms: u64,
+    pub budget: BudgetBlock,
     pub request_id: Option<String>,
     pub format: PackRenderFormat,
     pub limits: PackPlannerLimits,
@@ -479,6 +481,13 @@ impl Default for PackRenderRequest {
             normalized_query: String::new(),
             generated_at_ms: 0,
             elapsed_ms: 0,
+            budget: BudgetBlock {
+                elapsed_ms: 0,
+                budget_ms: 8_000,
+                timed_out: false,
+                skipped_sections: Vec::new(),
+                recommended_next_probe: None,
+            },
             request_id: None,
             format: PackRenderFormat::Json,
             limits: PackPlannerLimits::default(),
@@ -508,6 +517,7 @@ struct RenderedAnswerPack {
     query: RenderedQuery,
     #[serde(rename = "_meta")]
     meta: RenderedMeta,
+    budget: BudgetBlock,
     limits: RenderedLimits,
     realized: RenderedRealized,
     health: RenderedHealth,
@@ -1473,10 +1483,11 @@ fn rendered_answer_pack(
             request_id: request.request_id.clone(),
             generated_at_ms: request.generated_at_ms,
             elapsed_ms: request.elapsed_ms,
-            partial: false,
+            partial: request.budget.timed_out || !request.budget.skipped_sections.is_empty(),
             format: request.format.label(),
             warnings: warnings.clone(),
         },
+        budget: request.budget.clone(),
         limits: RenderedLimits {
             max_tokens: request.limits.max_tokens,
             estimated_tokens: plan.estimated_tokens,
@@ -2209,7 +2220,10 @@ fn render_answer_pack_jsonl(
 ) -> Result<String, PackRenderError> {
     let mut lines = Vec::with_capacity(envelope.evidence.len() + 4);
     lines.push(json_line(
-        serde_json::json!({ "_meta": &envelope.meta }),
+        serde_json::json!({
+            "_meta": &envelope.meta,
+            "budget": &envelope.budget,
+        }),
         request,
     )?);
     lines.push(json_line(
@@ -2506,6 +2520,13 @@ mod tests {
             normalized_query: "pack handoff".to_string(),
             generated_at_ms: 1_060_000,
             elapsed_ms: 7,
+            budget: BudgetBlock {
+                elapsed_ms: 7,
+                budget_ms: 8_000,
+                timed_out: false,
+                skipped_sections: Vec::new(),
+                recommended_next_probe: None,
+            },
             request_id: Some("req-1".to_string()),
             format,
             limits: PackPlannerLimits {
@@ -2525,6 +2546,19 @@ mod tests {
             skill_content_included: false,
             explain_selection: false,
             readiness: PackReadinessSnapshot::default(),
+        }
+    }
+
+    fn timed_out_budget() -> BudgetBlock {
+        BudgetBlock {
+            elapsed_ms: 125,
+            budget_ms: 100,
+            timed_out: true,
+            skipped_sections: vec![
+                "semantic_refinement".to_string(),
+                "source_health".to_string(),
+            ],
+            recommended_next_probe: Some("cass health --json".to_string()),
         }
     }
 
@@ -2569,6 +2603,17 @@ mod tests {
         assert_eq!(value, render_answer_pack_value(&plan, &req).unwrap());
         assert_eq!(value["schema_version"], "cass.pack.v1");
         assert_eq!(value["_meta"]["format"], "compact");
+        assert_eq!(value["_meta"]["partial"], false);
+        assert_eq!(
+            value["budget"],
+            serde_json::json!({
+                "elapsed_ms": 7,
+                "budget_ms": 8_000,
+                "timed_out": false,
+                "skipped_sections": [],
+                "recommended_next_probe": null,
+            })
+        );
         assert_eq!(value["query"]["text"], "pack handoff");
         assert_eq!(value["realized"]["fallback_mode"], "lexical");
         assert_eq!(
@@ -2604,7 +2649,93 @@ mod tests {
             meta["_meta"]["warnings"],
             serde_json::json!(["no_evidence_found", "semantic_fallback_lexical"])
         );
+        assert_eq!(meta["_meta"]["partial"], false);
+        assert_eq!(meta["budget"]["budget_ms"], 8_000);
+        assert_eq!(meta["budget"]["skipped_sections"], serde_json::json!([]));
         assert_eq!(omitted["omitted"]["count"], 0);
+    }
+
+    #[test]
+    fn render_budget_timeout_is_partial_across_structured_formats() -> Result<(), String> {
+        let plan = plan_answer_pack(request(vec![candidate(
+            "budget-timeout",
+            "local",
+            "/s/budget-timeout.jsonl",
+            10.0,
+        )]))
+        .map_err(|err| format!("{err:?}"))?;
+        let expected_budget = serde_json::json!({
+            "elapsed_ms": 125,
+            "budget_ms": 100,
+            "timed_out": true,
+            "skipped_sections": ["semantic_refinement", "source_health"],
+            "recommended_next_probe": "cass health --json",
+        });
+
+        for format in [PackRenderFormat::Json, PackRenderFormat::CompactJson] {
+            let mut req = render_request(format);
+            req.budget = timed_out_budget();
+
+            let rendered = render_answer_pack(&plan, &req)
+                .map_err(|err| format!("{} render failed: {}", err.format, err.message))?;
+            let value: serde_json::Value =
+                serde_json::from_str(&rendered).map_err(|err| err.to_string())?;
+
+            assert_eq!(value["_meta"]["partial"], true);
+            assert_eq!(value["budget"], expected_budget);
+            let evidence = value["evidence"]
+                .as_array()
+                .ok_or_else(|| "structured pack evidence must be an array".to_string())?;
+            assert_eq!(evidence.len(), 1);
+        }
+
+        let mut jsonl_req = render_request(PackRenderFormat::Jsonl);
+        jsonl_req.budget = timed_out_budget();
+        let jsonl = render_answer_pack(&plan, &jsonl_req)
+            .map_err(|err| format!("{} render failed: {}", err.format, err.message))?;
+        let header_line = jsonl
+            .lines()
+            .next()
+            .ok_or_else(|| "JSONL pack must include a header line".to_string())?;
+        let header: serde_json::Value =
+            serde_json::from_str(header_line).map_err(|err| err.to_string())?;
+        assert_eq!(header["_meta"]["partial"], true);
+        assert_eq!(header["budget"], expected_budget);
+
+        let mut toon_req = render_request(PackRenderFormat::Toon);
+        toon_req.budget = timed_out_budget();
+        let value = render_answer_pack_value(&plan, &toon_req)
+            .map_err(|err| format!("{} render failed: {}", err.format, err.message))?;
+        let toon = render_answer_pack(&plan, &toon_req)
+            .map_err(|err| format!("{} render failed: {}", err.format, err.message))?;
+        assert_eq!(value["_meta"]["partial"], true);
+        assert_eq!(value["budget"], expected_budget);
+        assert_eq!(toon, toon::encode(value, Some(pack_toon_encode_options())));
+        Ok(())
+    }
+
+    #[test]
+    fn render_budget_skips_are_partial_without_timeout() -> Result<(), String> {
+        let plan = plan_answer_pack(request(Vec::new())).map_err(|err| format!("{err:?}"))?;
+        let mut req = render_request(PackRenderFormat::Json);
+        req.budget = BudgetBlock {
+            elapsed_ms: 75,
+            budget_ms: 100,
+            timed_out: false,
+            skipped_sections: vec!["selection_explanations".to_string()],
+            recommended_next_probe: Some("cass pack --help".to_string()),
+        };
+
+        let value = render_answer_pack_value(&plan, &req)
+            .map_err(|err| format!("{} render failed: {}", err.format, err.message))?;
+
+        assert_eq!(value["_meta"]["partial"], true);
+        assert_eq!(value["budget"]["timed_out"], false);
+        assert_eq!(
+            value["budget"]["skipped_sections"],
+            serde_json::json!(["selection_explanations"])
+        );
+        Ok(())
     }
 
     #[test]

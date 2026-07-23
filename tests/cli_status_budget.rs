@@ -1,4 +1,4 @@
-//! `cass status` bounded-budget / partial-envelope regression suite.
+//! `cass status` and `cass triage` bounded-budget / partial-envelope regression suite.
 //!
 //! Bead: coding_agent_session_search-cass-fleet-resilience-20260608-uojcg.2.2
 //! ("Add bounded execution budgets and partial/error envelopes for slow robot
@@ -27,6 +27,22 @@ fn status_cmd(data_dir: &str) -> Command {
     cmd.env("CASS_IGNORE_SOURCES_CONFIG", "1");
     cmd.args(["status", "--json", "--data-dir", data_dir]);
     cmd
+}
+
+fn triage_cmd(data_dir: &str) -> Command {
+    let mut cmd = Command::new(cass_bin());
+    cmd.env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1");
+    cmd.env("CASS_IGNORE_SOURCES_CONFIG", "1");
+    cmd.args(["triage", "--json", "--data-dir", data_dir]);
+    cmd
+}
+
+fn require(condition: bool, message: &str) -> Result<(), String> {
+    if condition {
+        Ok(())
+    } else {
+        Err(message.to_string())
+    }
 }
 
 fn parse_stdout_json(stdout: &str) -> Value {
@@ -160,4 +176,93 @@ fn status_stdout_stays_pure_json_even_when_budget_tripped() {
         json.is_object(),
         "partial status must still be a single JSON object"
     );
+}
+
+#[test]
+fn triage_emits_complete_budget_block_with_optional_guidance() -> Result<(), String> {
+    let tmp = TempDir::new().map_err(|error| error.to_string())?;
+    let data_dir = tmp.path().to_string_lossy().to_string();
+    let output = triage_cmd(&data_dir)
+        .env("CASS_TRIAGE_BUDGET_MS", "60000")
+        .output()
+        .map_err(|error| error.to_string())?;
+    let json = parse_stdout_json(&String::from_utf8_lossy(&output.stdout));
+    let budget = &json["budget"];
+
+    require(budget.is_object(), "triage budget block is missing")?;
+    require(
+        budget["timed_out"] == false,
+        "generous triage budget timed out",
+    )?;
+    require(
+        budget["skipped_sections"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "complete triage skipped optional sections",
+    )?;
+    require(
+        json["starter_workflows"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()),
+        "complete triage omitted starter workflows",
+    )?;
+    require(
+        json["mistake_recoveries"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()),
+        "complete triage omitted mistake recoveries",
+    )
+}
+
+#[test]
+fn triage_timeout_keeps_core_readiness_and_names_every_skip() -> Result<(), String> {
+    let tmp = TempDir::new().map_err(|error| error.to_string())?;
+    let data_dir = tmp.path().to_string_lossy().to_string();
+    let output = triage_cmd(&data_dir)
+        .env("CASS_TRIAGE_BUDGET_MS", "1")
+        .env("CASS_TEST_TRIAGE_SLOW_MS", "50")
+        .output()
+        .map_err(|error| error.to_string())?;
+    let json = parse_stdout_json(&String::from_utf8_lossy(&output.stdout));
+    let budget = &json["budget"];
+    let skipped = budget["skipped_sections"]
+        .as_array()
+        .ok_or_else(|| "triage skipped_sections is not an array".to_string())?;
+
+    require(
+        budget["timed_out"] == true,
+        "triage timeout was not reported",
+    )?;
+    for section in ["database_counts", "starter_workflows", "mistake_recoveries"] {
+        require(
+            skipped.iter().any(|value| value == section),
+            "triage timeout omitted a skipped section",
+        )?;
+    }
+    require(
+        budget["recommended_next_probe"] == "cass health --json",
+        "triage timeout did not recommend the cheap health probe",
+    )?;
+    require(
+        budget["elapsed_ms"]
+            .as_u64()
+            .is_some_and(|value| value >= 1),
+        "triage timeout did not report elapsed time",
+    )?;
+    require(
+        json["readiness"].is_object() && json["status"].is_string(),
+        "triage timeout dropped core readiness facts",
+    )?;
+    require(
+        json["starter_workflows"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "triage timeout retained skipped starter workflows",
+    )?;
+    require(
+        json["mistake_recoveries"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "triage timeout retained skipped mistake recoveries",
+    )
 }

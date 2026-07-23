@@ -169,10 +169,85 @@ fn json_format_parses_as_a_single_json_document() -> TestResult {
     let tmp = TempDir::new()?;
     let data_dir = copy_search_demo_fixture(tmp.path())?;
     let stdout = run_search(&data_dir, &[NO_MATCH_QUERY, "--robot"])?;
-    serde_json::from_str::<serde_json::Value>(stdout.trim()).map_err(|err| {
+    let payload = serde_json::from_str::<serde_json::Value>(stdout.trim()).map_err(|err| {
         test_error(format!(
             "pretty --robot output is not a single JSON doc: {err}"
         ))
     })?;
+    ensure(
+        payload["budget"]["timed_out"] == false,
+        "ordinary robot search unexpectedly exhausted its budget",
+    )?;
+    ensure(
+        payload["budget"]["skipped_sections"]
+            .as_array()
+            .is_some_and(Vec::is_empty),
+        "ordinary robot search unexpectedly shed work",
+    )?;
+    Ok(())
+}
+
+#[test]
+fn timed_out_search_preserves_hits_and_names_shed_sections() -> TestResult {
+    let tmp = TempDir::new()?;
+    let data_dir = copy_search_demo_fixture(tmp.path())?;
+    let output = Command::cargo_bin("cass")?
+        .env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1")
+        .env("CASS_SEARCH_BUDGET_MS", "250")
+        .env("CASS_TEST_SEARCH_SLOW_MS", "350")
+        .args([
+            "--color=never",
+            "search",
+            "hello",
+            "--robot",
+            "--robot-meta",
+            "--mode",
+            "lexical",
+            "--rerank",
+            "--explain",
+            "--aggregate",
+            "agent",
+            "--data-dir",
+            data_dir.to_str().ok_or("non-utf8 path")?,
+        ])
+        .output()?;
+    ensure(
+        output.status.success(),
+        format!(
+            "timed-out search failed: status={:?}; stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )?;
+    let payload: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    let budget = &payload["budget"];
+    let skipped = budget["skipped_sections"]
+        .as_array()
+        .ok_or_else(|| test_error("search budget skipped_sections is not an array"))?;
+
+    ensure(
+        budget["timed_out"] == true,
+        format!("search timeout was not reported: {budget}"),
+    )?;
+    ensure(
+        payload["hits"]
+            .as_array()
+            .is_some_and(|hits| !hits.is_empty()),
+        "search timeout discarded completed hits",
+    )?;
+    for section in ["reranking", "explanation", "aggregations", "state_meta"] {
+        ensure(
+            skipped.iter().any(|value| value == section),
+            format!("search timeout omitted skipped section {section}: {budget}"),
+        )?;
+    }
+    ensure(
+        budget["recommended_next_probe"] == "cass health --json",
+        "search timeout did not recommend the bounded health probe",
+    )?;
+    ensure(
+        payload.get("aggregations").is_none() && payload.get("explanation").is_none(),
+        "search timeout serialized work that its budget says was skipped",
+    )?;
     Ok(())
 }

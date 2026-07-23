@@ -23015,6 +23015,27 @@ fn search_mode_from_canonical_str(s: &str) -> Option<crate::search::query::Searc
     }
 }
 
+fn search_budget_ms(timeout_ms: Option<u64>) -> u64 {
+    timeout_ms.unwrap_or_else(|| {
+        dotenvy::var("CASS_SEARCH_BUDGET_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|&milliseconds| milliseconds > 0)
+            .unwrap_or(8_000)
+    })
+}
+
+/// Deterministic slowdown for bounded-search E2E coverage. Production callers
+/// never set this test-only environment variable.
+fn maybe_test_search_delay() {
+    if let Ok(raw) = dotenvy::var("CASS_TEST_SEARCH_SLOW_MS")
+        && let Ok(milliseconds) = raw.parse::<u64>()
+        && milliseconds > 0
+    {
+        std::thread::sleep(Duration::from_millis(milliseconds));
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_cli_search(
     query: &str,
@@ -23134,6 +23155,13 @@ fn run_cli_search(
         } else {
             None
         });
+    let search_budget = effective_robot.map(|_| {
+        crate::robot_budget_envelope::RobotBudget::with_start(
+            search_budget_ms(timeout_ms),
+            start_time,
+        )
+    });
+    let mut skipped_sections = Vec::<String>::new();
     let field_mask_visible_limit = token_budget_field_mask_visible_limit(max_tokens, limit_val);
     let field_mask = resolve_field_mask(
         &fields,
@@ -23159,7 +23187,7 @@ fn run_cli_search(
         let elapsed_ms = start_time.elapsed().as_millis();
         let meta = search_dry_run_meta(robot_meta, elapsed_ms);
 
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "dry_run": true,
             "valid": explanation.warnings.iter().all(|w| !w.contains("error") && !w.contains("invalid")),
             "query": query,
@@ -23169,6 +23197,19 @@ fn run_cli_search(
             "request_id": request_id,
             "_meta": meta,
         });
+        if let Some(budget) = search_budget.as_ref()
+            && let serde_json::Value::Object(map) = &mut output
+        {
+            map.insert(
+                "budget".to_string(),
+                serde_json::to_value(crate::robot_budget_envelope::BudgetBlock::from_budget(
+                    budget,
+                    Vec::new(),
+                    None,
+                ))
+                .unwrap_or(serde_json::Value::Null),
+            );
+        }
 
         println!(
             "{}",
@@ -23292,7 +23333,19 @@ fn run_cli_search(
         eprintln!("Warning: tier flags currently only affect --mode semantic.");
     }
 
+    let semantic_budget_available = search_budget
+        .as_ref()
+        .is_none_or(|budget| budget.is_healthy());
     if matches!(
+        mode_meta.requested,
+        SearchMode::Semantic | SearchMode::Hybrid
+    ) && !semantic_budget_available
+    {
+        skipped_sections.push("semantic_refinement".to_string());
+        mode_meta.fall_back_to_lexical(
+            "semantic refinement skipped because the robot search budget is nearly exhausted",
+        );
+    } else if matches!(
         mode_meta.requested,
         SearchMode::Semantic | SearchMode::Hybrid
     ) {
@@ -23540,31 +23593,45 @@ fn run_cli_search(
 
     // Track search timing breakdown (T7.4)
     let search_start = Instant::now();
-    let result = match mode_meta.realized {
-        SearchMode::Lexical => client
-            .search_with_fallback(
-                query,
-                filters.clone(),
-                search_limit,
-                search_offset,
-                search_sparse_threshold,
-                field_mask,
-            )
-            .map_err(|e| CliError {
-                code: 9,
-                kind: CliErrorKind::Search.kind_str(),
-                message: format!("search failed: {e}"),
-                hint: None,
-                retryable: true,
-            })?,
-        SearchMode::Semantic => {
-            // The former `semantic` Cargo feature (and its `-baseline`
-            // refusal arm for the ONNX-era AVX2 hazard, cass#256) was retired
-            // with bead tg5o9: every build carries the pure-Rust
-            // frankensearch/native backend, so semantic availability is a
-            // runtime question (model/vector assets), not a compile-time one.
-            {
-                let (hits, ann_stats) = client
+    let result = if search_budget
+        .as_ref()
+        .is_some_and(crate::robot_budget_envelope::RobotBudget::is_exhausted)
+    {
+        skipped_sections.push("search".to_string());
+        crate::search::query::SearchResult {
+            hits: Vec::new(),
+            wildcard_fallback: false,
+            cache_stats: crate::search::query::CacheStats::default(),
+            suggestions: Vec::new(),
+            ann_stats: None,
+            total_count: None,
+        }
+    } else {
+        match mode_meta.realized {
+            SearchMode::Lexical => client
+                .search_with_fallback(
+                    query,
+                    filters.clone(),
+                    search_limit,
+                    search_offset,
+                    search_sparse_threshold,
+                    field_mask,
+                )
+                .map_err(|e| CliError {
+                    code: 9,
+                    kind: CliErrorKind::Search.kind_str(),
+                    message: format!("search failed: {e}"),
+                    hint: None,
+                    retryable: true,
+                })?,
+            SearchMode::Semantic => {
+                // The former `semantic` Cargo feature (and its `-baseline`
+                // refusal arm for the ONNX-era AVX2 hazard, cass#256) was retired
+                // with bead tg5o9: every build carries the pure-Rust
+                // frankensearch/native backend, so semantic availability is a
+                // runtime question (model/vector assets), not a compile-time one.
+                {
+                    let (hits, ann_stats) = client
                     .search_semantic_with_tier(
                         query,
                         filters.clone(),
@@ -23614,34 +23681,35 @@ fn run_cli_search(
                             }
                         }
                     })?;
-                crate::search::query::SearchResult {
-                    hits,
-                    wildcard_fallback: false,
-                    cache_stats: crate::search::query::CacheStats::default(),
-                    suggestions: Vec::new(),
-                    ann_stats,
-                    total_count: None,
+                    crate::search::query::SearchResult {
+                        hits,
+                        wildcard_fallback: false,
+                        cache_stats: crate::search::query::CacheStats::default(),
+                        suggestions: Vec::new(),
+                        ann_stats,
+                        total_count: None,
+                    }
                 }
             }
-        }
-        SearchMode::Hybrid => match client.search_hybrid(
-            query,
-            query,
-            filters.clone(),
-            search_limit,
-            search_offset,
-            search_sparse_threshold,
-            field_mask,
-            approximate,
-        ) {
-            Ok(result) => result,
-            Err(e) => {
-                let err_str = e.to_string();
-                if hybrid_fail_open
-                    && (err_str.contains("unavailable") || err_str.contains("no embedder"))
-                {
-                    mode_meta.fall_back_to_lexical(format!("hybrid execution unavailable: {e}"));
-                    client
+            SearchMode::Hybrid => match client.search_hybrid(
+                query,
+                query,
+                filters.clone(),
+                search_limit,
+                search_offset,
+                search_sparse_threshold,
+                field_mask,
+                approximate,
+            ) {
+                Ok(result) => result,
+                Err(e) => {
+                    let err_str = e.to_string();
+                    if hybrid_fail_open
+                        && (err_str.contains("unavailable") || err_str.contains("no embedder"))
+                    {
+                        mode_meta
+                            .fall_back_to_lexical(format!("hybrid execution unavailable: {e}"));
+                        client
                         .search_with_fallback(
                             query,
                             filters.clone(),
@@ -23659,8 +23727,8 @@ fn run_cli_search(
                             hint: None,
                             retryable: true,
                         })?
-                } else if err_str.contains("unavailable") || err_str.contains("no embedder") {
-                    return Err(CliError {
+                    } else if err_str.contains("unavailable") || err_str.contains("no embedder") {
+                        return Err(CliError {
                         code: 15,
                         kind: CliErrorKind::SemanticUnavailable.kind_str(),
                         message: "Hybrid search not available (requires semantic search)".to_string(),
@@ -23670,8 +23738,8 @@ fn run_cli_search(
                         ),
                         retryable: false,
                     });
-                } else {
-                    return Err(CliError {
+                    } else {
+                        return Err(CliError {
                         code: 9,
                         kind: CliErrorKind::Search.kind_str(),
                         message: format!("hybrid search failed: {e}"),
@@ -23681,15 +23749,23 @@ fn run_cli_search(
                         ),
                         retryable: true,
                     });
+                    }
                 }
-            }
-        },
+            },
+        }
     };
     let search_ms = search_start.elapsed().as_millis() as u64;
+    maybe_test_search_delay();
 
     // Apply reranking if enabled (bd-2t2d)
     let rerank_start = Instant::now();
-    let result = if semantic_opts.rerank && !result.hits.is_empty() {
+    let rerank_budget_available = search_budget
+        .as_ref()
+        .is_none_or(|budget| budget.is_healthy());
+    let result = if semantic_opts.rerank && !rerank_budget_available {
+        skipped_sections.push("reranking".to_string());
+        result
+    } else if semantic_opts.rerank && !result.hits.is_empty() {
         use crate::search::fastembed_reranker::FastEmbedReranker;
         use crate::search::reranker::{Reranker, rerank_texts};
 
@@ -23817,11 +23893,14 @@ fn run_cli_search(
         0
     };
 
-    // Check if search exceeded timeout - return partial results with timeout indicator
-    let timed_out = timeout_duration.is_some_and(|t| start_time.elapsed() > t);
-
     // Build query explanation if requested
-    let explanation = if explain {
+    let explanation_budget_available = search_budget
+        .as_ref()
+        .is_none_or(|budget| budget.is_healthy());
+    let explanation = if explain && !explanation_budget_available {
+        skipped_sections.push("explanation".to_string());
+        None
+    } else if explain {
         Some(
             QueryExplanation::analyze(query, &filters)
                 .with_wildcard_fallback(result.wildcard_fallback),
@@ -23832,7 +23911,11 @@ fn run_cli_search(
 
     // Compute aggregations and create display result based on mode
     let (aggregations, display_result, total_matches, has_more_results, total_matches_exact) =
-        if has_aggregation {
+        if has_aggregation
+            && search_budget
+                .as_ref()
+                .is_none_or(|budget| budget.is_healthy())
+        {
             // Compute aggregations from all fetched results
             let aggs = compute_aggregations(&result.hits, &agg_fields);
             let total = result.hits.len();
@@ -23862,6 +23945,31 @@ fn run_cli_search(
             };
             let has_more = total > offset_val + display.hits.len();
             (aggs, display, total, has_more, false)
+        } else if has_aggregation {
+            skipped_sections.push("aggregations".to_string());
+            let total = result.hits.len();
+            let effective_limit = if limit_val == 0 {
+                usize::MAX
+            } else {
+                limit_val
+            };
+            let display_hits: Vec<_> = result
+                .hits
+                .iter()
+                .skip(offset_val)
+                .take(effective_limit)
+                .cloned()
+                .collect();
+            let has_more = total > offset_val.saturating_add(display_hits.len());
+            let display = crate::search::query::SearchResult {
+                hits: display_hits,
+                wildcard_fallback: result.wildcard_fallback,
+                cache_stats: result.cache_stats,
+                suggestions: result.suggestions.clone(),
+                ann_stats: result.ann_stats.clone(),
+                total_count: result.total_count,
+            };
+            (Aggregations::default(), display, total, has_more, false)
         } else {
             // No aggregation - result was over-fetched by one to derive pagination state.
             // When limit_val == 0 (meaning "no limit"), take all results.
@@ -23927,7 +24035,13 @@ fn run_cli_search(
     };
 
     // Gather state meta for robot output (index/db freshness)
-    let state_meta = if robot_meta {
+    let state_meta_budget_available = search_budget
+        .as_ref()
+        .is_none_or(|budget| budget.is_healthy());
+    let state_meta = if robot_meta && !state_meta_budget_available {
+        skipped_sections.push("state_meta".to_string());
+        None
+    } else if robot_meta {
         Some(state_meta_json(
             &data_dir,
             &db_path,
@@ -24014,7 +24128,7 @@ fn run_cli_search(
     // to _meta when conversations are quarantined, so agents know results exclude
     // known content (distinct from mere staleness). Skipped entirely otherwise to
     // keep the common complete-coverage payload unchanged.
-    let search_completeness = if robot_meta {
+    let search_completeness = if robot_meta && state_meta_budget_available {
         let quarantine = crate::indexer::conversation_ingest_quarantine_summary(&data_dir);
         if quarantine.quarantined_conversations > 0 || quarantine.circuit_breaker_active {
             serde_json::to_value(
@@ -24037,6 +24151,16 @@ fn run_cli_search(
     let has_readiness_warning = warning.is_some();
 
     if let Some(format) = effective_robot {
+        let recommended_next_probe =
+            (!skipped_sections.is_empty()).then(|| "cass health --json".to_string());
+        let budget = crate::robot_budget_envelope::BudgetBlock::from_budget(
+            search_budget
+                .as_ref()
+                .expect("robot output always establishes a search budget"),
+            skipped_sections,
+            recommended_next_probe,
+        );
+        let timed_out = budget.timed_out;
         // Robot output mode (JSON)
         output_robot_results(
             query,
@@ -24063,7 +24187,8 @@ fn run_cli_search(
             total_matches,
             explanation.as_ref(),
             timed_out,
-            timeout_ms,
+            Some(budget.budget_ms),
+            &budget,
             mode_meta,
             search_ms,
             rerank_ms,
@@ -24113,6 +24238,28 @@ fn run_cli_search(
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pack_budget_ms(timeout_ms: Option<u64>) -> u64 {
+    timeout_ms.unwrap_or_else(|| {
+        dotenvy::var("CASS_PACK_BUDGET_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|&milliseconds| milliseconds > 0)
+            .unwrap_or(10_000)
+    })
+}
+
+/// Deterministic slowdown for bounded-pack E2E coverage. Production callers
+/// never set this test-only environment variable.
+fn maybe_test_pack_delay() {
+    if let Ok(raw) = dotenvy::var("CASS_TEST_PACK_SLOW_MS")
+        && let Ok(milliseconds) = raw.parse::<u64>()
+        && milliseconds > 0
+    {
+        std::thread::sleep(Duration::from_millis(milliseconds));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -24167,6 +24314,16 @@ fn run_cli_pack(
         });
     }
     let render_format = resolve_pack_render_format(robot_format, display_format)?;
+    let structured_pack = !matches!(render_format, PackRenderFormat::Markdown);
+    let pack_budget = crate::robot_budget_envelope::RobotBudget::with_start(
+        if structured_pack || timeout_ms.is_some() {
+            pack_budget_ms(timeout_ms)
+        } else {
+            u64::MAX
+        },
+        start_time,
+    );
+    let mut skipped_sections = Vec::<String>::new();
     let freshness_policy = parse_pack_freshness_policy(freshness_policy)?;
     if freshness_window_seconds <= 0 {
         return Err(CliError {
@@ -24220,8 +24377,10 @@ fn run_cli_pack(
     }
     validate_pack_fields(fields.as_ref())?;
 
-    if refresh {
+    if refresh && pack_budget.is_healthy() {
         refresh_index_inline(db_override.clone(), data_dir_override.clone());
+    } else if refresh {
+        skipped_sections.push("refresh".to_string());
     }
 
     let search_self_heal = ensure_lexical_assets_for_search(
@@ -24231,7 +24390,7 @@ fn run_cli_pack(
         timeout_ms,
         start_time,
         false,
-        false,
+        structured_pack,
     )?;
     if search_self_heal.action != "skipped" {
         tracing::info!(
@@ -24287,7 +24446,8 @@ fn run_cli_pack(
     }
 
     let timeout_duration = timeout_ms.map(Duration::from_millis);
-    if let Some(timeout) = timeout_duration
+    if !structured_pack
+        && let Some(timeout) = timeout_duration
         && start_time.elapsed() >= timeout
     {
         return Err(CliError {
@@ -24308,40 +24468,38 @@ fn run_cli_pack(
         limit
     };
     let search_sparse_threshold = sparse_threshold_for_visible_limit(3, candidate_limit, false);
-    let result = client
-        .search_with_fallback(
-            query,
-            filters,
-            candidate_limit,
-            0,
-            search_sparse_threshold,
-            FieldMask::FULL,
-        )
-        .map_err(|e| CliError {
-            code: 9,
-            kind: CliErrorKind::Search.kind_str(),
-            message: format!("pack search failed: {e}"),
-            hint: Some(
-                "Try `cass search <query> --robot --robot-meta` to inspect the search path."
-                    .to_string(),
-            ),
-            retryable: true,
-        })?;
-
-    if let Some(timeout) = timeout_duration
-        && start_time.elapsed() > timeout
-    {
-        return Err(CliError {
-            code: 10,
-            kind: CliErrorKind::Timeout.kind_str(),
-            message: format!(
-                "Operation timed out after {}ms while building answer pack",
-                timeout.as_millis()
-            ),
-            hint: Some("Increase --timeout value or lower --limit/--max-evidence".to_string()),
-            retryable: true,
-        });
-    }
+    let result = if structured_pack && pack_budget.is_exhausted() {
+        skipped_sections.push("search".to_string());
+        crate::search::query::SearchResult {
+            hits: Vec::new(),
+            wildcard_fallback: false,
+            cache_stats: crate::search::query::CacheStats::default(),
+            suggestions: Vec::new(),
+            ann_stats: None,
+            total_count: None,
+        }
+    } else {
+        client
+            .search_with_fallback(
+                query,
+                filters,
+                candidate_limit,
+                0,
+                search_sparse_threshold,
+                FieldMask::FULL,
+            )
+            .map_err(|e| CliError {
+                code: 9,
+                kind: CliErrorKind::Search.kind_str(),
+                message: format!("pack search failed: {e}"),
+                hint: Some(
+                    "Try `cass search <query> --robot --robot-meta` to inspect the search path."
+                        .to_string(),
+                ),
+                retryable: true,
+            })?
+    };
+    maybe_test_pack_delay();
 
     let query_term_count = pack_query_term_count(query);
     let query_phrase_count = pack_query_phrase_count(query);
@@ -24363,17 +24521,23 @@ fn run_cli_pack(
         .collect::<Vec<_>>();
 
     let generated_at_ms = Utc::now().timestamp_millis();
+    let realized_explain_selection = if explain_selection && !pack_budget.is_healthy() {
+        skipped_sections.push("selection_explanations".to_string());
+        false
+    } else {
+        explain_selection
+    };
     let plan_request = PackPlanRequest {
         now_ms: generated_at_ms,
         limits: limits.clone(),
         freshness_policy,
         freshness_window_seconds,
         candidates,
-        explain_selection,
+        explain_selection: realized_explain_selection,
     };
     let plan = plan_answer_pack(plan_request).map_err(pack_invalid_limit_error)?;
 
-    if require_evidence && plan.evidence.is_empty() {
+    if require_evidence && plan.evidence.is_empty() && !pack_budget.is_exhausted() {
         return Err(CliError {
             code: 13,
             kind: CliErrorKind::NotFound.kind_str(),
@@ -24383,11 +24547,19 @@ fn run_cli_pack(
         });
     }
 
+    let recommended_next_probe =
+        (!skipped_sections.is_empty()).then(|| "cass health --json".to_string());
+    let budget = crate::robot_budget_envelope::BudgetBlock::from_budget(
+        &pack_budget,
+        skipped_sections,
+        recommended_next_probe,
+    );
     let render_request = PackRenderRequest {
         query_text: query.to_string(),
         normalized_query: query.trim().to_string(),
         generated_at_ms,
         elapsed_ms: start_time.elapsed().as_millis() as u64,
+        budget,
         request_id,
         format: render_format,
         limits,
@@ -24399,7 +24571,7 @@ fn run_cli_pack(
         redaction_policy: "strict".to_string(),
         sensitive_output: false,
         skill_content_included: false,
-        explain_selection,
+        explain_selection: realized_explain_selection,
         readiness: PackReadinessSnapshot {
             index_generation: search_self_heal
                 .indexed_docs
@@ -26138,6 +26310,7 @@ fn output_robot_results(
     explanation: Option<&crate::search::query::QueryExplanation>,
     timed_out: bool,
     timeout_ms: Option<u64>,
+    budget: &crate::robot_budget_envelope::BudgetBlock,
     search_mode_meta: SearchModeMeta,
     search_ms: u64,
     rerank_ms: u64,
@@ -26254,6 +26427,7 @@ fn output_robot_results(
             request_id: Option<String>,
             cursor: Option<String>,
             hits_clamped: bool,
+            budget: &'a crate::robot_budget_envelope::BudgetBlock,
         }
 
         let payload = FastSummaryJsonPayload {
@@ -26267,6 +26441,7 @@ fn output_robot_results(
             request_id,
             cursor: input_cursor,
             hits_clamped: false,
+            budget,
         };
         let stdout = std::io::stdout();
         let mut out = BufWriter::new(stdout.lock());
@@ -26380,6 +26555,7 @@ fn output_robot_results(
             request_id: Option<String>,
             cursor: Option<String>,
             hits_clamped: bool,
+            budget: &'a crate::robot_budget_envelope::BudgetBlock,
         }
 
         let payload = FastJsonPayload {
@@ -26393,6 +26569,7 @@ fn output_robot_results(
             request_id,
             cursor: input_cursor,
             hits_clamped: false,
+            budget,
         };
         let stdout = std::io::stdout();
         let mut out = BufWriter::new(stdout.lock());
@@ -26490,7 +26667,9 @@ fn output_robot_results(
         && (include_meta
             || !aggregations.is_empty()
             || !result.suggestions.is_empty()
-            || explanation.is_some());
+            || explanation.is_some()
+            || budget.budget_ms > 0
+            || budget.timed_out);
     let estimate_tokens = max_tokens.is_some() || include_meta || jsonl_meta_emitted;
     let (mut filtered_hits, tokens_estimated, hits_clamped) =
         clamp_hits_to_budget(filtered_hits, max_tokens, estimate_tokens);
@@ -26643,6 +26822,7 @@ fn output_robot_results(
                 "request_id": request_id,
                 "cursor": input_cursor,
                 "hits_clamped": hits_clamped,
+                "budget": budget,
             });
 
             // Add suggestions if present
@@ -26803,8 +26983,11 @@ fn output_robot_results(
                 || agg_json.is_some()
                 || !result.suggestions.is_empty()
                 || explanation.is_some()
+                || budget.budget_ms > 0
+                || budget.timed_out
             {
                 let mut meta = serde_json::json!({
+                    "budget": budget,
                     "_meta": {
                         "query": query,
                         "limit": limit,
@@ -26970,6 +27153,7 @@ fn output_robot_results(
                 "request_id": request_id,
                 "cursor": input_cursor,
                 "hits_clamped": hits_clamped,
+                "budget": budget,
             });
 
             // Add suggestions if present
@@ -27104,6 +27288,7 @@ fn output_robot_results(
                 "request_id": request_id,
                 "cursor": input_cursor,
                 "hits_clamped": hits_clamped,
+                "budget": budget,
             });
 
             // Add suggestions if present
@@ -70866,6 +71051,25 @@ fn run_status(
 
 /// One-shot first stop for agents: never starts repair/indexing, but returns
 /// exact next commands and discovery pointers for the current dataset.
+fn triage_budget_ms() -> u64 {
+    dotenvy::var("CASS_TRIAGE_BUDGET_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|&milliseconds| milliseconds > 0)
+        .unwrap_or(8_000)
+}
+
+/// Deterministic slowdown for the bounded triage E2E. This is inert unless the
+/// explicit test-only environment variable is present.
+fn maybe_test_triage_delay() {
+    if let Ok(raw) = dotenvy::var("CASS_TEST_TRIAGE_SLOW_MS")
+        && let Ok(milliseconds) = raw.parse::<u64>()
+        && milliseconds > 0
+    {
+        std::thread::sleep(Duration::from_millis(milliseconds));
+    }
+}
+
 fn run_triage(
     data_dir_override: &Option<PathBuf>,
     db_override: Option<PathBuf>,
@@ -70874,8 +71078,15 @@ fn run_triage(
 ) -> CliResult<()> {
     let data_dir = data_dir_override.clone().unwrap_or_else(default_data_dir);
     let db_path = db_override.unwrap_or_else(|| data_dir.join("agent_search.db"));
+    let triage_budget = crate::robot_budget_envelope::RobotBudget::new(triage_budget_ms());
     let mut state = state_meta_json_for_status(&data_dir, &db_path, stale_threshold);
-    refresh_state_database_counts_if_needed(&mut state, &db_path, "triage");
+    maybe_test_triage_delay();
+    let mut skipped_sections = Vec::<String>::new();
+    if triage_budget.is_healthy() {
+        refresh_state_database_counts_if_needed(&mut state, &db_path, "triage");
+    } else {
+        skipped_sections.push("database_counts".to_string());
+    }
 
     let index_exists = state
         .get("index")
@@ -71019,6 +71230,29 @@ fn run_triage(
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
 
+    let starter_workflows = if triage_budget.is_healthy() {
+        build_workflow_capabilities()
+    } else {
+        skipped_sections.push("starter_workflows".to_string());
+        Vec::new()
+    };
+    let mistake_recoveries = if triage_budget.is_healthy() {
+        build_mistake_recovery_capabilities()
+    } else {
+        skipped_sections.push("mistake_recoveries".to_string());
+        Vec::new()
+    };
+    let recommended_next_probe = if skipped_sections.is_empty() {
+        None
+    } else {
+        Some("cass health --json".to_string())
+    };
+    let budget = crate::robot_budget_envelope::BudgetBlock::from_budget(
+        &triage_budget,
+        skipped_sections,
+        recommended_next_probe,
+    );
+
     let payload = serde_json::json!({
         "surface": "triage",
         "schema_version": 1,
@@ -71053,8 +71287,9 @@ fn run_triage(
             "docs_command": "cass robot-docs guide",
             "api_version_command": "cass api-version --json",
         },
-        "starter_workflows": build_workflow_capabilities(),
-        "mistake_recoveries": build_mistake_recovery_capabilities(),
+        "starter_workflows": starter_workflows,
+        "mistake_recoveries": mistake_recoveries,
+        "budget": budget,
         "_meta": state.get("_meta").cloned().unwrap_or(serde_json::Value::Null),
     });
 
@@ -71082,6 +71317,14 @@ fn run_triage(
         .and_then(serde_json::Value::as_str)
     {
         println!("Next command: {command}");
+    }
+    if payload
+        .pointer("/budget/timed_out")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        println!("Budget exhausted: optional triage sections were skipped");
+        println!("Cheaper probe: cass health --json");
     }
     println!("Machine output: cass triage --json");
 
@@ -82789,6 +83032,25 @@ fn response_schema_root_cause_attribution() -> serde_json::Value {
     })
 }
 
+fn response_schema_budget_block() -> serde_json::Value {
+    response_schema_object([
+        ("elapsed_ms", serde_json::json!({ "type": "integer" })),
+        ("budget_ms", serde_json::json!({ "type": "integer" })),
+        ("timed_out", serde_json::json!({ "type": "boolean" })),
+        (
+            "skipped_sections",
+            serde_json::json!({
+                "type": "array",
+                "items": { "type": "string" }
+            }),
+        ),
+        (
+            "recommended_next_probe",
+            serde_json::json!({ "type": ["string", "null"] }),
+        ),
+    ])
+}
+
 fn response_schema_search_meta() -> serde_json::Value {
     response_schema_object([
         ("elapsed_ms", serde_json::json!({ "type": "integer" })),
@@ -82893,6 +83155,7 @@ fn response_schema_search() -> serde_json::Value {
         ),
         ("cursor", serde_json::json!({ "type": ["string", "null"] })),
         ("hits_clamped", serde_json::json!({ "type": "boolean" })),
+        ("budget", response_schema_budget_block()),
         (
             "hits",
             serde_json::json!({
@@ -82939,6 +83202,7 @@ fn response_schema_search() -> serde_json::Value {
 fn response_schema_pack() -> serde_json::Value {
     response_schema_object([
         ("schema_version", serde_json::json!({ "type": "string" })),
+        ("budget", response_schema_budget_block()),
         (
             "query",
             serde_json::json!({
@@ -83835,6 +84099,7 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
                 "target_line": { "type": ["integer", "null"] },
                 "context": { "type": "integer" },
                 "total_lines": { "type": "integer" },
+                "budget": response_schema_budget_block(),
                 "lines": {
                     "type": "array",
                     "items": {
@@ -86180,7 +86445,16 @@ fn run_view(
             })
             .collect();
 
-        let view_elapsed_ms = u64::try_from(view_start.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let view_budget =
+            crate::robot_budget_envelope::RobotBudget::with_start(view_budget_ms, view_start);
+        let recommended_next_probe = view_budget
+            .is_exhausted()
+            .then(|| "cass health --json".to_string());
+        let budget = crate::robot_budget_envelope::BudgetBlock::from_budget(
+            &view_budget,
+            Vec::new(),
+            recommended_next_probe,
+        );
         let payload = serde_json::json!({
             "path": path.display().to_string(),
             "target_line": if highlight_line { Some(target_line) } else { None::<usize> },
@@ -86193,11 +86467,7 @@ fn run_view(
             "source_exists": source_exists,
             "archive_only": archive_only,
             // Bounded-budget signal (uojcg.2.6): elapsed vs. the view budget.
-            "budget": serde_json::json!({
-                "elapsed_ms": view_elapsed_ms,
-                "budget_ms": view_budget_ms,
-                "timed_out": view_elapsed_ms > view_budget_ms,
-            }),
+            "budget": budget,
         });
         return output_structured_value(payload, fmt);
     }
@@ -96619,9 +96889,40 @@ struct SourcesDoctorOutput<'a> {
     #[serde(flatten)]
     health: &'a crate::source_doctor_health::SourceDoctorReport,
     diagnostics: &'a [SourceDiagnostics],
+    budget: &'a crate::robot_budget_envelope::BudgetBlock,
 }
 
 const SOURCE_DOCTOR_FIXTURE_MAX_BYTES: usize = 16 * 1024;
+
+fn configured_fleet_probe_budget() -> crate::fleet_probe::ProbeBudget {
+    let defaults = crate::fleet_probe::ProbeBudget::default();
+    let positive_env = |name: &str, default| {
+        dotenvy::var(name)
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|&milliseconds| milliseconds > 0)
+            .unwrap_or(default)
+    };
+    crate::fleet_probe::ProbeBudget {
+        per_host_ms: positive_env(
+            "CASS_FLEET_PER_HOST_BUDGET_MS",
+            defaults.per_host_ms,
+        ),
+        total_ms: positive_env("CASS_FLEET_BUDGET_MS", defaults.total_ms),
+    }
+}
+
+fn remaining_probe_timeout(
+    host_budget: &crate::robot_budget_envelope::RobotBudget,
+    total_budget: &crate::robot_budget_envelope::RobotBudget,
+) -> Duration {
+    Duration::from_millis(
+        host_budget
+            .remaining_ms()
+            .min(total_budget.remaining_ms())
+            .max(1),
+    )
+}
 
 /// Test-only external-probe facts for deterministic real-binary source-doctor
 /// E2E coverage. The seam replaces only the SSH-dependent observations; the
@@ -96689,6 +96990,7 @@ impl SourceDoctorFixtureProbe {
             os: Some(self.os.clone()),
             cass_found: self.cass_version.is_some(),
             cass_version: self.cass_version.clone(),
+            timed_out: false,
         }
     }
 }
@@ -97128,23 +97430,38 @@ fn run_sources_doctor(
     Ok(())
 }
 
-/// Check SSH connectivity to a host
-fn check_ssh_connectivity(host: &str) -> DiagnosticCheck {
+fn bounded_ssh_output(
+    args: &[String],
+    timeout: Duration,
+) -> std::io::Result<Option<std::process::Output>> {
+    let mut command = std::process::Command::new("ssh");
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    crate::sources::configure_child_process_group(&mut command);
+    let child = command.spawn()?;
+    crate::sources::wait_for_child_output_with_timeout(child, timeout)
+}
+
+/// Check SSH connectivity to a host within the caller's remaining host budget.
+fn check_ssh_connectivity(host: &str, timeout: Duration) -> DiagnosticCheck {
     let mut ssh_args = crate::sources::strict_ssh_cli_tokens(5);
     ssh_args.push("--".to_string());
     ssh_args.push(host.to_string());
     ssh_args.push("true".to_string());
 
-    let output = std::process::Command::new("ssh").args(&ssh_args).output();
+    let output = bounded_ssh_output(&ssh_args, timeout);
 
     match output {
-        Ok(out) if out.status.success() => DiagnosticCheck {
+        Ok(Some(out)) if out.status.success() => DiagnosticCheck {
             name: "SSH Connectivity".into(),
             status: "pass".into(),
             message: format!("Connected to {} successfully", host),
             remediation: None,
         },
-        Ok(out) => {
+        Ok(Some(out)) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let remediation = if crate::sources::is_host_key_verification_failure(&stderr) {
                 Some(crate::sources::host_key_verification_error(host))
@@ -97164,6 +97481,15 @@ fn check_ssh_connectivity(host: &str) -> DiagnosticCheck {
                 remediation,
             }
         }
+        Ok(None) => DiagnosticCheck {
+            name: "SSH Connectivity".into(),
+            status: "warn".into(),
+            message: format!(
+                "SSH probe timed out after {}ms",
+                u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)
+            ),
+            remediation: Some("Retry this host with a larger per-host fleet budget".into()),
+        },
         Err(e) => DiagnosticCheck {
             name: "SSH Connectivity".into(),
             status: "fail".into(),
@@ -97174,22 +97500,21 @@ fn check_ssh_connectivity(host: &str) -> DiagnosticCheck {
 }
 
 /// Check rsync availability on remote
-fn check_rsync_available(host: &str) -> DiagnosticCheck {
-    let output = std::process::Command::new("ssh")
-        .args([
-            "-o",
-            "ConnectTimeout=5",
-            "-o",
-            "BatchMode=yes",
-            "--",
-            host,
-            "rsync",
-            "--version",
-        ])
-        .output();
+fn check_rsync_available(host: &str, timeout: Duration) -> DiagnosticCheck {
+    let args = vec![
+        "-o".to_string(),
+        "ConnectTimeout=5".to_string(),
+        "-o".to_string(),
+        "BatchMode=yes".to_string(),
+        "--".to_string(),
+        host.to_string(),
+        "rsync".to_string(),
+        "--version".to_string(),
+    ];
+    let output = bounded_ssh_output(&args, timeout);
 
     match output {
-        Ok(out) if out.status.success() => {
+        Ok(Some(out)) if out.status.success() => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             let version = stdout
                 .lines()
@@ -97203,7 +97528,7 @@ fn check_rsync_available(host: &str) -> DiagnosticCheck {
                 remediation: None,
             }
         }
-        Ok(out) => {
+        Ok(Some(out)) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             DiagnosticCheck {
                 name: "rsync Available".into(),
@@ -97212,6 +97537,15 @@ fn check_rsync_available(host: &str) -> DiagnosticCheck {
                 remediation: Some("Install rsync on the remote host".into()),
             }
         }
+        Ok(None) => DiagnosticCheck {
+            name: "rsync Available".into(),
+            status: "warn".into(),
+            message: format!(
+                "rsync probe timed out after {}ms",
+                u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)
+            ),
+            remediation: Some("Retry this host with a larger per-host fleet budget".into()),
+        },
         Err(e) => DiagnosticCheck {
             name: "rsync Available".into(),
             status: "warn".into(),
@@ -97230,7 +97564,7 @@ fn sh_quote(value: &str) -> String {
 }
 
 /// Check if a remote path exists
-fn check_remote_path(host: &str, path: &str) -> DiagnosticCheck {
+fn check_remote_path(host: &str, path: &str, timeout: Duration) -> DiagnosticCheck {
     let quoted = sh_quote(path);
     let script = format!("test -d {quoted} && ls -1 {quoted} | wc -l");
     // IMPORTANT (#190): `ssh` concatenates multiple post-host argv into a
@@ -97242,20 +97576,19 @@ fn check_remote_path(host: &str, path: &str) -> DiagnosticCheck {
     // receives `test` as its command. Combine into a single argument so the
     // quoted script survives the round trip intact.
     let remote_cmd = format!("sh -c {}", sh_quote(&script));
-    let output = std::process::Command::new("ssh")
-        .args([
-            "-o",
-            "ConnectTimeout=5",
-            "-o",
-            "BatchMode=yes",
-            "--",
-            host,
-            &remote_cmd,
-        ])
-        .output();
+    let args = vec![
+        "-o".to_string(),
+        "ConnectTimeout=5".to_string(),
+        "-o".to_string(),
+        "BatchMode=yes".to_string(),
+        "--".to_string(),
+        host.to_string(),
+        remote_cmd,
+    ];
+    let output = bounded_ssh_output(&args, timeout);
 
     match output {
-        Ok(out) if out.status.success() => {
+        Ok(Some(out)) if out.status.success() => {
             let count = String::from_utf8_lossy(&out.stdout)
                 .trim()
                 .parse::<usize>()
@@ -97275,7 +97608,7 @@ fn check_remote_path(host: &str, path: &str) -> DiagnosticCheck {
                 },
             }
         }
-        Ok(out) => {
+        Ok(Some(out)) => {
             // ssh exited non-zero. Distinguish SSH transport failures (which
             // would make the "Path does not exist" message + "Remove this
             // path" remediation actively misleading — the operator would
@@ -97314,6 +97647,15 @@ fn check_remote_path(host: &str, path: &str) -> DiagnosticCheck {
                 }
             }
         }
+        Ok(None) => DiagnosticCheck {
+            name: format!("Remote Path: {}", path),
+            status: "warn".into(),
+            message: format!(
+                "Remote path probe timed out after {}ms",
+                u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX)
+            ),
+            remediation: Some("Retry this host with a larger per-host fleet budget".into()),
+        },
         Err(e) => DiagnosticCheck {
             name: format!("Remote Path: {}", path),
             status: "warn".into(),
@@ -97476,6 +97818,8 @@ struct RemoteCassProbe {
     cass_version: Option<String>,
     /// Whether `cass` was found on the host's PATH.
     cass_found: bool,
+    /// The hard subprocess deadline expired before a complete response.
+    timed_out: bool,
 }
 
 /// Probe an already-reachable remote host for its platform and `cass` binary
@@ -97483,7 +97827,7 @@ struct RemoteCassProbe {
 /// runs only `uname` and `cass --version` — no writes, no index, no mutation. On
 /// any transport or parse failure it returns a not-found probe rather than
 /// guessing, so the classifier never over-claims a remote-binary state.
-fn check_remote_cass(host: &str) -> RemoteCassProbe {
+fn check_remote_cass(host: &str, timeout: Duration) -> RemoteCassProbe {
     let script = "printf 'OS=%s\\n' \"$(uname -s 2>/dev/null)\"; \
 if command -v cass >/dev/null 2>&1; then \
 printf 'CASS=%s\\n' \"$(cass --version 2>/dev/null | head -n1)\"; \
@@ -97498,10 +97842,16 @@ else printf 'CASS=__MISSING__\\n'; fi";
         os: None,
         cass_version: None,
         cass_found: false,
+        timed_out: false,
     };
 
-    let Ok(output) = std::process::Command::new("ssh").args(&ssh_args).output() else {
-        return probe;
+    let output = match bounded_ssh_output(&ssh_args, timeout) {
+        Ok(Some(output)) => output,
+        Ok(None) => {
+            probe.timed_out = true;
+            return probe;
+        }
+        Err(_) => return probe,
     };
     if !output.status.success() {
         return probe;
