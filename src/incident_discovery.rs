@@ -20,7 +20,7 @@
 use std::path::Path;
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use frankensqlite::compat::{ConnectionExt, ParamValue, RowExt};
 use frankensqlite::{Connection, Row};
 use serde::{Deserialize, Serialize};
@@ -502,8 +502,7 @@ fn query_candidate_messages(
     let limit = i64::try_from(batch_rows.saturating_add(1)).unwrap_or(i64::MAX);
     let fragment_chars = i64::try_from(remaining_bytes)
         .unwrap_or(i64::MAX)
-        .min(MESSAGE_FRAGMENT_CHARS)
-        .max(1);
+        .clamp(1, MESSAGE_FRAGMENT_CHARS);
     let fragment_limited_by_byte_budget = fragment_chars < MESSAGE_FRAGMENT_CHARS;
     conn.query_map_collect(
         "SELECT idx, substr(content, 1, ?3), length(content) > ?3
@@ -580,8 +579,16 @@ pub(crate) fn scan_incidents(
     let mut byte_cap_capped = false;
     let mut all_exhausted = candidate_window.corpus_exhausted && !candidate_window.timed_out;
 
-    'conversations: for candidate in candidate_window.candidates {
+    // `files_considered` is the number of archive rows the bounded candidate
+    // query actually materialized, including rows later rejected by a
+    // dimensional filter. Record the whole window before scanning so a query
+    // that consumes the time budget still reports its enumerated work instead
+    // of only the first row visited after the query returned.
+    for _ in 0..candidate_window.candidates.len() {
         accountant.note_file_considered();
+    }
+
+    'conversations: for candidate in candidate_window.candidates {
         if !candidate_matches_filter(&candidate, filter) {
             continue;
         }
@@ -722,6 +729,61 @@ pub(crate) fn scan_incidents(
         top_sessions_truncated: top_session_summary.truncated,
         redaction: default_robot_manifest(),
     })
+}
+
+/// Build the truthful empty/partial response used when the CLI's outer hard
+/// wall-clock guard expires before the synchronous storage worker can return a
+/// verified scan result. The worker owns a read-only connection and its SQL is
+/// independently row-bounded; this response deliberately claims no observed
+/// rows because the in-flight result was not received.
+pub(crate) fn hard_timeout_report(caps: DiscoveryCaps) -> IncidentMiningReport {
+    let discovery = DiscoveryAccountant::new(caps).finalize(caps.budget_ms, false);
+    IncidentMiningReport {
+        schema_version: INCIDENT_MINING_SCHEMA_VERSION,
+        count_scope: "no_verified_results_hard_timeout".to_string(),
+        scan_units: IncidentScanUnits {
+            files: "archive_conversations".to_string(),
+            lines: "archive_messages".to_string(),
+            bytes: "utf8_message_content_inspected".to_string(),
+            candidate_order: "newest_archive_row_first".to_string(),
+            message_fragment_chars: u64::try_from(MESSAGE_FRAGMENT_CHARS).unwrap_or(u64::MAX),
+        },
+        discovery,
+        top_sessions: Vec::new(),
+        total_sessions: 0,
+        total_hits: 0,
+        top_sessions_truncated: false,
+        redaction: default_robot_manifest(),
+    }
+}
+
+/// Run a read-only incident scan on a dedicated worker while keeping the
+/// caller's result latency hard-bounded. Synchronous FrankenSQLite queries do
+/// not currently expose an interrupt handle, so an expired caller discards the
+/// in-flight result and returns [`hard_timeout_report`]; every worker query is
+/// independently protected by the row/fragment caps in [`scan_incidents`].
+pub(crate) fn run_incident_scan_with_hard_timeout<F>(
+    caps: DiscoveryCaps,
+    scan: F,
+) -> Result<IncidentMiningReport>
+where
+    F: FnOnce() -> Result<IncidentMiningReport> + Send + 'static,
+{
+    let (scan_tx, scan_rx) = std::sync::mpsc::sync_channel(1);
+    let _scan_worker = std::thread::Builder::new()
+        .name("cass-incident-scan".to_string())
+        .spawn(move || {
+            let _ = scan_tx.send(scan());
+        })
+        .context("starting bounded incident scan worker")?;
+
+    match scan_rx.recv_timeout(std::time::Duration::from_millis(caps.budget_ms)) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(hard_timeout_report(caps)),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(anyhow!(
+            "incident scan worker disconnected before returning a report"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -1177,5 +1239,49 @@ mod tests {
         let value = serde_json::to_value(&report).unwrap();
         assert_eq!(value["schema_version"], INCIDENT_MINING_SCHEMA_VERSION);
         assert_eq!(value["redaction"]["private_text_policy"], "suppress_all");
+    }
+
+    #[test]
+    fn hard_timeout_report_claims_no_unreceived_observations() {
+        let caps = scan_caps();
+        let report = hard_timeout_report(caps);
+        assert_eq!(report.count_scope, "no_verified_results_hard_timeout");
+        assert_eq!(report.discovery.stop_reason, StopReason::TimedOut);
+        assert!(report.discovery.timed_out);
+        assert!(report.discovery.partial);
+        assert_eq!(report.discovery.elapsed_ms, caps.budget_ms);
+        assert_eq!(report.discovery.files_considered, 0);
+        assert_eq!(report.discovery.files_scanned, 0);
+        assert!(report.top_sessions.is_empty());
+    }
+
+    #[test]
+    fn hard_timeout_worker_path_returns_before_slow_scan_finishes() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        let mut caps = scan_caps();
+        caps.budget_ms = 5;
+        let worker_finished = Arc::new(AtomicBool::new(false));
+        let worker_finished_in_scan = Arc::clone(&worker_finished);
+        let started = Instant::now();
+        let report = run_incident_scan_with_hard_timeout(caps, move || {
+            std::thread::sleep(Duration::from_secs(1));
+            worker_finished_in_scan.store(true, Ordering::Release);
+            Ok(hard_timeout_report(caps))
+        })
+        .unwrap();
+
+        assert_eq!(report.count_scope, "no_verified_results_hard_timeout");
+        assert_eq!(report.discovery.stop_reason, StopReason::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_millis(900),
+            "hard guard waited for the one-second worker"
+        );
+        assert!(
+            !worker_finished.load(Ordering::Acquire),
+            "hard guard returned only after the slow worker completed"
+        );
     }
 }

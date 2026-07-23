@@ -349,9 +349,7 @@ fn structured_field_values<'a>(text: &'a str, field: &str) -> Vec<&'a str> {
                 rest =
                     stripped.trim_start_matches(|character: char| character.is_ascii_whitespace());
             }
-            let Some(separator) = rest.chars().next() else {
-                return None;
-            };
+            let separator = rest.chars().next()?;
             if !matches!(separator, ':' | '=') {
                 return None;
             }
@@ -382,6 +380,34 @@ fn structured_field_is_positive(text: &str, field: &str) -> bool {
         .into_iter()
         .filter_map(|value| value.parse::<u64>().ok())
         .any(|count| count > 0)
+}
+
+fn structured_flag_is_true_or_unstructured(text: &str, field: &str) -> bool {
+    text.match_indices(field).any(|(offset, _)| {
+        let mut rest = &text[offset + field.len()..];
+        rest = rest.trim_start_matches(|character: char| character.is_ascii_whitespace());
+        if let Some(stripped) = rest.strip_prefix(['"', '\'']) {
+            rest = stripped.trim_start_matches(|character: char| character.is_ascii_whitespace());
+        }
+        let Some(separator) = rest.chars().next() else {
+            return true;
+        };
+        if !matches!(separator, ':' | '=') {
+            return true;
+        }
+        rest = rest[separator.len_utf8()..]
+            .trim_start_matches(|character: char| character.is_ascii_whitespace());
+        if let Some(stripped) = rest.strip_prefix(['"', '\'']) {
+            rest = stripped;
+        }
+        let value_end = rest
+            .find(|character: char| {
+                character.is_ascii_whitespace()
+                    || matches!(character, '"' | '\'' | ',' | '}' | ']' | ';')
+            })
+            .unwrap_or(rest.len());
+        matches!(&rest[..value_end], "true" | "1")
+    })
 }
 
 fn strong_signal_matches(category: IncidentCategory, text: &str) -> bool {
@@ -419,7 +445,7 @@ fn strong_signal_matches(category: IncidentCategory, text: &str) -> bool {
                 || contains_any(text, &["index-ingest-out-of-memory", "ingest_oom"])
         }
         IncidentCategory::Semantic => {
-            structured_field_has_value(text, "semantic_fallback_lexical", &["true", "1"])
+            structured_flag_is_true_or_unstructured(text, "semantic_fallback_lexical")
                 || structured_field_has_value(text, "fallback_mode", &["lexical"])
         }
         IncidentCategory::WatchSalvageIssues => {
@@ -492,21 +518,36 @@ fn matches_anchored_category(category: IncidentCategory, text: &str) -> bool {
                 ],
             )
         }
-        IncidentCategory::Semantic => {
-            contains_any(text, &["semantic", "model", "vector", "embedder", "hybrid"])
-                && contains_any(
-                    text,
-                    &[
-                        "missing",
-                        "unavailable",
-                        "stale",
-                        "backfill",
-                        "fallback",
-                        "failed",
-                        "error",
-                    ],
-                )
-        }
+        IncidentCategory::Semantic => contains_any(
+            text,
+            &[
+                "semantic missing",
+                "semantic unavailable",
+                "semantic stale",
+                "semantic backfill",
+                "semantic fallback",
+                "semantic failed",
+                "semantic error",
+                "model missing",
+                "model unavailable",
+                "model stale",
+                "model failed",
+                "model error",
+                "vector missing",
+                "vector unavailable",
+                "vector stale",
+                "vector backfill",
+                "vector failed",
+                "vector error",
+                "embedder missing",
+                "embedder unavailable",
+                "embedder failed",
+                "embedder error",
+                "hybrid fallback",
+                "hybrid failed",
+                "hybrid error",
+            ],
+        ),
         IncidentCategory::WatchSalvageIssues => contains_any(
             text,
             &[
@@ -745,10 +786,20 @@ mod tests {
         );
         assert!(
             classify_text(
-                r#"{"health_class":"healthy","recommended_action":"none","index_freshness":"fresh","last_progress_at_ms":1770000000000,"candidate_workspaces":["/tmp/demo"],"quarantined_conversations":0,"semantic_fallback_lexical":false,"fallback_mode":"hybrid"}"#,
+                r#"cass status {"health_class":"healthy","recommended_action":"none","index_freshness":"fresh","last_progress_at_ms":1770000000000,"candidate_workspaces":["/tmp/demo"],"quarantined_conversations":0,"semantic_fallback_lexical":false,"fallback_mode":"hybrid"}"#,
             )
             .is_empty(),
             "healthy status field names and benign values must not become incidents"
+        );
+        assert_eq!(
+            classify_text(r#"cass semantic model missing; {"fallback_mode":"hybrid"}"#),
+            vec![IncidentCategory::Semantic],
+            "healthy structured fields must not hide an adjacent prose incident"
+        );
+        assert_eq!(
+            classify_text("cass semantic_fallback_lexical; search stayed available"),
+            vec![IncidentCategory::Semantic],
+            "the report-derived bare fallback marker remains a strong signal"
         );
     }
 

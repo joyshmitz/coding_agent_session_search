@@ -528,22 +528,10 @@ fn seed_incident_archive(db_path: &Path) -> Result<(), String> {
         })
         .map_err(|error| format!("seed incident agent: {error:#}"))?;
 
-    // The remote conversation is newest, making the --max-messages=1 partial
-    // proof deterministic. A second, older incident proves work remained.
-    storage
-        .insert_conversation_tree(
-            agent_id,
-            None,
-            &incident_conversation(
-                "incident-remote-newest",
-                INCIDENT_REMOTE_PATH,
-                INCIDENT_REMOTE_SOURCE,
-                Some(INCIDENT_REMOTE_HOST),
-                1_800_000_000_000,
-                INCIDENT_PRIVATE_TEXT,
-            ),
-        )
-        .map_err(|error| format!("seed remote incident conversation: {error:#}"))?;
+    // Insert the older local conversation first. Candidate discovery is
+    // intentionally newest-archive-row-first (not timestamp-sorted), so the
+    // remote conversation must receive the later canonical row id to make the
+    // --max-messages=1 partial proof deterministic.
     storage
         .insert_conversation_tree(
             agent_id,
@@ -558,6 +546,20 @@ fn seed_incident_archive(db_path: &Path) -> Result<(), String> {
             ),
         )
         .map_err(|error| format!("seed local incident conversation: {error:#}"))?;
+    storage
+        .insert_conversation_tree(
+            agent_id,
+            None,
+            &incident_conversation(
+                "incident-remote-newest",
+                INCIDENT_REMOTE_PATH,
+                INCIDENT_REMOTE_SOURCE,
+                Some(INCIDENT_REMOTE_HOST),
+                1_800_000_000_000,
+                INCIDENT_PRIVATE_TEXT,
+            ),
+        )
+        .map_err(|error| format!("seed remote incident conversation: {error:#}"))?;
     Ok(())
 }
 

@@ -85,6 +85,14 @@ pub(crate) fn daemon_spawn_guard_lock_path(socket_path: &Path) -> PathBuf {
     socket_path.with_extension("spawn-guard.lock")
 }
 
+// Re-export key types for convenience
+pub use client::{DaemonClientConfig, UdsDaemonClient};
+pub use core::{DaemonConfig, ModelDaemon};
+pub use models::ModelManager;
+pub use protocol::{PROTOCOL_VERSION, Request, Response, default_socket_path};
+pub use resource::ResourceMonitor;
+pub use worker::{EmbeddingJobConfig, EmbeddingWorkerHandle};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,11 +114,3 @@ mod tests {
         assert_ne!(old_generation, new_generation);
     }
 }
-
-// Re-export key types for convenience
-pub use client::{DaemonClientConfig, UdsDaemonClient};
-pub use core::{DaemonConfig, ModelDaemon};
-pub use models::ModelManager;
-pub use protocol::{PROTOCOL_VERSION, Request, Response, default_socket_path};
-pub use resource::ResourceMonitor;
-pub use worker::{EmbeddingJobConfig, EmbeddingWorkerHandle};

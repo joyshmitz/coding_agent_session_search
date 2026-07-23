@@ -1151,7 +1151,11 @@ path or the report used a non-default database.
 bounded ranked result from the totals observed inside the scan scope.
 `discovery.partial` and `stop_reason` explicitly distinguish a bounded partial
 scan from a complete scan. Counts are scoped to scanned candidates whenever the
-scan is partial. Candidate discovery is descending archive-row keyset paging;
+scan is partial. `--budget-ms` is a hard wall-clock result guard around the
+independently row-bounded read-only worker. If it expires before a verified
+result arrives, `count_scope="no_verified_results_hard_timeout"` returns an
+empty partial report instead of overstating in-flight observations. Candidate
+discovery is descending archive-row keyset paging;
 `--max-sessions` bounds that newest-row window before dimensional filters, so a
 selective filter can truthfully return a partial empty result instead of scanning
 an unbounded archive. Individual messages are inspected through a bounded 4,096-char

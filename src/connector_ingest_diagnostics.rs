@@ -492,8 +492,7 @@ impl ConnectorIngestRun {
                 conversation.external_id.clone(),
                 conversation
                     .workspace
-                    .as_ref()
-                    .map(PathBuf::as_path)
+                    .as_deref()
                     .or_else(|| conversation.source_path.parent()),
             )
         {
@@ -556,7 +555,7 @@ impl ConnectorIngestRun {
         let file = match std::fs::File::open(path) {
             Ok(file) => file,
             Err(error) => {
-                self.observe_scan_error(path, &error.to_string());
+                self.observe_scan_error(path, error.to_string());
                 return;
             }
         };

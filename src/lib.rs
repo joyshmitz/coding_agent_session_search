@@ -8288,7 +8288,7 @@ fn run_quarantine_retry_command(
     println!("CASS Quarantine Retry");
     println!("=====================");
     println!();
-    println!("Mode: {}", "APPLY (targeted re-ingest by quarantine key)");
+    println!("Mode: APPLY (targeted re-ingest by quarantine key)");
     println!();
     println!("{}", report.summary);
     println!(
@@ -16918,6 +16918,19 @@ fn incident_usage_error(message: impl Into<String>) -> CliError {
     }
 }
 
+fn incident_scan_cli_error(error: anyhow::Error) -> CliError {
+    CliError {
+        code: 9,
+        kind: CliErrorKind::DbError.kind_str(),
+        message: format!("Incident mining failed: {error:#}"),
+        hint: Some(
+            "Check the canonical archive with 'cass doctor --json'; reduce the scan caps if the archive is very large."
+                .to_string(),
+        ),
+        retryable: false,
+    }
+}
+
 /// Run `cass analytics incidents` — bounded, read-only incident mining over
 /// canonical archive conversations and messages.
 fn run_analytics_incidents(
@@ -16962,23 +16975,13 @@ fn run_analytics_incidents(
         budget_ms,
         max_evidence: crate::incident_discovery::DEFAULT_MAX_EVIDENCE,
     };
-    let report = crate::incident_discovery::scan_incidents(
-        &conn,
-        &filter,
-        caps,
-        limit,
-        Some(&pointer_db_path),
-    )
-    .map_err(|error| CliError {
-            code: 9,
-            kind: CliErrorKind::DbError.kind_str(),
-            message: format!("Incident mining failed: {error:#}"),
-            hint: Some(
-                "Check the canonical archive with 'cass doctor --json'; reduce the scan caps if the archive is very large."
-                    .to_string(),
-            ),
-            retryable: false,
-        })?;
+    let scan_conn = crate::storage::sqlite::SendFrankenConnection::new(conn);
+    let scan_db_path = pointer_db_path.clone();
+    let report = crate::incident_discovery::run_incident_scan_with_hard_timeout(caps, move || {
+        let conn = scan_conn.into_parts().0;
+        crate::incident_discovery::scan_incidents(&conn, &filter, caps, limit, Some(&scan_db_path))
+    })
+    .map_err(incident_scan_cli_error)?;
     serde_json::to_value(report).map_err(|error| CliError {
         code: 9,
         kind: CliErrorKind::SerializeMessage.kind_str(),
@@ -21249,7 +21252,7 @@ fn render_analytics_docs() -> Vec<String> {
         "### analytics incidents".into(),
         "  Read-only; keyset-scans canonical archive rows newest-id-first.".into(),
         "  data.schema_version: 2".into(),
-        "  data.count_scope: all_matching_candidates | scanned_candidates_partial".into(),
+        "  data.count_scope: all_matching_candidates | scanned_candidates_partial | no_verified_results_hard_timeout".into(),
         "  data.discovery: { caps, files_considered, files_scanned, lines_scanned,".into(),
         "                    bytes_scanned, elapsed_ms, stop_reason, timed_out, partial,".into(),
         "                    evidence_truncated, evidence }".into(),
@@ -21267,7 +21270,7 @@ fn render_analytics_docs() -> Vec<String> {
         "    This bounds the newest-row candidate window before dimensional filters.".into(),
         "  --max-messages N    Archive messages inspected (default 250000)".into(),
         "  --max-bytes N       UTF-8 content bytes inspected (default 268435456)".into(),
-        "  --budget-ms N       Wall-clock scan budget (default 8000)".into(),
+        "  --budget-ms N       Hard wall-clock result budget (default 8000)".into(),
         "  Raw prompt/tool text is always suppressed. source_path is retained only as the".into(),
         "  actionable archive pointer; evidence paths are basename-redacted.".into(),
         "  suggested_command.argv carries --db and --conversation-id for exact replay.".into(),
@@ -69831,6 +69834,7 @@ fn run_onboarding(
 /// present, search assets ready) from a single `state_meta_json` snapshot; facts
 /// it cannot determine are left for the operator to confirm. `--fixture <file>`
 /// supplies `{ "facts": {…}, "intent"?: "…" }` for deterministic scenarios.
+#[allow(clippy::too_many_arguments)]
 fn run_guide(
     intent_words: &[String],
     fixture: Option<&Path>,
@@ -79698,6 +79702,7 @@ const INTEGER_ARG_NAMES: &[&str] = &[
     "max-tokens",
     "max-sessions",
     "max-evidence",
+    "conversation-id",
     "context-lines",
     "max-excerpt-chars",
     "freshness-window-seconds",
@@ -83231,7 +83236,7 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
                     "type": "object",
                     "properties": {
                         "schema_version": { "type": "integer", "const": 2 },
-                        "count_scope": { "type": "string", "enum": ["all_matching_candidates", "scanned_candidates_partial"] },
+                        "count_scope": { "type": "string", "enum": ["all_matching_candidates", "scanned_candidates_partial", "no_verified_results_hard_timeout"] },
                         "scan_units": {
                             "type": "object",
                             "properties": {
@@ -101604,7 +101609,8 @@ mod cli_models_resolution_tests {
         use crate::search::model_download::ModelManifest;
 
         let probe_data_dir = std::path::Path::new("/tmp/cass-v3of1-probe");
-        for canonical in ["minilm"] {
+        {
+            let canonical = "minilm";
             assert!(
                 ModelManifest::for_embedder(canonical).is_some(),
                 "canonical name {canonical:?} returned by resolve_cli_model_name must have a \

@@ -250,9 +250,7 @@ fn summarize(facts: &CapsuleFacts, tally: &RedactionTally) -> Value {
 }
 
 fn normalize_kind(kind: &str) -> String {
-    if INCIDENT_KINDS.contains(&kind) {
-        kind.to_string()
-    } else if kind.starts_with("other:") {
+    if INCIDENT_KINDS.contains(&kind) || kind.starts_with("other:") {
         kind.to_string()
     } else {
         format!("other:{kind}")

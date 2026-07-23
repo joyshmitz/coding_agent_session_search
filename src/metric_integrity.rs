@@ -38,7 +38,7 @@ pub const METRIC_INTEGRITY_SCHEMA_VERSION: u32 = 1;
 ///
 /// Not `Eq`/`Ord` because it carries an `f64`; that float is always finite (the
 /// constructors route `NaN`/`Inf` to [`MetricOutcome::InvalidInput`]).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MetricOutcome {
     /// A real, finite value (which may legitimately be non-zero).
@@ -46,6 +46,7 @@ pub enum MetricOutcome {
     /// Rows were present and the value is genuinely zero (e.g. zero tokens used).
     TrueZero,
     /// No rows / no data to compute from — distinct from a zero value.
+    #[default]
     NoData,
     /// A grouped aggregate could not be computed (e.g. an engine limitation on
     /// mixed aggregates) — distinct from "no data".
@@ -58,12 +59,6 @@ pub enum MetricOutcome {
     /// The inputs were invalid (`NaN`/`Inf`, or a negative denominator) — never
     /// reported as a passing value.
     InvalidInput,
-}
-
-impl Default for MetricOutcome {
-    fn default() -> Self {
-        Self::NoData
-    }
 }
 
 impl MetricOutcome {

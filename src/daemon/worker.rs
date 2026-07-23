@@ -377,6 +377,7 @@ impl EmbeddingWorker {
     }
 
     /// Generate embeddings for messages and save the vector index.
+    #[allow(clippy::too_many_arguments)]
     fn generate_embeddings_and_save(
         &self,
         storage: &FrankenStorage,
