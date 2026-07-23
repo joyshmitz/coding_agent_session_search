@@ -152,6 +152,10 @@ impl DiscoveryAccountant {
     /// scanning when the time or file cap is already exhausted.
     pub fn begin_file(&mut self, elapsed_ms: u64) -> bool {
         self.note_file_considered();
+        self.begin_scanned_file(elapsed_ms)
+    }
+
+    fn begin_scanned_file(&mut self, elapsed_ms: u64) -> bool {
         if self.scan_stop_reason(elapsed_ms).is_some() || self.files_scanned >= self.caps.max_files
         {
             return false;
@@ -281,6 +285,7 @@ pub struct DiscoveryReport {
 /// Stable schema for the live incident-mining report.
 pub const INCIDENT_MINING_SCHEMA_VERSION: u32 = 2;
 const CONVERSATION_QUERY_HARD_CAP: u64 = 10_000;
+const CONVERSATION_BATCH_ROWS: usize = 128;
 const MESSAGE_BATCH_ROWS: usize = 128;
 const MESSAGE_FRAGMENT_CHARS: i64 = 4_096;
 
@@ -318,9 +323,17 @@ struct CandidateConversation {
     conversation_id: i64,
     session_id: String,
     agent: String,
+    workspace_id: Option<i64>,
     source_path: String,
     source_id: String,
     origin_host: Option<String>,
+    effective_started_at: i64,
+}
+
+struct CandidateWindow {
+    candidates: Vec<CandidateConversation>,
+    corpus_exhausted: bool,
+    timed_out: bool,
 }
 
 #[derive(Debug)]
@@ -328,6 +341,7 @@ struct CandidateMessage {
     idx: i64,
     content: String,
     content_was_truncated: bool,
+    fragment_limited_by_byte_budget: bool,
 }
 
 fn normalized_source_id(source_id: &str) -> String {
@@ -339,100 +353,158 @@ fn normalized_source_id(source_id: &str) -> String {
     }
 }
 
-fn push_placeholders(count: usize, params: &mut Vec<ParamValue>) -> String {
-    let first = params.len() + 1;
-    (0..count)
-        .map(|offset| format!("?{}", first + offset))
-        .collect::<Vec<_>>()
-        .join(", ")
+fn normalized_source_identity(source_id: &str, origin_host: Option<&str>) -> String {
+    let trimmed = source_id.trim();
+    if trimmed.is_empty() {
+        origin_host
+            .map(str::trim)
+            .filter(|host| !host.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| "local".to_string())
+    } else {
+        normalized_source_id(trimmed)
+    }
+}
+
+fn normalize_epoch_millis(timestamp: i64) -> i64 {
+    if (0..100_000_000_000).contains(&timestamp) {
+        timestamp.saturating_mul(1_000)
+    } else {
+        timestamp
+    }
 }
 
 fn query_candidate_conversations(
     conn: &Connection,
-    filter: &AnalyticsFilter,
     max_files: u64,
-) -> Result<Vec<CandidateConversation>> {
-    let mut clauses = Vec::new();
-    let mut params = Vec::new();
-    let normalized_started_at = "CASE WHEN COALESCE(c.started_at, c.ended_at, 0) >= 0 AND COALESCE(c.started_at, c.ended_at, 0) < 100000000000 THEN COALESCE(c.started_at, c.ended_at, 0) * 1000 ELSE COALESCE(c.started_at, c.ended_at, 0) END";
-    let normalized_source = "CASE WHEN TRIM(COALESCE(c.source_id, '')) = '' THEN 'local' WHEN LOWER(TRIM(COALESCE(c.source_id, ''))) = 'local' THEN 'local' ELSE TRIM(COALESCE(c.source_id, '')) END";
-
-    if let Some(since_ms) = filter.since_ms {
-        params.push(ParamValue::from(since_ms));
-        clauses.push(format!("{normalized_started_at} >= ?{}", params.len()));
-    }
-    if let Some(until_ms) = filter.until_ms {
-        params.push(ParamValue::from(until_ms));
-        clauses.push(format!("{normalized_started_at} <= ?{}", params.len()));
-    }
-    if !filter.agents.is_empty() {
-        let placeholders = push_placeholders(filter.agents.len(), &mut params);
-        for agent in &filter.agents {
-            params.push(ParamValue::from(agent.as_str()));
-        }
-        clauses.push(format!("a.slug IN ({placeholders})"));
-    }
-    if !filter.workspace_ids.is_empty() {
-        let placeholders = push_placeholders(filter.workspace_ids.len(), &mut params);
-        for workspace_id in &filter.workspace_ids {
-            params.push(ParamValue::from(*workspace_id));
-        }
-        clauses.push(format!("c.workspace_id IN ({placeholders})"));
-    }
-    match &filter.source {
-        SourceFilter::All => {}
-        SourceFilter::Local => clauses.push(format!("{normalized_source} = 'local'")),
-        SourceFilter::Remote => clauses.push(format!("{normalized_source} != 'local'")),
-        SourceFilter::Specific(source_id) => {
-            let source_id = normalized_source_id(source_id);
-            params.push(ParamValue::from(source_id.as_str()));
-            clauses.push(format!("{normalized_source} = ?{}", params.len()));
-        }
-    }
-
-    let where_clause = if clauses.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {}", clauses.join(" AND "))
-    };
+    started: Instant,
+    budget_ms: u64,
+) -> Result<CandidateWindow> {
     let query_limit = max_files.min(CONVERSATION_QUERY_HARD_CAP).saturating_add(1);
-    params.push(ParamValue::from(
-        i64::try_from(query_limit).unwrap_or(i64::MAX),
-    ));
-    let sql = format!(
-        "SELECT c.id,
-                COALESCE(c.external_id, 'archive-row-' || c.id),
-                a.slug,
-                c.source_path,
-                {normalized_source},
-                c.origin_host
-           FROM conversations c
-           JOIN agents a ON a.id = c.agent_id
-           {where_clause}
-          ORDER BY {normalized_started_at} DESC, c.id DESC
-          LIMIT ?{}",
-        params.len()
-    );
+    let query_limit = usize::try_from(query_limit).unwrap_or(usize::MAX);
+    let mut candidates = Vec::with_capacity(query_limit.min(CONVERSATION_BATCH_ROWS));
+    let mut before_id = None;
+    let mut corpus_exhausted = false;
+    let mut timed_out = false;
 
-    conn.query_map_collect(&sql, &params, |row: &Row| {
-        Ok(CandidateConversation {
-            conversation_id: row.get_typed(0)?,
-            session_id: row.get_typed(1)?,
-            agent: row.get_typed(2)?,
-            source_path: row.get_typed(3)?,
-            source_id: row.get_typed(4)?,
-            origin_host: row.get_typed(5)?,
-        })
+    while candidates.len() < query_limit {
+        if elapsed_ms(started) >= budget_ms {
+            timed_out = true;
+            break;
+        }
+        let page_limit = (query_limit - candidates.len()).min(CONVERSATION_BATCH_ROWS);
+        let (where_clause, params) = if let Some(id) = before_id {
+            (
+                "WHERE c.id < ?1",
+                vec![
+                    ParamValue::from(id),
+                    ParamValue::from(i64::try_from(page_limit).unwrap_or(i64::MAX)),
+                ],
+            )
+        } else {
+            (
+                "",
+                vec![ParamValue::from(
+                    i64::try_from(page_limit).unwrap_or(i64::MAX),
+                )],
+            )
+        };
+        let limit_parameter = if before_id.is_some() { 2 } else { 1 };
+        let sql = format!(
+            "SELECT c.id,
+                    COALESCE(c.external_id, 'archive-row-' || c.id),
+                    COALESCE((SELECT a.slug FROM agents a WHERE a.id = c.agent_id LIMIT 1), 'unknown'),
+                    c.workspace_id,
+                    c.source_path,
+                    COALESCE(c.source_id, ''),
+                    c.origin_host,
+                    COALESCE(c.started_at, c.ended_at, 0)
+               FROM conversations c
+               {where_clause}
+              ORDER BY c.id DESC
+              LIMIT ?{limit_parameter}"
+        );
+        let page = conn
+            .query_map_collect(&sql, &params, |row: &Row| {
+                let raw_source_id: String = row.get_typed(5)?;
+                let origin_host: Option<String> = row.get_typed(6)?;
+                Ok(CandidateConversation {
+                    conversation_id: row.get_typed(0)?,
+                    session_id: row.get_typed(1)?,
+                    agent: row.get_typed(2)?,
+                    workspace_id: row.get_typed(3)?,
+                    source_path: row.get_typed(4)?,
+                    source_id: normalized_source_identity(&raw_source_id, origin_host.as_deref()),
+                    origin_host,
+                    effective_started_at: normalize_epoch_millis(row.get_typed(7)?),
+                })
+            })
+            .context("querying bounded incident candidate conversation page")?;
+        if page.is_empty() {
+            corpus_exhausted = true;
+            break;
+        }
+        let page_was_short = page.len() < page_limit;
+        before_id = page.last().map(|candidate| candidate.conversation_id);
+        candidates.extend(page);
+        if page_was_short {
+            corpus_exhausted = true;
+            break;
+        }
+    }
+
+    if candidates.len() > usize::try_from(max_files).unwrap_or(usize::MAX) {
+        candidates.truncate(usize::try_from(max_files).unwrap_or(usize::MAX));
+        corpus_exhausted = false;
+    }
+
+    Ok(CandidateWindow {
+        candidates,
+        corpus_exhausted,
+        timed_out,
     })
-    .context("querying bounded incident candidate conversations")
+}
+
+fn candidate_matches_filter(candidate: &CandidateConversation, filter: &AnalyticsFilter) -> bool {
+    if filter
+        .since_ms
+        .is_some_and(|since| candidate.effective_started_at < since)
+        || filter
+            .until_ms
+            .is_some_and(|until| candidate.effective_started_at > until)
+        || (!filter.agents.is_empty() && !filter.agents.contains(&candidate.agent))
+        || (!filter.workspace_ids.is_empty()
+            && candidate
+                .workspace_id
+                .is_none_or(|id| !filter.workspace_ids.contains(&id)))
+    {
+        return false;
+    }
+
+    match &filter.source {
+        SourceFilter::All => true,
+        SourceFilter::Local => candidate.source_id == "local",
+        SourceFilter::Remote => candidate.source_id != "local",
+        SourceFilter::Specific(source_id) => candidate.source_id == normalized_source_id(source_id),
+    }
 }
 
 fn query_candidate_messages(
     conn: &Connection,
     conversation_id: i64,
     after_idx: i64,
+    remaining_lines: u64,
+    remaining_bytes: u64,
 ) -> Result<Vec<CandidateMessage>> {
-    let limit = i64::try_from(MESSAGE_BATCH_ROWS + 1).unwrap_or(i64::MAX);
+    let batch_rows = usize::try_from(remaining_lines)
+        .unwrap_or(usize::MAX)
+        .min(MESSAGE_BATCH_ROWS);
+    let limit = i64::try_from(batch_rows.saturating_add(1)).unwrap_or(i64::MAX);
+    let fragment_chars = i64::try_from(remaining_bytes)
+        .unwrap_or(i64::MAX)
+        .min(MESSAGE_FRAGMENT_CHARS)
+        .max(1);
+    let fragment_limited_by_byte_budget = fragment_chars < MESSAGE_FRAGMENT_CHARS;
     conn.query_map_collect(
         "SELECT idx, substr(content, 1, ?3), length(content) > ?3
            FROM messages
@@ -442,7 +514,7 @@ fn query_candidate_messages(
         &[
             ParamValue::from(conversation_id),
             ParamValue::from(after_idx),
-            ParamValue::from(MESSAGE_FRAGMENT_CHARS),
+            ParamValue::from(fragment_chars),
             ParamValue::from(limit),
         ],
         |row: &Row| {
@@ -450,6 +522,7 @@ fn query_candidate_messages(
                 idx: row.get_typed(0)?,
                 content: row.get_typed(1)?,
                 content_was_truncated: row.get_typed::<i64>(2)? != 0,
+                fragment_limited_by_byte_budget,
             })
         },
     )
@@ -496,18 +569,24 @@ pub(crate) fn scan_incidents(
     filter: &AnalyticsFilter,
     caps: DiscoveryCaps,
     top_n: usize,
+    archive_db_path: Option<&Path>,
 ) -> Result<IncidentMiningReport> {
     let started = Instant::now();
-    let candidates = query_candidate_conversations(conn, filter, caps.max_files)?;
+    let candidate_window =
+        query_candidate_conversations(conn, caps.max_files, started, caps.budget_ms)?;
     let mut accountant = DiscoveryAccountant::new(caps);
     let mut top_sessions = TopSessionAccumulator::default();
     let mut message_fragment_capped = false;
-    let mut all_exhausted =
-        candidates.len() <= usize::try_from(caps.max_files).unwrap_or(usize::MAX);
+    let mut byte_cap_capped = false;
+    let mut all_exhausted = candidate_window.corpus_exhausted && !candidate_window.timed_out;
 
-    'conversations: for candidate in candidates {
+    'conversations: for candidate in candidate_window.candidates {
+        accountant.note_file_considered();
+        if !candidate_matches_filter(&candidate, filter) {
+            continue;
+        }
         let now_ms = elapsed_ms(started);
-        if !accountant.begin_file(now_ms) {
+        if !accountant.begin_scanned_file(now_ms) {
             all_exhausted = false;
             break;
         }
@@ -527,14 +606,27 @@ pub(crate) fn scan_incidents(
                 all_exhausted = false;
                 break 'conversations;
             }
-            let rows = query_candidate_messages(conn, candidate.conversation_id, after_idx)?;
-            let has_more_rows = rows.len() > MESSAGE_BATCH_ROWS;
-            let batch_len = rows.len().min(MESSAGE_BATCH_ROWS);
+            let requested_rows = usize::try_from(accountant.remaining_lines())
+                .unwrap_or(usize::MAX)
+                .min(MESSAGE_BATCH_ROWS);
+            let rows = query_candidate_messages(
+                conn,
+                candidate.conversation_id,
+                after_idx,
+                accountant.remaining_lines(),
+                accountant.remaining_bytes(),
+            )?;
+            let has_more_rows = rows.len() > requested_rows;
+            let batch_len = rows.len().min(requested_rows);
             if batch_len == 0 {
                 break;
             }
 
             for message in rows.into_iter().take(batch_len) {
+                if accountant.scan_stop_reason(elapsed_ms(started)) == Some(StopReason::TimedOut) {
+                    all_exhausted = false;
+                    break 'conversations;
+                }
                 if accountant.remaining_lines() == 0 || accountant.remaining_bytes() == 0 {
                     all_exhausted = false;
                     break 'conversations;
@@ -585,7 +677,10 @@ pub(crate) fn scan_incidents(
                 after_idx = message.idx;
                 if byte_cap_truncated || message.content_was_truncated {
                     all_exhausted = false;
-                    message_fragment_capped = message.content_was_truncated && !byte_cap_truncated;
+                    byte_cap_capped = byte_cap_truncated
+                        || (message.content_was_truncated
+                            && message.fragment_limited_by_byte_budget);
+                    message_fragment_capped = message.content_was_truncated && !byte_cap_capped;
                     break 'conversations;
                 }
             }
@@ -598,11 +693,14 @@ pub(crate) fn scan_incidents(
 
     let elapsed = elapsed_ms(started);
     let mut discovery = accountant.finalize(elapsed, all_exhausted);
-    if message_fragment_capped && discovery.stop_reason != StopReason::TimedOut {
+    if byte_cap_capped && discovery.stop_reason != StopReason::TimedOut {
+        discovery.stop_reason = StopReason::BytesCapped;
+        discovery.partial = true;
+    } else if message_fragment_capped && discovery.stop_reason != StopReason::TimedOut {
         discovery.stop_reason = StopReason::MessageFragmentCapped;
         discovery.partial = true;
     }
-    let top_session_summary = top_sessions.finish(top_n);
+    let top_session_summary = top_sessions.finish(top_n, archive_db_path);
     Ok(IncidentMiningReport {
         schema_version: INCIDENT_MINING_SCHEMA_VERSION,
         count_scope: if discovery.partial {
@@ -614,7 +712,7 @@ pub(crate) fn scan_incidents(
             files: "archive_conversations".to_string(),
             lines: "archive_messages".to_string(),
             bytes: "utf8_message_content_inspected".to_string(),
-            candidate_order: "most_recent_first".to_string(),
+            candidate_order: "newest_archive_row_first".to_string(),
             message_fragment_chars: u64::try_from(MESSAGE_FRAGMENT_CHARS).unwrap_or(u64::MAX),
         },
         discovery,
@@ -835,8 +933,14 @@ mod tests {
 
     #[test]
     fn live_scanner_reports_bounded_redacted_top_sessions() {
-        let report =
-            scan_incidents(&incident_db(), &AnalyticsFilter::default(), scan_caps(), 10).unwrap();
+        let report = scan_incidents(
+            &incident_db(),
+            &AnalyticsFilter::default(),
+            scan_caps(),
+            10,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(report.schema_version, INCIDENT_MINING_SCHEMA_VERSION);
         assert_eq!(report.discovery.stop_reason, StopReason::Completed);
@@ -897,7 +1001,7 @@ mod tests {
             source: SourceFilter::Remote,
             ..AnalyticsFilter::default()
         };
-        let report = scan_incidents(&incident_db(), &filter, scan_caps(), 10).unwrap();
+        let report = scan_incidents(&incident_db(), &filter, scan_caps(), 10, None).unwrap();
         assert_eq!(report.discovery.files_scanned, 1);
         assert_eq!(report.total_sessions, 1);
         assert_eq!(report.top_sessions[0].conversation_id, 2);
@@ -905,10 +1009,89 @@ mod tests {
     }
 
     #[test]
+    fn live_scanner_uses_origin_host_for_blank_legacy_source_identity() {
+        let conn = incident_db();
+        conn.execute_batch(
+            "INSERT INTO conversations(
+                 id, agent_id, workspace_id, source_id, external_id,
+                 source_path, started_at, origin_host
+             ) VALUES (4, 2, 20, '   ', 'legacy-remote',
+                 '/remote/private/legacy.jsonl', 400, 'legacy-host');
+             INSERT INTO messages(id, conversation_id, idx, content) VALUES
+                 (5, 4, 0, 'cass remote sync over ssh failed: permission denied');",
+        )
+        .unwrap();
+
+        let remote_filter = AnalyticsFilter {
+            source: SourceFilter::Remote,
+            ..AnalyticsFilter::default()
+        };
+        let remote = scan_incidents(&conn, &remote_filter, scan_caps(), 10, None).unwrap();
+        let legacy = remote
+            .top_sessions
+            .iter()
+            .find(|session| session.conversation_id == 4)
+            .expect("blank-source legacy remote must pass remote filter");
+        assert_eq!(legacy.source_id, "legacy-host");
+        assert_eq!(legacy.host, "legacy-host");
+        assert_eq!(legacy.exists_state, SessionExistsState::Unknown);
+
+        let specific_filter = AnalyticsFilter {
+            source: SourceFilter::Specific("legacy-host".to_string()),
+            ..AnalyticsFilter::default()
+        };
+        let specific = scan_incidents(&conn, &specific_filter, scan_caps(), 10, None).unwrap();
+        assert_eq!(specific.total_sessions, 1);
+        assert_eq!(specific.top_sessions[0].conversation_id, 4);
+
+        let local_filter = AnalyticsFilter {
+            source: SourceFilter::Local,
+            ..AnalyticsFilter::default()
+        };
+        let local = scan_incidents(&conn, &local_filter, scan_caps(), 10, None).unwrap();
+        assert!(
+            local
+                .top_sessions
+                .iter()
+                .all(|session| session.conversation_id != 4)
+        );
+    }
+
+    #[test]
+    fn candidate_window_is_keyset_bounded_before_selective_filters() {
+        let conn = incident_db();
+        for id in 4..=515_i64 {
+            conn.execute_compat(
+                "INSERT INTO conversations(
+                     id, agent_id, workspace_id, source_id, external_id,
+                     source_path, started_at, origin_host
+                 ) VALUES (?1, 1, 10, 'local', 'bulk', '/bulk.jsonl', 1, NULL)",
+                frankensqlite::params![id],
+            )
+            .unwrap();
+        }
+        let filter = AnalyticsFilter {
+            source: SourceFilter::Remote,
+            ..AnalyticsFilter::default()
+        };
+        let mut caps = scan_caps();
+        caps.max_files = 3;
+        let report = scan_incidents(&conn, &filter, caps, 10, None).unwrap();
+        assert_eq!(report.discovery.files_considered, 3);
+        assert_eq!(report.discovery.files_scanned, 0);
+        assert_eq!(report.discovery.stop_reason, StopReason::FilesCapped);
+        assert_eq!(
+            report.scan_units.candidate_order,
+            "newest_archive_row_first"
+        );
+    }
+
+    #[test]
     fn live_scanner_line_cap_returns_truthful_partial_scope() {
         let mut caps = scan_caps();
         caps.max_lines = 1;
-        let report = scan_incidents(&incident_db(), &AnalyticsFilter::default(), caps, 10).unwrap();
+        let report =
+            scan_incidents(&incident_db(), &AnalyticsFilter::default(), caps, 10, None).unwrap();
         assert!(report.discovery.partial);
         assert_eq!(report.discovery.stop_reason, StopReason::LinesCapped);
         assert_eq!(report.discovery.lines_scanned, 1);
@@ -926,7 +1109,7 @@ mod tests {
         let mut caps = scan_caps();
         caps.max_files = 1;
         caps.max_lines = 1;
-        let report = scan_incidents(&conn, &AnalyticsFilter::default(), caps, 10).unwrap();
+        let report = scan_incidents(&conn, &AnalyticsFilter::default(), caps, 10, None).unwrap();
         assert_eq!(report.discovery.stop_reason, StopReason::Completed);
         assert!(!report.discovery.partial);
         assert_eq!(report.discovery.files_scanned, 1);
@@ -937,10 +1120,25 @@ mod tests {
     fn live_scanner_byte_cap_never_overshoots() {
         let mut caps = scan_caps();
         caps.max_bytes = 12;
-        let report = scan_incidents(&incident_db(), &AnalyticsFilter::default(), caps, 10).unwrap();
+        let report =
+            scan_incidents(&incident_db(), &AnalyticsFilter::default(), caps, 10, None).unwrap();
         assert!(report.discovery.partial);
         assert_eq!(report.discovery.stop_reason, StopReason::BytesCapped);
         assert_eq!(report.discovery.bytes_scanned, 12);
+    }
+
+    #[test]
+    fn multibyte_scalar_larger_than_remaining_budget_is_bytes_capped() {
+        let conn = incident_db();
+        conn.execute_batch("UPDATE messages SET content = '😀' WHERE id = 3;")
+            .unwrap();
+        let mut caps = scan_caps();
+        caps.max_bytes = 1;
+        let report = scan_incidents(&conn, &AnalyticsFilter::default(), caps, 10, None).unwrap();
+        assert!(report.discovery.partial);
+        assert_eq!(report.discovery.stop_reason, StopReason::BytesCapped);
+        assert!(report.discovery.bytes_scanned <= 1);
+        assert_eq!(truncate_utf8_bytes("😀", 1), ("", true));
     }
 
     #[test]
@@ -953,14 +1151,15 @@ mod tests {
         )
         .unwrap();
 
-        let report = scan_incidents(&conn, &AnalyticsFilter::default(), scan_caps(), 10).unwrap();
+        let report =
+            scan_incidents(&conn, &AnalyticsFilter::default(), scan_caps(), 10, None).unwrap();
         assert!(report.discovery.partial);
         assert_eq!(report.count_scope, "scanned_candidates_partial");
         assert_eq!(
             report.discovery.stop_reason,
             StopReason::MessageFragmentCapped
         );
-        assert_eq!(report.discovery.lines_scanned, 1);
+        assert_eq!(report.discovery.lines_scanned, 3);
         assert!(report.discovery.bytes_scanned <= 16_384);
     }
 
@@ -969,7 +1168,8 @@ mod tests {
         let conn = incident_db();
         conn.execute_batch("DELETE FROM messages; DELETE FROM conversations;")
             .unwrap();
-        let report = scan_incidents(&conn, &AnalyticsFilter::default(), scan_caps(), 10).unwrap();
+        let report =
+            scan_incidents(&conn, &AnalyticsFilter::default(), scan_caps(), 10, None).unwrap();
         assert_eq!(report.discovery.stop_reason, StopReason::Completed);
         assert_eq!(report.total_sessions, 0);
         assert_eq!(report.total_hits, 0);

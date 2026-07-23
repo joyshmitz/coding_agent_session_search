@@ -3267,7 +3267,7 @@ fn analytics_incidents_robot_output_is_redacted_provenanced_and_read_only() {
             "files": "archive_conversations",
             "lines": "archive_messages",
             "bytes": "utf8_message_content_inspected",
-            "candidate_order": "most_recent_first",
+            "candidate_order": "newest_archive_row_first",
             "message_fragment_chars": 4096
         })
     );
@@ -3298,16 +3298,84 @@ fn analytics_incidents_robot_output_is_redacted_provenanced_and_read_only() {
     );
 
     assert_eq!(session["suggested_command"]["kind"], "view");
+    let conversation_id = session["conversation_id"]
+        .as_i64()
+        .expect("canonical conversation id");
+    let canonical_db_path = fs::canonicalize(&fixture.db_path)
+        .expect("canonical fixture database path")
+        .to_string_lossy()
+        .into_owned();
     assert_eq!(
         session["suggested_command"]["argv"],
-        json!(["cass", "view", source_path, "--source", "local", "--json"])
+        json!([
+            "cass",
+            "--db",
+            canonical_db_path,
+            "view",
+            source_path,
+            "--source",
+            "local",
+            "--conversation-id",
+            conversation_id.to_string(),
+            "--json"
+        ])
     );
     assert!(
         session["suggested_command"]["display"]
             .as_str()
-            .is_some_and(|display| display.starts_with("cass view ")
-                && display.ends_with(" --source local --json"))
+            .is_some_and(|display| display.starts_with("cass --db ")
+                && display.ends_with(&format!(
+                    " --source local --conversation-id {conversation_id} --json"
+                )))
     );
+
+    // Prove the returned argv remains exact even after a newer archive row is
+    // inserted with the same source/path identity.
+    let storage = coding_agent_search::storage::sqlite::FrankenStorage::open(&fixture.db_path)
+        .expect("reopen incident fixture");
+    let codex_id = storage
+        .ensure_agent(&sample_agent("codex", "Codex"))
+        .expect("resolve codex agent");
+    let mut newer = sample_conversation(
+        "codex",
+        &fixture.local_source_path,
+        &fixture.local_source_path,
+        "newer-same-path-session",
+        "Newer same-path fixture",
+        1_880_000_000_000,
+        vec![sample_message(
+            0,
+            MessageRole::User,
+            1_880_000_000_000,
+            "NEWER_SAME_PATH_ROW_MUST_NOT_BE_OPENED",
+        )],
+    );
+    newer.source_id = "local".to_string();
+    storage
+        .insert_conversation_tree(codex_id, None, &newer)
+        .expect("insert newer same-path row");
+    drop(storage);
+
+    let argv = session["suggested_command"]["argv"]
+        .as_array()
+        .expect("suggested argv")
+        .iter()
+        .map(|argument| argument.as_str().expect("string argv"))
+        .collect::<Vec<_>>();
+    let mut followup = base_cmd(tmp.path());
+    followup.args(&argv[1..]);
+    followup.timeout(Duration::from_secs(30));
+    let followup_output = followup.output().expect("execute suggested view argv");
+    assert!(
+        followup_output.status.success(),
+        "suggested argv failed: {}",
+        String::from_utf8_lossy(&followup_output.stderr)
+    );
+    let followup_json: Value =
+        serde_json::from_slice(&followup_output.stdout).expect("suggested view output JSON");
+    let followup_serialized = serde_json::to_string(&followup_json).unwrap();
+    assert!(followup_serialized.contains(fixture.secret_prompt_fragment));
+    assert!(!followup_serialized.contains("NEWER_SAME_PATH_ROW_MUST_NOT_BE_OPENED"));
 
     let evidence = session["evidence_summaries"]
         .as_array()
@@ -3369,7 +3437,7 @@ fn analytics_incidents_strict_session_cap_is_explicitly_partial() {
     assert_eq!(discovery["stop_reason"], "files-capped");
     assert_eq!(discovery["caps"]["max_files"], 1);
     assert_eq!(discovery["files_scanned"], 1);
-    assert_eq!(discovery["files_considered"], 2);
+    assert_eq!(discovery["files_considered"], 1);
     assert_eq!(json["data"]["total_sessions"], 1);
     assert_eq!(json["data"]["top_sessions_truncated"], false);
 

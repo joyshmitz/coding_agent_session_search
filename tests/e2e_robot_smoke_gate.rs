@@ -851,12 +851,23 @@ fn analytics_incidents_redacts_provenance_and_reports_bounded_partial_results() 
                 compact(remote)
             ));
         }
+        let remote_conversation_id = remote["conversation_id"]
+            .as_i64()
+            .ok_or_else(|| "remote incident omitted canonical conversation_id".to_string())?;
+        let canonical_db_path = std::fs::canonicalize(&db_path)
+            .map_err(|error| format!("canonicalize incident database: {error}"))?
+            .to_string_lossy()
+            .into_owned();
         let expected_argv = json!([
             "cass",
+            "--db",
+            canonical_db_path,
             "view",
             INCIDENT_REMOTE_PATH,
             "--source",
             INCIDENT_REMOTE_SOURCE,
+            "--conversation-id",
+            remote_conversation_id.to_string(),
             "--json"
         ]);
         if remote["suggested_command"]["kind"] != "view"
@@ -866,6 +877,36 @@ fn analytics_incidents_redacts_provenance_and_reports_bounded_partial_results() 
                 "incident follow-up action is not the exact safe argv contract: {}",
                 compact(&remote["suggested_command"])
             ));
+        }
+        let suggested_argv = remote["suggested_command"]["argv"]
+            .as_array()
+            .ok_or_else(|| "incident suggested argv is not an array".to_string())?
+            .iter()
+            .map(|argument| {
+                argument
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| "incident suggested argv contains a non-string".to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let followup_output = spawn_with_timeout_or_diag(
+            smoke_command(home.path(), &suggested_argv[1..]),
+            "incidents-suggested-view",
+            Some(&data_dir),
+            SMOKE_TIMEOUT,
+        );
+        persist_incident_output(&tracker, "suggested-view", &followup_output)?;
+        if !followup_output.status.success() {
+            return Err(format!(
+                "incident suggested argv failed: status={:?} stderr={}",
+                followup_output.status.code(),
+                String::from_utf8_lossy(&followup_output.stderr)
+            ));
+        }
+        let followup: Value = serde_json::from_slice(&followup_output.stdout)
+            .map_err(|error| format!("incident suggested argv returned invalid JSON: {error}"))?;
+        if !compact(&followup).contains("sk_live_CASS_INCIDENT_E2E_ONLY") {
+            return Err("incident suggested argv did not open the exact archived row".to_string());
         }
         let evidence = remote["evidence_summaries"]
             .as_array()

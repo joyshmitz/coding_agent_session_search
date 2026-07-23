@@ -806,6 +806,9 @@ pub enum Commands {
         /// Exact source_id from search output (e.g. 'local', 'work-laptop')
         #[arg(long, alias = "source-id", alias = "source_id")]
         source: Option<String>,
+        /// Exact canonical archive conversation row id
+        #[arg(long, alias = "conversation_id", value_parser = clap::value_parser!(i64).range(1..))]
+        conversation_id: Option<i64>,
         /// Line number to show (1-indexed)
         #[arg(long, short = 'n', alias = "line-number", alias = "line_number")]
         line: Option<usize>,
@@ -6986,6 +6989,7 @@ async fn execute_cli(
                 Commands::View {
                     path,
                     source,
+                    conversation_id,
                     line,
                     context,
                     json,
@@ -6995,6 +6999,7 @@ async fn execute_cli(
                         &path,
                         cli.db.clone(),
                         source.as_deref(),
+                        conversation_id,
                         line,
                         context,
                         structured_format,
@@ -16946,6 +16951,8 @@ fn run_analytics_incidents(
         }
     }
 
+    let effective_db_path = analytics_db_path(&common.data_dir, db_path_override);
+    let pointer_db_path = std::fs::canonicalize(&effective_db_path).unwrap_or(effective_db_path);
     let conn = open_franken_analytics_db(&common.data_dir, db_path_override)?;
     let filter = analytics_query_filter(&conn, common)?;
     let caps = crate::incident_discovery::DiscoveryCaps {
@@ -16955,8 +16962,14 @@ fn run_analytics_incidents(
         budget_ms,
         max_evidence: crate::incident_discovery::DEFAULT_MAX_EVIDENCE,
     };
-    let report = crate::incident_discovery::scan_incidents(&conn, &filter, caps, limit).map_err(
-        |error| CliError {
+    let report = crate::incident_discovery::scan_incidents(
+        &conn,
+        &filter,
+        caps,
+        limit,
+        Some(&pointer_db_path),
+    )
+    .map_err(|error| CliError {
             code: 9,
             kind: CliErrorKind::DbError.kind_str(),
             message: format!("Incident mining failed: {error:#}"),
@@ -16965,8 +16978,7 @@ fn run_analytics_incidents(
                     .to_string(),
             ),
             retryable: false,
-        },
-    )?;
+        })?;
     serde_json::to_value(report).map_err(|error| CliError {
         code: 9,
         kind: CliErrorKind::SerializeMessage.kind_str(),
@@ -21235,7 +21247,7 @@ fn render_analytics_docs() -> Vec<String> {
         "    (claude_code, codex, pi_agent, factory, opencode, cursor).".into(),
         String::new(),
         "### analytics incidents".into(),
-        "  Read-only; scans canonical archive conversations/messages most-recent-first.".into(),
+        "  Read-only; keyset-scans canonical archive rows newest-id-first.".into(),
         "  data.schema_version: 2".into(),
         "  data.count_scope: all_matching_candidates | scanned_candidates_partial".into(),
         "  data.discovery: { caps, files_considered, files_scanned, lines_scanned,".into(),
@@ -21252,11 +21264,13 @@ fn render_analytics_docs() -> Vec<String> {
         "                    fields_suppressed, opt_in_flags }".into(),
         "  --limit N           Ranked sessions returned (1..100; default 10)".into(),
         "  --max-sessions N    Archive conversations scanned (1..10000; default 2000)".into(),
+        "    This bounds the newest-row candidate window before dimensional filters.".into(),
         "  --max-messages N    Archive messages inspected (default 250000)".into(),
         "  --max-bytes N       UTF-8 content bytes inspected (default 268435456)".into(),
         "  --budget-ms N       Wall-clock scan budget (default 8000)".into(),
         "  Raw prompt/tool text is always suppressed. source_path is retained only as the".into(),
         "  actionable archive pointer; evidence paths are basename-redacted.".into(),
+        "  suggested_command.argv carries --db and --conversation-id for exact replay.".into(),
         "  Example: cass analytics incidents --limit 10 --json".into(),
         String::new(),
         "### analytics rebuild".into(),
@@ -83302,7 +83316,11 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
                                         "type": "object",
                                         "properties": {
                                             "kind": { "type": "string", "const": "view" },
-                                            "argv": { "type": "array", "items": { "type": "string" } },
+                                            "argv": {
+                                                "type": "array",
+                                                "description": "Executable argv preserving the effective --db and exact --conversation-id archive identity.",
+                                                "items": { "type": "string" }
+                                            },
                                             "display": { "type": "string" }
                                         },
                                         "required": ["kind", "argv", "display"]
@@ -85825,6 +85843,7 @@ fn try_load_indexed_conversation_from_db_with_source(
     source_path: &Path,
     db_path: &Path,
     source_id: Option<&str>,
+    conversation_id: Option<i64>,
 ) -> Option<crate::ui::data::ConversationView> {
     if !db_path.exists() {
         return None;
@@ -85835,6 +85854,20 @@ fn try_load_indexed_conversation_from_db_with_source(
     let storage = crate::storage::sqlite::FrankenStorage::open_readonly(db_path).ok()?;
     let source_path = source_path.to_string_lossy();
     let source_id = canonical_followup_source_id(source_id);
+    if let Some(conversation_id) = conversation_id {
+        let view =
+            crate::ui::data::load_conversation_by_id_uncached(&storage, conversation_id).ok()??;
+        if view.convo.source_path.to_string_lossy() != source_path {
+            return None;
+        }
+        if source_id
+            .as_deref()
+            .is_some_and(|expected| view.convo.source_id != expected)
+        {
+            return None;
+        }
+        return Some(view);
+    }
     if let Some(source_id) = source_id.as_deref() {
         return crate::ui::data::load_conversation_for_source(&storage, source_id, &source_path)
             .ok()?;
@@ -85967,13 +86000,14 @@ fn try_load_indexed_conversation_from_db(
     source_path: &Path,
     db_path: &Path,
 ) -> Option<crate::ui::data::ConversationView> {
-    try_load_indexed_conversation_from_db_with_source(source_path, db_path, None)
+    try_load_indexed_conversation_from_db_with_source(source_path, db_path, None, None)
 }
 
 fn run_view(
     path: &Path,
     db_override: Option<PathBuf>,
     source_id: Option<&str>,
+    conversation_id: Option<i64>,
     line: Option<usize>,
     context: usize,
     output_format: Option<RobotFormat>,
@@ -85996,10 +86030,16 @@ fn run_view(
     let source_id = normalized_source_id.as_deref();
 
     let db_path = db_override.unwrap_or_else(default_db_path);
-    let indexed_view = try_load_indexed_conversation_from_db_with_source(path, &db_path, source_id);
-    let allow_direct_file = followup_source_is_local(source_id) || source_id.is_none();
+    let indexed_view = try_load_indexed_conversation_from_db_with_source(
+        path,
+        &db_path,
+        source_id,
+        conversation_id,
+    );
+    let allow_direct_file =
+        conversation_id.is_none() && (followup_source_is_local(source_id) || source_id.is_none());
 
-    let prefer_direct_file = prefers_direct_view_file(path, source_id);
+    let prefer_direct_file = conversation_id.is_none() && prefers_direct_view_file(path, source_id);
     let source_exists = path.exists();
 
     // Archive-only resolution (uojcg.2.3): when the source file is stale, moved,
@@ -86026,8 +86066,18 @@ fn run_view(
         // No archive row was found. Distinguish a missing ARCHIVE ROW from a
         // missing SOURCE FILE so an agent knows whether to reindex vs. fix the
         // path (uojcg.2.3).
-        let (kind, message, hint) = match source_id {
-            Some(source_id) => (
+        let (kind, message, hint) = match (conversation_id, source_id) {
+            (Some(conversation_id), _) => (
+                CliErrorKind::IndexedSessionRequired.kind_str(),
+                format!(
+                    "No archived row matched conversation_id {conversation_id}, source {}, and path {}",
+                    source_id.unwrap_or("[unspecified]"),
+                    path.display()
+                ),
+                "Use the exact --db, --conversation-id, --source, and path from the incident report's suggested_command.argv."
+                    .to_string(),
+            ),
+            (None, Some(source_id)) => (
                 CliErrorKind::IndexedSessionRequired.kind_str(),
                 format!(
                     "No archived row for source '{source_id}' at {} (archive row missing)",
@@ -86036,7 +86086,7 @@ fn run_view(
                 "Use the exact source_id from search output, or re-run index to archive this session."
                     .to_string(),
             ),
-            None if !source_exists => (
+            (None, None) if !source_exists => (
                 CliErrorKind::FileNotFound.kind_str(),
                 format!(
                     "Source file missing and no archived row found: {}",
@@ -86045,7 +86095,7 @@ fn run_view(
                 "The source file moved or was pruned and is not archived; re-run index, then use the source_path from search output."
                     .to_string(),
             ),
-            None => (
+            (None, None) => (
                 CliErrorKind::FileNotFound.kind_str(),
                 format!("File not found: {}", path.display()),
                 "Path may be virtual (e.g. Cursor composer). Re-run index, then use the exact source_path from search output."
@@ -89962,7 +90012,7 @@ fn run_export(
     let mut indexed_view = if should_defer_indexed_lookup_for_direct_export(path, source_id) {
         None
     } else {
-        try_load_indexed_conversation_from_db_with_source(path, &db_path, source_id)
+        try_load_indexed_conversation_from_db_with_source(path, &db_path, source_id, None)
     };
 
     if source_id.is_none()
@@ -89997,7 +90047,7 @@ fn run_export(
             Err(err) => {
                 if indexed_view.is_none() {
                     indexed_view = try_load_indexed_conversation_from_db_with_source(
-                        path, &db_path, source_id,
+                        path, &db_path, source_id, None,
                     );
                 }
                 if let Some(view) = indexed_view.as_ref() {
@@ -90457,7 +90507,7 @@ fn run_export_html(
     {
         None
     } else {
-        try_load_indexed_conversation_from_db_with_source(session_path, &db_path, source_id)
+        try_load_indexed_conversation_from_db_with_source(session_path, &db_path, source_id, None)
     };
 
     // --- Validate session exists ---
@@ -90592,6 +90642,7 @@ fn run_export_html(
                         session_path,
                         &db_path,
                         source_id,
+                        None,
                     );
                 }
                 if let Some(view) = indexed_view.as_ref() {
@@ -93243,6 +93294,7 @@ mod indexed_conversation_fallback_tests {
             &session_path,
             Some(db_path),
             None,
+            None,
             Some(2),
             0,
             Some(RobotFormat::Json),
@@ -93305,6 +93357,7 @@ local second line
         run_view(
             &session_path,
             Some(db_path),
+            None,
             None,
             Some(2),
             0,
@@ -93825,6 +93878,7 @@ This should stay behind the indexed html export.
             &session_path,
             Some(db_path),
             None,
+            None,
             Some(1),
             0,
             Some(RobotFormat::Json),
@@ -93939,6 +93993,7 @@ This should stay behind the indexed html export.
         run_view(
             &synthetic_path,
             Some(db_path),
+            None,
             None,
             Some(1),
             0,
@@ -94965,7 +95020,8 @@ fn run_expand(
     }
 
     let db_path = db_override.unwrap_or_else(default_db_path);
-    let indexed_view = try_load_indexed_conversation_from_db_with_source(path, &db_path, source_id);
+    let indexed_view =
+        try_load_indexed_conversation_from_db_with_source(path, &db_path, source_id, None);
     let allow_direct_file = followup_source_is_local(source_id) || source_id.is_none();
 
     let prefer_direct_file = prefers_direct_jsonl_file(path, source_id);

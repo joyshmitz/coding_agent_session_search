@@ -336,41 +336,130 @@ fn has_cass_anchor(text: &str) -> bool {
     .any(|anchor| text.contains(anchor))
 }
 
-fn strong_signals(category: IncidentCategory) -> &'static [&'static str] {
-    match category {
-        IncidentCategory::CassStatusHealth => &["health_class", "recommended_action"],
-        IncidentCategory::IndexStaleMissing => {
-            &["index_freshness", "not_initialized", "err.kind=openread"]
-        }
-        IncidentCategory::IndexStallProgress => &["last_progress_at_ms", "no forward progress"],
-        IncidentCategory::SearchZeroWorkspace => &["zero_result_diagnosis", "candidate_workspaces"],
-        IncidentCategory::QuarantineOom => &[
-            "quarantined_conversations",
-            "index-ingest-out-of-memory",
-            "ingest_oom",
-        ],
-        IncidentCategory::StorageBusyCorrupt => &[],
-        IncidentCategory::RemoteSyncAuth => &[],
-        IncidentCategory::Semantic => &["semantic_fallback_lexical", "fallback_mode"],
-        IncidentCategory::WatchSalvageIssues => {
-            &["drop_close", "deferred_authoritative_db_rebuild"]
-        }
-        IncidentCategory::HostPressure => &[],
-        IncidentCategory::DependencyAttribution => &[
-            "pin_state",
-            "upstream_fix_possibly_missing",
-            "known_issue_ids",
-        ],
-        IncidentCategory::Other => &[],
-    }
-}
-
 fn contains_any(text: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| text.contains(needle))
 }
 
+fn structured_field_values<'a>(text: &'a str, field: &str) -> Vec<&'a str> {
+    text.match_indices(field)
+        .filter_map(|(offset, _)| {
+            let mut rest = &text[offset + field.len()..];
+            rest = rest.trim_start_matches(|character: char| character.is_ascii_whitespace());
+            if let Some(stripped) = rest.strip_prefix(['"', '\'']) {
+                rest =
+                    stripped.trim_start_matches(|character: char| character.is_ascii_whitespace());
+            }
+            let Some(separator) = rest.chars().next() else {
+                return None;
+            };
+            if !matches!(separator, ':' | '=') {
+                return None;
+            }
+            rest = rest[separator.len_utf8()..]
+                .trim_start_matches(|character: char| character.is_ascii_whitespace());
+            if let Some(stripped) = rest.strip_prefix(['"', '\'']) {
+                rest = stripped;
+            }
+            let value_end = rest
+                .find(|character: char| {
+                    character.is_ascii_whitespace()
+                        || matches!(character, '"' | '\'' | ',' | '}' | ']' | ';')
+                })
+                .unwrap_or(rest.len());
+            Some(&rest[..value_end])
+        })
+        .collect()
+}
+
+fn structured_field_has_value(text: &str, field: &str, expected: &[&str]) -> bool {
+    structured_field_values(text, field)
+        .into_iter()
+        .any(|value| expected.contains(&value))
+}
+
+fn structured_field_is_positive(text: &str, field: &str) -> bool {
+    structured_field_values(text, field)
+        .into_iter()
+        .filter_map(|value| value.parse::<u64>().ok())
+        .any(|count| count > 0)
+}
+
+fn strong_signal_matches(category: IncidentCategory, text: &str) -> bool {
+    match category {
+        IncidentCategory::CassStatusHealth => structured_field_has_value(
+            text,
+            "health_class",
+            &["degraded", "unhealthy", "not_ready", "critical", "error"],
+        ),
+        IncidentCategory::IndexStaleMissing => {
+            structured_field_has_value(
+                text,
+                "index_freshness",
+                &["stale", "missing", "not_initialized", "outdated", "corrupt"],
+            ) || text.contains("err.kind=openread")
+                || text.contains("err.kind\":\"openread")
+        }
+        IncidentCategory::IndexStallProgress => {
+            text.contains("no forward progress")
+                || (text.contains("last_progress_at_ms")
+                    && contains_any(text, &["stalled", "stuck", "timed out", "timeout"]))
+        }
+        IncidentCategory::SearchZeroWorkspace => structured_field_has_value(
+            text,
+            "zero_result_diagnosis",
+            &[
+                "workspace_mismatch",
+                "no_candidates",
+                "zero_results",
+                "missing_workspace",
+            ],
+        ),
+        IncidentCategory::QuarantineOom => {
+            structured_field_is_positive(text, "quarantined_conversations")
+                || contains_any(text, &["index-ingest-out-of-memory", "ingest_oom"])
+        }
+        IncidentCategory::Semantic => {
+            structured_field_has_value(text, "semantic_fallback_lexical", &["true", "1"])
+                || structured_field_has_value(text, "fallback_mode", &["lexical"])
+        }
+        IncidentCategory::WatchSalvageIssues => {
+            contains_any(text, &["drop_close", "deferred_authoritative_db_rebuild"])
+        }
+        IncidentCategory::DependencyAttribution => {
+            contains_any(text, &["upstream_fix_possibly_missing", "known_issue_ids"])
+        }
+        IncidentCategory::StorageBusyCorrupt
+        | IncidentCategory::RemoteSyncAuth
+        | IncidentCategory::HostPressure
+        | IncidentCategory::Other => false,
+    }
+}
+
 fn matches_anchored_category(category: IncidentCategory, text: &str) -> bool {
     match category {
+        IncidentCategory::CassStatusHealth => {
+            contains_any(text, &["cass health", "cass status"])
+                && contains_any(text, &["degraded", "unhealthy", "not ready", "critical"])
+        }
+        IncidentCategory::IndexStaleMissing => {
+            contains_any(text, &["index", "fts_messages"])
+                && contains_any(
+                    text,
+                    &["stale", "missing", "not initialized", "outdated", "corrupt"],
+                )
+        }
+        IncidentCategory::IndexStallProgress => {
+            contains_any(text, &["index", "rebuild"])
+                && contains_any(text, &["stalled", "stuck", "no progress", "timed out"])
+        }
+        IncidentCategory::SearchZeroWorkspace => {
+            contains_any(text, &["search", "workspace"])
+                && contains_any(text, &["zero results", "no results", "mismatch", "missing"])
+        }
+        IncidentCategory::QuarantineOom => {
+            contains_any(text, &["quarantine", "ingest"])
+                && contains_any(text, &["oom", "out of memory", "failed"])
+        }
         IncidentCategory::StorageBusyCorrupt => {
             contains_any(
                 text,
@@ -442,7 +531,7 @@ fn matches_anchored_category(category: IncidentCategory, text: &str) -> bool {
                     ],
                 )
         }
-        _ => CATEGORIES
+        IncidentCategory::HostPressure => CATEGORIES
             .iter()
             .find(|definition| definition.category == category)
             .is_some_and(|definition| {
@@ -451,6 +540,7 @@ fn matches_anchored_category(category: IncidentCategory, text: &str) -> bool {
                     .iter()
                     .any(|signal| text.contains(&signal.to_ascii_lowercase()))
             }),
+        IncidentCategory::Other => false,
     }
 }
 
@@ -464,9 +554,7 @@ pub(crate) fn classify_text(text: &str) -> Vec<IncidentCategory> {
     CATEGORIES
         .iter()
         .filter(|definition| {
-            strong_signals(definition.category)
-                .iter()
-                .any(|signal| normalized.contains(signal))
+            strong_signal_matches(definition.category, &normalized)
                 || (anchored && matches_anchored_category(definition.category, &normalized))
         })
         .map(|definition| definition.category)
@@ -654,6 +742,13 @@ mod tests {
         assert!(
             classify_text("cass command timed out while rendering a report").is_empty(),
             "a generic timeout is not remote authentication failure"
+        );
+        assert!(
+            classify_text(
+                r#"{"health_class":"healthy","recommended_action":"none","index_freshness":"fresh","last_progress_at_ms":1770000000000,"candidate_workspaces":["/tmp/demo"],"quarantined_conversations":0,"semantic_fallback_lexical":false,"fallback_mode":"hybrid"}"#,
+            )
+            .is_empty(),
+            "healthy status field names and benign values must not become incidents"
         );
     }
 

@@ -89,7 +89,7 @@ Updated: 2026-05-09
 - Clamp limits to published caps (see `cass capabilities --json`).
 - Prefer `--max-tokens` to keep outputs small in LLM loops.
 - Use `cass pack ... --robot` when another agent or human needs a cited handoff. Do not run bare `cass` in automation.
-- Use `cass analytics incidents --json` for recurrent CASS operational clusters. Respect its caps and `count_scope`; execute `suggested_command.argv` directly instead of reparsing the display string.
+- Use `cass analytics incidents --json` for recurrent CASS operational clusters. Candidate discovery uses descending archive-row keyset paging, and `--max-sessions` bounds the newest-row window before filters. Respect its caps and `count_scope`; execute `suggested_command.argv` directly instead of reparsing the display string. The argv preserves the effective `--db` plus exact `--conversation-id`.
 - Read pack `health`, `freshness`, `privacy`, and `warnings` before copying evidence into another tool. Treat redaction and stale-evidence warnings as branchable contract fields.
 
 ## Pack handoff workflow

@@ -10,13 +10,15 @@
 //! the broadest) problem clusters, each with category breadth, dominant
 //! categories, composite host/path/source identity, archive-only state,
 //! redaction status, bounded evidence summaries, and a single safe `cass view`
-//! pointer — instead of the raw matches.
+//! pointer carrying the effective database and canonical archive row id —
+//! instead of the raw matches.
 //!
 //! Pure and offline: the caller (incident mining, bead `10.2`) feeds already
 //! bounded, redacted hits; this module only aggregates and ranks. The suggested
 //! command is always a safe, read-only `--json` pointer.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -280,7 +282,7 @@ impl TopSessionAccumulator {
 
     /// Produce the bounded ranked summary. `top_n` of zero still reports the
     /// totals and marks truncation when matching conversations exist.
-    pub(crate) fn finish(self, top_n: usize) -> TopSessionSummary {
+    pub(crate) fn finish(self, top_n: usize, archive_db_path: Option<&Path>) -> TopSessionSummary {
         let total_sessions = self.sessions.len();
 
         let mut ranked: Vec<SessionAccum> = self.sessions.into_values().collect();
@@ -337,21 +339,27 @@ impl TopSessionAccumulator {
                 } else {
                     RedactionStatus::NotApplicable
                 };
-                let display = format!(
-                    "cass view {} --source {} --json",
-                    shell_quote(&acc.source_path),
-                    shell_quote(&acc.source_id)
-                );
+                let mut argv = vec!["cass".to_string()];
+                if let Some(db_path) = archive_db_path {
+                    argv.extend(["--db".to_string(), db_path.to_string_lossy().into_owned()]);
+                }
+                argv.extend([
+                    "view".to_string(),
+                    acc.source_path.clone(),
+                    "--source".to_string(),
+                    acc.source_id.clone(),
+                    "--conversation-id".to_string(),
+                    acc.conversation_id.to_string(),
+                    "--json".to_string(),
+                ]);
+                let display = argv
+                    .iter()
+                    .map(|argument| shell_quote(argument))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 let suggested_command = SuggestedCommand {
                     kind: "view".to_string(),
-                    argv: vec![
-                        "cass".to_string(),
-                        "view".to_string(),
-                        acc.source_path.clone(),
-                        "--source".to_string(),
-                        acc.source_id.clone(),
-                        "--json".to_string(),
-                    ],
+                    argv,
                     display,
                 };
                 TopSessionEntry {
@@ -385,12 +393,13 @@ impl TopSessionAccumulator {
 
 /// Summarize categorized hits into the top `top_n` sessions by hit count (then
 /// category breadth, then stable archive row id). Pure; no I/O.
+#[cfg(test)]
 pub(crate) fn summarize_top_sessions(hits: &[IncidentHit], top_n: usize) -> TopSessionSummary {
     let mut accumulator = TopSessionAccumulator::default();
     for hit in hits {
         accumulator.push(hit.clone());
     }
-    accumulator.finish(top_n)
+    accumulator.finish(top_n, None)
 }
 
 #[cfg(test)]
@@ -583,12 +592,14 @@ mod tests {
         assert_eq!(
             summary.top_sessions[0].suggested_command.argv,
             vec![
-                "cass",
-                "view",
-                "/tmp/session with ' quote.jsonl",
-                "--source",
-                "remote host",
-                "--json",
+                "cass".to_string(),
+                "view".to_string(),
+                "/tmp/session with ' quote.jsonl".to_string(),
+                "--source".to_string(),
+                "remote host".to_string(),
+                "--conversation-id".to_string(),
+                fixture_conversation_id("s1").to_string(),
+                "--json".to_string(),
             ]
         );
     }

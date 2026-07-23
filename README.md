@@ -1144,11 +1144,17 @@ cass analytics incidents --max-sessions 500 --max-messages 50000 \
 The response ranks `top_sessions[]` by hit count and category breadth and keeps
 the exact `conversation_id`, agent, host, `source_id`, `source_path`,
 live/archive state, dominant categories, and a structured `cass view` argv.
+That argv carries the effective `--db` path plus `--conversation-id`, so it
+opens the exact ranked archive row even when multiple sessions share a source
+path or the report used a non-default database.
 `total_sessions`, `total_hits`, and `top_sessions_truncated` distinguish the
 bounded ranked result from the totals observed inside the scan scope.
 `discovery.partial` and `stop_reason` explicitly distinguish a bounded partial
 scan from a complete scan. Counts are scoped to scanned candidates whenever the
-scan is partial. Individual messages are inspected through a bounded 4,096-char
+scan is partial. Candidate discovery is descending archive-row keyset paging;
+`--max-sessions` bounds that newest-row window before dimensional filters, so a
+selective filter can truthfully return a partial empty result instead of scanning
+an unbounded archive. Individual messages are inspected through a bounded 4,096-char
 fragment; an oversized message returns `message-fragment-capped` rather than
 claiming a complete corpus scan. Raw prompt/tool content is always suppressed; evidence carries
 only BLAKE3 fingerprints and basename-redacted paths. The actionable

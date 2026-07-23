@@ -182,11 +182,23 @@
       "private_text_policy": "suppress_all",
       "hash_strategy": "blake3_256_v1",
       "fields_emitted": [
+        "conversation_id",
+        "session_id",
+        "agent",
+        "host",
+        "source_path",
+        "source_id",
+        "origin_host",
+        "exists_state",
+        "hit_count",
         "category",
-        "occurrence_count",
-        "content_fingerprint",
-        "evidence_path_basename",
-        "actionable_source_pointer"
+        "category_breadth",
+        "dominant_categories",
+        "redaction_status",
+        "evidence_summaries",
+        "content_fingerprints",
+        "evidence_paths",
+        "suggested_command"
       ],
       "fields_suppressed": [
         "raw_prompt_text",
