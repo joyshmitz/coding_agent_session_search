@@ -21,8 +21,16 @@
 //! (bead 8.3 / 6.1) rather than re-deriving it, and follows the additive,
 //! preservation-first remediation discipline from the remote-sync diagnostics
 //! (bead 8.4): a suggested next command is never destructive.
+//!
+//! The human per-source projection deliberately remains native to this remote
+//! source model. A remote probe can establish reachability, binary skew, and
+//! sync/mirror state, but it cannot establish the controller's local SQLite,
+//! lexical, or semantic readiness. Projecting a remote host into the local
+//! derived-asset truth table would therefore invent facts. Human output instead
+//! uses [`project_source_human_summary`] to render the same source and host state
+//! codes, reason, and preservation-safe command carried by the robot report.
 
-use crate::fleet_doctor_schema::{HostProbeStatus, classify_connection_failure};
+use crate::fleet_doctor_schema::{HostDoctorReport, HostProbeStatus, classify_connection_failure};
 use serde::{Deserialize, Serialize};
 
 /// Stable schema version for the source-doctor health wire format.
@@ -389,6 +397,125 @@ impl SourceDoctorEntry {
     }
 }
 
+/// Bounded human projection of one source-doctor entry and its corresponding
+/// fleet host report. This is intentionally not serialized: robot consumers
+/// continue to receive the stable [`SourceDoctorReport`] plus diagnostics
+/// schema, while the human surface gets a faithful, fixed-vocabulary view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceDoctorHumanSummary {
+    /// `ready` only for the native healthy state; otherwise attention is needed.
+    pub readiness: &'static str,
+    /// Short, fixed-vocabulary description of the native source state.
+    pub headline: &'static str,
+    /// Whether the remote host answered the source probe.
+    pub host_reached: bool,
+    /// Fixed explanation for why the native state was selected.
+    pub reason: &'static str,
+    /// Stable source and host codes, kept together for human/robot parity.
+    pub state_codes: String,
+    /// The exact preservation-safe command carried by the robot source entry.
+    pub safe_next_command: Option<String>,
+}
+
+impl SourceDoctorHumanSummary {
+    /// Render at most six stable lines. No local search-readiness claim appears
+    /// here because a remote source probe does not establish that fact.
+    pub fn render_lines(&self) -> Vec<String> {
+        let mut lines = vec![
+            format!("Readiness: {}", self.readiness),
+            format!("Source state: {}", self.headline),
+            format!(
+                "Host reached: {}",
+                if self.host_reached { "yes" } else { "no" }
+            ),
+            format!("Why: {}", self.reason),
+            format!("State codes: {}", self.state_codes),
+        ];
+        if let Some(command) = &self.safe_next_command {
+            lines.push(format!("Next safe command: {command}"));
+        }
+        lines
+    }
+}
+
+fn source_human_copy(state: SourceDoctorState) -> (&'static str, &'static str) {
+    match state {
+        SourceDoctorState::Reachable => (
+            "no classified source issue",
+            "the bounded probe found no required repair; optional maintenance and unobserved axes remain unknown",
+        ),
+        SourceDoctorState::Unreachable => (
+            "source host unreachable",
+            "the host could not be contacted; deeper state is unknown",
+        ),
+        SourceDoctorState::Timeout => (
+            "source probe timed out",
+            "the host did not answer within the bounded probe window",
+        ),
+        SourceDoctorState::AuthDenied => (
+            "source authentication denied",
+            "SSH authentication failed before source state could be inspected",
+        ),
+        SourceDoctorState::CassMissing => (
+            "remote cass binary missing",
+            "the host answered but cass was not found on its PATH",
+        ),
+        SourceDoctorState::OldCass => (
+            "remote cass binary is too old",
+            "the reported binary lacks the controller's required contract",
+        ),
+        SourceDoctorState::SourceRootUnreadable => (
+            "source root unreadable",
+            "the configured remote source path could not be read",
+        ),
+        SourceDoctorState::RemotePruned => (
+            "remote source pruned",
+            "the remote path is gone while local mirror evidence remains",
+        ),
+        SourceDoctorState::StaleIndex => (
+            "local index trails the source",
+            "newer sync evidence exists than the local archive index",
+        ),
+        SourceDoctorState::MissingLexicalMetadata => (
+            "lexical metadata missing",
+            "the source is reachable but its derived lexical metadata is absent",
+        ),
+        SourceDoctorState::MirrorAhead => (
+            "local mirror ahead",
+            "local archive evidence exceeds the current remote source",
+        ),
+        SourceDoctorState::MirrorBehind => (
+            "local mirror behind",
+            "the last sync was incomplete and the remote may hold more evidence",
+        ),
+    }
+}
+
+/// Project a source entry and its same-source host diagnostic into the bounded
+/// human vocabulary. The exact robot safe command is preserved verbatim.
+pub fn project_source_human_summary(
+    entry: &SourceDoctorEntry,
+    host: &HostDoctorReport,
+) -> SourceDoctorHumanSummary {
+    let (headline, reason) = source_human_copy(entry.state);
+    SourceDoctorHumanSummary {
+        readiness: if entry.state.is_healthy() {
+            "no-action-observed"
+        } else {
+            "attention-required"
+        },
+        headline,
+        host_reached: entry.host_reached,
+        reason,
+        state_codes: format!(
+            "source={} host={}",
+            entry.state.as_str(),
+            host.status.as_str()
+        ),
+        safe_next_command: entry.safe_next_command.clone(),
+    }
+}
+
 /// Aggregate rollup over the source entries. Unreachable sources are counted in
 /// their own bucket and never folded into "healthy".
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -642,6 +769,90 @@ mod tests {
         assert!(entry.safe_next_command.is_some());
         // DNS failure classifies as Unreachable at this layer.
         assert_eq!(entry.state, SourceDoctorState::Unreachable);
+    }
+
+    #[test]
+    fn sources_doctor_human_summary_is_bounded_and_preserves_native_state_codes() {
+        let mut old = reachable_healthy("legacy-node");
+        old.cass_current = Some(false);
+        let entry = SourceDoctorEntry::from_observation(&old);
+        let host = HostDoctorReport::skeleton(
+            "legacy-node",
+            crate::fleet_doctor_schema::Platform::linux_x86_64(),
+            HostProbeStatus::OldBinarySkew,
+            12,
+        );
+
+        let summary = project_source_human_summary(&entry, &host);
+        let lines = summary.render_lines();
+        assert_eq!(summary.readiness, "attention-required");
+        assert_eq!(summary.state_codes, "source=old_cass host=old-binary-skew");
+        assert_eq!(summary.safe_next_command, entry.safe_next_command);
+        assert_eq!(lines.len(), 6, "human source summary must stay bounded");
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some(
+                "Next safe command: cass sources setup --source legacy-node --upgrade   # bring the remote binary current"
+            )
+        );
+        assert!(
+            lines.iter().all(|line| !line.contains("Search usable now")),
+            "remote source state must not fabricate local search readiness"
+        );
+
+        let mut unreachable = reachable_healthy("offline-node");
+        unreachable.host_reachable = false;
+        unreachable.connection_error = Some("No route to host".to_string());
+        let entry = SourceDoctorEntry::from_observation(&unreachable);
+        let host = HostDoctorReport::skeleton(
+            "offline-node",
+            crate::fleet_doctor_schema::Platform::linux_x86_64(),
+            HostProbeStatus::Unreachable,
+            50,
+        );
+        let summary = project_source_human_summary(&entry, &host);
+        assert!(!summary.host_reached);
+        assert_eq!(summary.state_codes, "source=unreachable host=unreachable");
+        assert!(summary.render_lines().len() <= 6);
+
+        let mut unknown_version = reachable_healthy("unknown-version");
+        unknown_version.cass_current = None;
+        let entry = SourceDoctorEntry::from_observation(&unknown_version);
+        let host = HostDoctorReport::skeleton(
+            "unknown-version",
+            crate::fleet_doctor_schema::Platform::linux_x86_64(),
+            HostProbeStatus::Ok,
+            5,
+        );
+        let summary = project_source_human_summary(&entry, &host);
+        assert_eq!(summary.readiness, "no-action-observed");
+        assert_eq!(summary.headline, "no classified source issue");
+        assert!(summary.reason.contains("no required repair"));
+        assert!(summary.reason.contains("optional maintenance"));
+        assert!(summary.reason.contains("unobserved axes remain unknown"));
+        assert!(summary.safe_next_command.is_none());
+        assert_eq!(summary.render_lines().len(), 5);
+
+        let mut minor_gap = reachable_healthy("minor-gap");
+        minor_gap.cass_present = None;
+        minor_gap.cass_current = None;
+        apply_remote_binary(
+            &mut minor_gap,
+            RemoteBinaryOutcome::from_capability_gap(
+                crate::fleet_version_skew::CapabilityGap::Minor,
+            ),
+        );
+        let entry = SourceDoctorEntry::from_observation(&minor_gap);
+        let host = HostDoctorReport::skeleton(
+            "minor-gap",
+            crate::fleet_doctor_schema::Platform::linux_x86_64(),
+            HostProbeStatus::Ok,
+            5,
+        );
+        let summary = project_source_human_summary(&entry, &host);
+        assert_eq!(summary.readiness, "no-action-observed");
+        assert!(summary.reason.contains("optional maintenance"));
+        assert!(summary.safe_next_command.is_none());
     }
 
     #[test]

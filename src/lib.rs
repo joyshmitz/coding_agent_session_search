@@ -96582,13 +96582,48 @@ fn run_sources_doctor(
                     host_report.status =
                         crate::fleet_doctor_schema::HostProbeStatus::CommandNotFound;
                 }
-                let gap =
-                    crate::fleet_version_skew::assess_host(&host_report, env!("CARGO_PKG_VERSION"))
-                        .capability_gap;
+                let version_assessment =
+                    crate::fleet_version_skew::assess_host(&host_report, env!("CARGO_PKG_VERSION"));
+                let gap = version_assessment.capability_gap;
                 crate::source_doctor_health::apply_remote_binary(
                     &mut observation,
                     crate::source_doctor_health::RemoteBinaryOutcome::from_capability_gap(gap),
                 );
+                if matches!(
+                    gap,
+                    crate::fleet_version_skew::CapabilityGap::Major
+                        | crate::fleet_version_skew::CapabilityGap::BinaryMissing
+                ) {
+                    host_report.status = if gap == crate::fleet_version_skew::CapabilityGap::Major {
+                        crate::fleet_doctor_schema::HostProbeStatus::OldBinarySkew
+                    } else {
+                        crate::fleet_doctor_schema::HostProbeStatus::CommandNotFound
+                    };
+                    host_report.timed_out = false;
+                    host_report.unreachable = false;
+                    let attribution = if gap == crate::fleet_version_skew::CapabilityGap::Major {
+                        crate::root_cause_projection::project_root_cause(
+                            &crate::root_cause_projection::ProjectionSignals {
+                                binary_behind_contract: true,
+                                ..Default::default()
+                            },
+                        )
+                    } else {
+                        crate::root_cause_taxonomy::RootCauseAttribution::unattributed(
+                            "remote cass binary was not found on PATH; no running version was observed",
+                        )
+                    };
+                    host_report.likely_root_cause = Some(attribution.family);
+                    host_report.root_cause = Some(attribution);
+                    host_report.recommended_action =
+                        version_assessment.install_hint.command.clone().or_else(|| {
+                            version_assessment
+                                .install_hint
+                                .manual_steps
+                                .first()
+                                .cloned()
+                        });
+                }
                 let evidence = gather_source_sync_evidence(source, &checks);
                 crate::source_doctor_health::apply_sync_evidence(&mut observation, &evidence);
             } else {
@@ -96633,7 +96668,20 @@ fn run_sources_doctor(
             serde_json::to_string_pretty(&output).unwrap_or_default()
         );
     } else {
-        for diag in &all_diagnostics {
+        if health_report.sources.len() != all_diagnostics.len() {
+            return Err(CliError::unknown(format!(
+                "source doctor projection mismatch: {} health entries for {} diagnostics",
+                health_report.sources.len(),
+                all_diagnostics.len()
+            )));
+        }
+        for (entry, diag) in health_report.sources.iter().zip(&all_diagnostics) {
+            if entry.source_id != diag.source_id {
+                return Err(CliError::unknown(format!(
+                    "source doctor projection mismatch: health source {:?} paired with diagnostic {:?}",
+                    entry.source_id, diag.source_id
+                )));
+            }
             println!();
             println!("{}", format!("Checking source: {}", diag.source_id).bold());
             println!();
@@ -96658,6 +96706,13 @@ fn run_sources_doctor(
                 }
             }
 
+            let human =
+                crate::source_doctor_health::project_source_human_summary(entry, &diag.host_report);
+            println!();
+            for line in human.render_lines() {
+                println!("  {line}");
+            }
+
             println!();
             println!(
                 "Summary: {} passed, {} warnings, {} failed",
@@ -96670,7 +96725,10 @@ fn run_sources_doctor(
 
     // Set exit code based on results
     let total_failed: usize = all_diagnostics.iter().map(|d| d.failed).sum();
-    if total_failed > 0 {
+    if total_failed > 0
+        || health_report.summary.unhealthy > 0
+        || health_report.summary.unreached > 0
+    {
         std::process::exit(1);
     }
 
@@ -97132,7 +97190,7 @@ fn gather_source_sync_evidence(
         .any(|c| c.name.starts_with("Remote Path") && c.message.contains("exists but is empty"));
 
     let data_dir = default_data_dir();
-    let mirror_dir = data_dir.join("remotes").join(&source.name);
+    let mirror_dir = data_dir.join("remotes").join(&source.name).join("mirror");
     let local_mirror_nonempty = std::fs::read_dir(&mirror_dir)
         .map(|mut entries| entries.any(|entry| entry.is_ok()))
         .unwrap_or(false);

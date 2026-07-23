@@ -542,6 +542,13 @@ Remote source diagnostics are intentionally local-only. `cass triage --json`,
 provenance rows. They do not open SSH sessions, mutate remote machines, or
 rewrite provider session logs while classifying source gaps.
 
+`cass sources doctor` is the explicit networked exception: it performs bounded,
+read-only probes of configured source hosts. Its per-source human summary keeps
+the same native reachability, binary-health, and mirror/sync state codes and
+safe command as the JSON report. It intentionally does not claim local search
+readiness, because a remote host probe cannot establish the controller's local
+SQLite, lexical, or semantic asset state.
+
 This matters because agent harnesses can prune their own logs. If a laptop is
 retired, a remote path disappears, or a provider truncates older sessions, the
 cass archive DB and cass-owned local mirror may be the only remaining evidence

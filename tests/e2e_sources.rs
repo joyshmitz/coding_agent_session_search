@@ -1950,7 +1950,10 @@ fn prove_reachable_source_doctor_scenario(
     let case_root = fixture_root.join(scenario.expected_state);
     let config_dir = case_root.join("config");
     let data_dir = case_root.join("data");
-    let mirror_dir = data_dir.join("remotes").join("fixture-source");
+    let mirror_dir = data_dir
+        .join("remotes")
+        .join("fixture-source")
+        .join("mirror");
     fs::create_dir_all(&config_dir)
         .map_err(|err| format!("{}: create config dir: {err}", scenario.expected_state))?;
     fs::create_dir_all(&mirror_dir)
@@ -2070,9 +2073,9 @@ paths = ["~/.claude/projects"]
         .status
         .code()
         .ok_or_else(|| format!("{}: cass terminated by signal", scenario.expected_state))?;
-    if !matches!(exit, 0 | 1) {
+    if exit != 1 {
         return Err(format!(
-            "{}: unexpected exit={exit}, stdout={}, stderr={}",
+            "{}: unhealthy native source state must exit 1, got exit={exit}, stdout={}, stderr={}",
             scenario.expected_state,
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
@@ -2161,6 +2164,94 @@ paths = ["~/.claude/projects"]
         ));
     }
 
+    let host_status = payload
+        .pointer("/diagnostics/0/host_report/status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{}: missing host status", scenario.expected_state))?;
+    if matches!(scenario.expected_state, "cass_missing" | "old_cass") {
+        let expected_host_status = if scenario.expected_state == "cass_missing" {
+            "command-not-found"
+        } else {
+            "old-binary-skew"
+        };
+        let expected_root_cause = if scenario.expected_state == "cass_missing" {
+            "unknown"
+        } else {
+            "old-binary-skew"
+        };
+        if host_status != expected_host_status
+            || payload
+                .pointer("/diagnostics/0/host_report/cass_version")
+                .and_then(Value::as_str)
+                != scenario.cass_version
+            || payload
+                .pointer("/diagnostics/0/host_report/likely_root_cause")
+                .and_then(Value::as_str)
+                != Some(expected_root_cause)
+            || payload
+                .pointer("/diagnostics/0/host_report/root_cause/family")
+                .and_then(Value::as_str)
+                != Some(expected_root_cause)
+            || !payload
+                .pointer("/diagnostics/0/host_report/recommended_action")
+                .and_then(Value::as_str)
+                .is_some_and(|action| !action.trim().is_empty())
+        {
+            return Err(format!(
+                "{}: binary host report contradicts native source state: {payload}",
+                scenario.expected_state
+            ));
+        }
+    }
+
+    let mut human_cmd = Command::new(util::cass_bin());
+    human_cmd
+        .args(["sources", "doctor"])
+        .current_dir(&case_root)
+        .env("HOME", &case_root)
+        .env("XDG_CONFIG_HOME", &config_dir)
+        .env("CASS_DATA_DIR", &data_dir)
+        .env("CASS_TEST_SOURCES_DOCTOR_PROBE", &probe_path)
+        .env("CODING_AGENT_SEARCH_NO_UPDATE_PROMPT", "1")
+        .env("NO_COLOR", "1");
+    let human_output = util::timeout::spawn_with_timeout_or_diag(
+        human_cmd,
+        &format!("{}_human", scenario.expected_state),
+        Some(&data_dir),
+        std::time::Duration::from_secs(10),
+    );
+    let human_exit = human_output.status.code().ok_or_else(|| {
+        format!(
+            "{} human: cass terminated by signal",
+            scenario.expected_state
+        )
+    })?;
+    if human_exit != 1 {
+        return Err(format!(
+            "{} human: unhealthy native source state must exit 1, got exit={human_exit}, stdout={}, stderr={}",
+            scenario.expected_state,
+            String::from_utf8_lossy(&human_output.stdout),
+            String::from_utf8_lossy(&human_output.stderr)
+        ));
+    }
+    let human = String::from_utf8(human_output.stdout)
+        .map_err(|err| format!("{} human stdout not UTF-8: {err}", scenario.expected_state))?;
+    let expected_codes = format!(
+        "State codes: source={} host={host_status}",
+        scenario.expected_state
+    );
+    if !human.contains(&expected_codes)
+        || !human.contains(&format!("Next safe command: {safe_next}"))
+        || !human.contains("Readiness: attention-required")
+        || !human.contains("Host reached: yes")
+        || !human.contains("Why: ")
+    {
+        return Err(format!(
+            "{}: human/robot native-state parity failed; expected codes={expected_codes:?}, safe_next={safe_next:?}, stdout={human}",
+            scenario.expected_state
+        ));
+    }
+
     let sync_after = read_optional_bytes(&sync_status_path)
         .map_err(|err| format!("{}: re-read sync status: {err}", scenario.expected_state))?;
     let db_after = read_optional_bytes(&db_path)
@@ -2244,6 +2335,13 @@ fn sources_doctor_reachable_states_use_live_real_binary_reduction() -> Result<()
             remote_path: "missing",
             local_mirror_nonempty: true,
             sync: ReachableDoctorSyncFixture::Failed,
+        },
+        ReachableDoctorScenario {
+            expected_state: "source_root_unreadable",
+            cass_version: Some(env!("CARGO_PKG_VERSION")),
+            remote_path: "missing",
+            local_mirror_nonempty: false,
+            sync: ReachableDoctorSyncFixture::None,
         },
     ];
     let tmp = tempfile::tempdir().map_err(|err| format!("create fixture root: {err}"))?;

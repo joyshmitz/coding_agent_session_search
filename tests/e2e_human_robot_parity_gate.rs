@@ -885,6 +885,37 @@ fn sources_doctor_recovery_surface_is_in_parity() -> Result<(), String> {
             head(human)
         ));
     }
+    let source_state = source
+        .get("state")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("[drift={robot_drift}] source missing native state code"))?;
+    let host_state = robot
+        .pointer("/diagnostics/0/host_report/status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("[drift={robot_drift}] host report missing status code"))?;
+    let state_codes = format!("State codes: source={source_state} host={host_state}");
+    if !human.contains(&state_codes) {
+        return Err(format!(
+            "[drift={human_drift}] sources doctor human output diverged from robot state codes {state_codes:?}; head: {}",
+            head(human)
+        ));
+    }
+    let safe_line = format!("Next safe command: {safe_cmd}");
+    if !human.contains(&safe_line) {
+        return Err(format!(
+            "[drift={human_drift}] sources doctor human output did not preserve the robot safe command; head: {}",
+            head(human)
+        ));
+    }
+    if !human.contains("Readiness: attention-required")
+        || !human.contains("Host reached: no")
+        || !human.contains("Why: the host could not be contacted; deeper state is unknown")
+    {
+        return Err(format!(
+            "[drift={human_drift}] sources doctor human output omitted the bounded native-state explanation; head: {}",
+            head(human)
+        ));
+    }
     // Refusal — the human surface never carries destructive guidance.
     if !text_is_clean(human) {
         return Err(format!(
