@@ -130,6 +130,7 @@ separate slice whose closure proof is `e2e` + `logs`.
 |--------|-----------|----------|
 | Incident category schema (id/signals/family/privacy/probe) | `unit` (stable ordering; unknown-id non-mapping; family/privacy assignments) + `golden` | — |
 | Bounded candidate discovery (caps/progress/partial) | `unit` (caps + partial results) + `e2e` (bounded, never unbounded scan) + `logs` | — |
+| Ranked top-session pointers + category breadth | `unit`/`integration` (canonical row identity, ranking, provenance, existence, exact argv, redaction) + `golden` + `e2e` (robot/human parity) + `logs` | — |
 | Redaction provenance + privacy audit | `unit` (privacy tier enforced) + `golden` redaction | — |
 
 ## Epic 11 — Real-binary proof gates, regression corpus, and canonical workflow docs

@@ -1128,6 +1128,32 @@ cass search "TODO" --agent claude --robot --aggregate workspace
 
 Top 10 buckets are returned per field, with `other_count` for remaining items.
 
+#### Bounded incident mining
+
+Mine recurrent CASS operational incidents from the canonical archive without
+dumping raw session text:
+
+```bash
+cass analytics incidents --limit 10 --json
+
+# Tighten the bounded scan for automation or a very large archive
+cass analytics incidents --max-sessions 500 --max-messages 50000 \
+  --max-bytes 67108864 --budget-ms 5000 --json
+```
+
+The response ranks `top_sessions[]` by hit count and category breadth and keeps
+the exact `conversation_id`, agent, host, `source_id`, `source_path`,
+live/archive state, dominant categories, and a structured `cass view` argv.
+`total_sessions`, `total_hits`, and `top_sessions_truncated` distinguish the
+bounded ranked result from the totals observed inside the scan scope.
+`discovery.partial` and `stop_reason` explicitly distinguish a bounded partial
+scan from a complete scan. Counts are scoped to scanned candidates whenever the
+scan is partial. Individual messages are inspected through a bounded 4,096-char
+fragment; an oversized message returns `message-fragment-capped` rather than
+claiming a complete corpus scan. Raw prompt/tool content is always suppressed; evidence carries
+only BLAKE3 fingerprints and basename-redacted paths. The actionable
+`source_path` remains visible solely so the returned view command works.
+
 ### Chained Search (Pipeline Mode)
 
 Chain multiple searches together by piping session paths from one search to another:

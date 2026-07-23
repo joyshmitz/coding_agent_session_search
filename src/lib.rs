@@ -1497,7 +1497,7 @@ pub enum Commands {
     Import(ImportCommand),
     /// Token usage, tool, and model analytics
     ///
-    /// Subcommands: status, tokens, tools, models, rebuild, validate.
+    /// Subcommands: status, tokens, tools, models, incidents, rebuild, validate.
     /// All subcommands share time-range, dimensional, and output flags.
     ///
     /// # Examples
@@ -2498,7 +2498,7 @@ impl std::fmt::Display for AnalyticsBucketing {
     }
 }
 
-/// Subcommands for analytics (token usage, tool, and model breakdowns).
+/// Subcommands for analytics (token/tool/model breakdowns and bounded incident mining).
 ///
 /// All subcommands share time-range, dimensional-filter, and output flags
 /// via clap's `flatten` on [`AnalyticsCommon`].
@@ -2536,6 +2536,26 @@ pub enum AnalyticsCommand {
         /// Time bucket for aggregation
         #[arg(long, value_enum, default_value_t = AnalyticsBucketing::Day)]
         group_by: AnalyticsBucketing,
+    },
+    /// Mine recurrent CASS incident categories from the canonical archive under strict caps
+    Incidents {
+        #[command(flatten)]
+        common: AnalyticsCommon,
+        /// Maximum ranked incident sessions returned
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        /// Maximum archive conversations scanned (hard ceiling: 10,000)
+        #[arg(long, default_value_t = crate::incident_discovery::DEFAULT_MAX_FILES)]
+        max_sessions: u64,
+        /// Maximum archive messages inspected
+        #[arg(long, default_value_t = crate::incident_discovery::DEFAULT_MAX_LINES)]
+        max_messages: u64,
+        /// Maximum UTF-8 message-content bytes inspected
+        #[arg(long, default_value_t = crate::incident_discovery::DEFAULT_MAX_BYTES)]
+        max_bytes: u64,
+        /// Wall-clock scan budget in milliseconds
+        #[arg(long, default_value_t = crate::incident_discovery::DEFAULT_BUDGET_MS)]
+        budget_ms: u64,
     },
     /// Rebuild / backfill analytics rollup tables with progress output
     Rebuild {
@@ -3055,9 +3075,17 @@ fn data_dir_insertion_index(rest: &[String], command_index: usize) -> Option<usi
         "analytics" => rest
             .get(command_index + 1)
             .is_some_and(|action| {
-                ["status", "tokens", "tools", "models", "rebuild", "validate"]
-                    .iter()
-                    .any(|candidate| action.eq_ignore_ascii_case(candidate))
+                [
+                    "status",
+                    "tokens",
+                    "tools",
+                    "models",
+                    "incidents",
+                    "rebuild",
+                    "validate",
+                ]
+                .iter()
+                .any(|candidate| action.eq_ignore_ascii_case(candidate))
             })
             .then_some(command_index + 2),
         _ => None,
@@ -4522,7 +4550,9 @@ fn recover_structured_format_aliases(rest: &mut Vec<String>, corrections: &mut V
 
 fn command_accepts_limit_alias(rest: &[String]) -> bool {
     match rest.first().map(String::as_str) {
-        Some("analytics") => rest.get(1).is_some_and(|arg| arg == "tools"),
+        Some("analytics") => rest
+            .get(1)
+            .is_some_and(|arg| matches!(arg.as_str(), "tools" | "incidents")),
         Some("context" | "pack" | "search" | "sessions") => true,
         _ => false,
     }
@@ -5541,10 +5571,19 @@ fn format_missing_subcommand_error(args: &[String]) -> String {
 
     let (subcommands, examples): (&[&str], &[&str]) = match group {
         "analytics" => (
-            &["status", "tokens", "tools", "models", "rebuild", "validate"],
+            &[
+                "status",
+                "tokens",
+                "tools",
+                "models",
+                "incidents",
+                "rebuild",
+                "validate",
+            ],
             &[
                 "cass analytics status --json",
                 "cass analytics tokens --days 7 --group-by day --json",
+                "cass analytics incidents --limit 10 --json",
                 "cass analytics rebuild --json",
             ],
         ),
@@ -16330,6 +16369,7 @@ fn run_analytics(cmd: AnalyticsCommand, db_path: Option<PathBuf>, cli: &Cli) -> 
         AnalyticsCommand::Tokens { common, .. } => ("tokens", common),
         AnalyticsCommand::Tools { common, .. } => ("tools", common),
         AnalyticsCommand::AnalyticsModels { common, .. } => ("models", common),
+        AnalyticsCommand::Incidents { common, .. } => ("incidents", common),
         AnalyticsCommand::Rebuild { common, .. } => ("rebuild", common),
         AnalyticsCommand::Validate { common, .. } => ("validate", common),
     };
@@ -16357,6 +16397,22 @@ fn run_analytics(cmd: AnalyticsCommand, db_path: Option<PathBuf>, cli: &Cli) -> 
         AnalyticsCommand::AnalyticsModels { common, group_by } => {
             run_analytics_models(common, *group_by, db_path.as_ref())?
         }
+        AnalyticsCommand::Incidents {
+            common,
+            limit,
+            max_sessions,
+            max_messages,
+            max_bytes,
+            budget_ms,
+        } => run_analytics_incidents(
+            common,
+            *limit,
+            *max_sessions,
+            *max_messages,
+            *max_bytes,
+            *budget_ms,
+            db_path.as_ref(),
+        )?,
     };
 
     let elapsed_ms = start.elapsed().as_millis() as u64;
@@ -16382,6 +16438,7 @@ fn run_analytics(cmd: AnalyticsCommand, db_path: Option<PathBuf>, cli: &Cli) -> 
             | AnalyticsCommand::Tokens { .. }
             | AnalyticsCommand::Rebuild { .. }
             | AnalyticsCommand::Tools { .. }
+            | AnalyticsCommand::Incidents { .. }
             | AnalyticsCommand::Validate { .. }
             | AnalyticsCommand::AnalyticsModels { .. } => format!(
                 "{} analytics {}",
@@ -16842,6 +16899,81 @@ fn run_analytics_status(
     analytics::query::query_status(&conn, &filter)
         .map(|r| r.to_json())
         .map_err(analytics_query_cli_error)
+}
+
+fn incident_usage_error(message: impl Into<String>) -> CliError {
+    CliError {
+        code: 2,
+        kind: CliErrorKind::Usage.kind_str(),
+        message: message.into(),
+        hint: Some(
+            "Use positive bounded values; --limit <= 100 and --max-sessions <= 10000.".to_string(),
+        ),
+        retryable: false,
+    }
+}
+
+/// Run `cass analytics incidents` — bounded, read-only incident mining over
+/// canonical archive conversations and messages.
+fn run_analytics_incidents(
+    common: &AnalyticsCommon,
+    limit: usize,
+    max_sessions: u64,
+    max_messages: u64,
+    max_bytes: u64,
+    budget_ms: u64,
+    db_path_override: Option<&PathBuf>,
+) -> CliResult<serde_json::Value> {
+    if limit == 0 || limit > 100 {
+        return Err(incident_usage_error(format!(
+            "--limit must be between 1 and 100 (got {limit})"
+        )));
+    }
+    if max_sessions == 0 || max_sessions > 10_000 {
+        return Err(incident_usage_error(format!(
+            "--max-sessions must be between 1 and 10000 (got {max_sessions})"
+        )));
+    }
+    for (flag, value) in [
+        ("--max-messages", max_messages),
+        ("--max-bytes", max_bytes),
+        ("--budget-ms", budget_ms),
+    ] {
+        if value == 0 {
+            return Err(incident_usage_error(format!(
+                "{flag} must be greater than zero"
+            )));
+        }
+    }
+
+    let conn = open_franken_analytics_db(&common.data_dir, db_path_override)?;
+    let filter = analytics_query_filter(&conn, common)?;
+    let caps = crate::incident_discovery::DiscoveryCaps {
+        max_files: max_sessions,
+        max_lines: max_messages,
+        max_bytes,
+        budget_ms,
+        max_evidence: crate::incident_discovery::DEFAULT_MAX_EVIDENCE,
+    };
+    let report = crate::incident_discovery::scan_incidents(&conn, &filter, caps, limit).map_err(
+        |error| CliError {
+            code: 9,
+            kind: CliErrorKind::DbError.kind_str(),
+            message: format!("Incident mining failed: {error:#}"),
+            hint: Some(
+                "Check the canonical archive with 'cass doctor --json'; reduce the scan caps if the archive is very large."
+                    .to_string(),
+            ),
+            retryable: false,
+        },
+    )?;
+    serde_json::to_value(report).map_err(|error| CliError {
+        code: 9,
+        kind: CliErrorKind::SerializeMessage.kind_str(),
+        message: format!("Failed to serialize incident report: {error}"),
+        hint: None,
+        retryable: false,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -19934,6 +20066,7 @@ fn analytics_requests_structured_output(cmd: &AnalyticsCommand, cli: &Cli) -> bo
         | AnalyticsCommand::Tokens { common, .. }
         | AnalyticsCommand::Tools { common, .. }
         | AnalyticsCommand::AnalyticsModels { common, .. }
+        | AnalyticsCommand::Incidents { common, .. }
         | AnalyticsCommand::Rebuild { common, .. }
         | AnalyticsCommand::Validate { common, .. } => common.json,
     };
@@ -21035,13 +21168,14 @@ fn render_analytics_docs() -> Vec<String> {
     vec![
         "analytics:".into(),
         String::new(),
-        "# cass analytics — Token, Tool, and Model Analytics".into(),
+        "# cass analytics — Usage Analytics and Bounded Incident Mining".into(),
         String::new(),
         "## Subcommands".into(),
         "  status    Row counts, freshness, coverage, drift warnings".into(),
         "  tokens    Token usage over time with dimensional breakdowns".into(),
         "  tools     Per-tool invocation counts and derived metrics".into(),
         "  models    Top models by usage and coverage statistics".into(),
+        "  incidents Bounded recurrent CASS-incident mining over the canonical archive".into(),
         "  rebuild   Rebuild/backfill rollup tables with progress output".into(),
         "  validate  Check rollup invariants and detect data drift".into(),
         String::new(),
@@ -21099,6 +21233,31 @@ fn render_analytics_docs() -> Vec<String> {
         "    Usually token_daily_stats; token_usage when filters require raw provenance recovery.".into(),
         "  Models only available for connectors that report model names".into(),
         "    (claude_code, codex, pi_agent, factory, opencode, cursor).".into(),
+        String::new(),
+        "### analytics incidents".into(),
+        "  Read-only; scans canonical archive conversations/messages most-recent-first.".into(),
+        "  data.schema_version: 2".into(),
+        "  data.count_scope: all_matching_candidates | scanned_candidates_partial".into(),
+        "  data.discovery: { caps, files_considered, files_scanned, lines_scanned,".into(),
+        "                    bytes_scanned, elapsed_ms, stop_reason, timed_out, partial,".into(),
+        "                    evidence_truncated, evidence }".into(),
+        "  data.top_sessions: [{ conversation_id, session_id, agent, host, source_id,".into(),
+        "                        origin_host?, source_path, exists_state, hit_count,".into(),
+        "                        category_breadth, dominant_categories, evidence_summaries,".into(),
+        "                        redaction_status, suggested_command: { kind, argv, display } }]".into(),
+        "  data.total_sessions, data.total_hits, data.top_sessions_truncated: ranked-scope totals".into(),
+        "  data.scan_units.message_fragment_chars: per-message inspection bound (4096)".into(),
+        "    Oversized messages stop with discovery.stop_reason=message-fragment-capped.".into(),
+        "  data.redaction: { private_text_policy, hash_strategy, fields_emitted,".into(),
+        "                    fields_suppressed, opt_in_flags }".into(),
+        "  --limit N           Ranked sessions returned (1..100; default 10)".into(),
+        "  --max-sessions N    Archive conversations scanned (1..10000; default 2000)".into(),
+        "  --max-messages N    Archive messages inspected (default 250000)".into(),
+        "  --max-bytes N       UTF-8 content bytes inspected (default 268435456)".into(),
+        "  --budget-ms N       Wall-clock scan budget (default 8000)".into(),
+        "  Raw prompt/tool text is always suppressed. source_path is retained only as the".into(),
+        "  actionable archive pointer; evidence paths are basename-redacted.".into(),
+        "  Example: cass analytics incidents --limit 10 --json".into(),
         String::new(),
         "### analytics rebuild".into(),
         "  data.track: string ('a')".into(),
@@ -83047,6 +83206,133 @@ fn build_response_schemas() -> std::collections::BTreeMap<String, serde_json::Va
 
     schemas.insert("search".to_string(), response_schema_search());
     schemas.insert("pack".to_string(), response_schema_pack());
+    schemas.insert(
+        "analytics-incidents".to_string(),
+        json!({
+            "type": "object",
+            "description": "cass analytics incidents --json: bounded read-only incident mining over canonical archive conversations/messages.",
+            "properties": {
+                "command": { "type": "string", "const": "analytics/incidents" },
+                "data": {
+                    "type": "object",
+                    "properties": {
+                        "schema_version": { "type": "integer", "const": 2 },
+                        "count_scope": { "type": "string", "enum": ["all_matching_candidates", "scanned_candidates_partial"] },
+                        "scan_units": {
+                            "type": "object",
+                            "properties": {
+                                "files": { "type": "string" },
+                                "lines": { "type": "string" },
+                                "bytes": { "type": "string" },
+                                "candidate_order": { "type": "string" },
+                                "message_fragment_chars": { "type": "integer" }
+                            },
+                            "required": ["files", "lines", "bytes", "candidate_order", "message_fragment_chars"]
+                        },
+                        "discovery": {
+                            "type": "object",
+                            "properties": {
+                                "caps": {
+                                    "type": "object",
+                                    "properties": {
+                                        "max_files": { "type": "integer" },
+                                        "max_lines": { "type": "integer" },
+                                        "max_bytes": { "type": "integer" },
+                                        "budget_ms": { "type": "integer" },
+                                        "max_evidence": { "type": "integer" }
+                                    },
+                                    "required": ["max_files", "max_lines", "max_bytes", "budget_ms", "max_evidence"]
+                                },
+                                "files_considered": { "type": "integer" },
+                                "files_scanned": { "type": "integer" },
+                                "lines_scanned": { "type": "integer" },
+                                "bytes_scanned": { "type": "integer" },
+                                "elapsed_ms": { "type": "integer" },
+                                "stop_reason": { "type": "string", "enum": ["completed", "files-capped", "lines-capped", "bytes-capped", "message-fragment-capped", "timed-out"] },
+                                "timed_out": { "type": "boolean" },
+                                "partial": { "type": "boolean" },
+                                "evidence_truncated": { "type": "boolean" },
+                                "evidence": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "file": { "type": "string" },
+                                            "line": { "type": "integer" },
+                                            "category": { "type": "string" },
+                                            "reason": { "type": "string" }
+                                        },
+                                        "required": ["file", "line"]
+                                    }
+                                }
+                            },
+                            "required": ["caps", "files_considered", "files_scanned", "lines_scanned", "bytes_scanned", "elapsed_ms", "stop_reason", "timed_out", "partial", "evidence_truncated", "evidence"]
+                        },
+                        "top_sessions": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "conversation_id": { "type": "integer" },
+                                    "session_id": { "type": "string" },
+                                    "agent": { "type": "string" },
+                                    "host": { "type": "string" },
+                                    "source_id": { "type": "string" },
+                                    "origin_host": { "type": ["string", "null"] },
+                                    "source_path": { "type": "string" },
+                                    "exists_state": { "type": "string", "enum": ["exists", "archive_only", "unknown"] },
+                                    "hit_count": { "type": "integer" },
+                                    "category_breadth": { "type": "integer" },
+                                    "dominant_categories": { "type": "array", "items": { "type": "string" } },
+                                    "evidence_summaries": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "category": { "type": "string" },
+                                                "hit_count": { "type": "integer" },
+                                                "content_fingerprints": { "type": "array", "items": { "type": "string" } },
+                                                "evidence_paths": { "type": "array", "items": { "type": "string" } }
+                                            },
+                                            "required": ["category", "hit_count", "content_fingerprints", "evidence_paths"]
+                                        }
+                                    },
+                                    "redaction_status": { "type": "string", "enum": ["redacted", "not_applicable"] },
+                                    "suggested_command": {
+                                        "type": "object",
+                                        "properties": {
+                                            "kind": { "type": "string", "const": "view" },
+                                            "argv": { "type": "array", "items": { "type": "string" } },
+                                            "display": { "type": "string" }
+                                        },
+                                        "required": ["kind", "argv", "display"]
+                                    }
+                                },
+                                "required": ["conversation_id", "session_id", "agent", "host", "source_id", "source_path", "exists_state", "hit_count", "category_breadth", "dominant_categories", "evidence_summaries", "redaction_status", "suggested_command"]
+                            }
+                        },
+                        "total_sessions": { "type": "integer" },
+                        "total_hits": { "type": "integer" },
+                        "top_sessions_truncated": { "type": "boolean" },
+                        "redaction": {
+                            "type": "object",
+                            "properties": {
+                                "private_text_policy": { "type": "string", "const": "suppress_all" },
+                                "hash_strategy": { "type": "string", "const": "blake3_256_v1" },
+                                "fields_emitted": { "type": "array", "items": { "type": "string" } },
+                                "fields_suppressed": { "type": "array", "items": { "type": "string" } },
+                                "opt_in_flags": { "type": "array", "items": { "type": "string" } }
+                            },
+                            "required": ["private_text_policy", "hash_strategy", "fields_emitted", "fields_suppressed", "opt_in_flags"]
+                        }
+                    },
+                    "required": ["schema_version", "count_scope", "scan_units", "discovery", "top_sessions", "total_sessions", "total_hits", "top_sessions_truncated", "redaction"]
+                },
+                "_meta": { "type": "object" }
+            },
+            "required": ["command", "data", "_meta"]
+        }),
+    );
 
     schemas.insert(
         "status".to_string(),
@@ -84496,6 +84782,49 @@ mod response_schema_tests {
     }
 
     #[test]
+    fn analytics_incidents_schema_is_discoverable_and_explicit() {
+        let schemas = build_response_schemas();
+        let schema = &schemas["analytics-incidents"];
+        assert_eq!(
+            schema["properties"]["command"]["const"],
+            "analytics/incidents"
+        );
+        assert_eq!(
+            schema["properties"]["data"]["properties"]["schema_version"]["const"],
+            2
+        );
+
+        let data_required = schema["properties"]["data"]["required"]
+            .as_array()
+            .expect("analytics incidents data required fields");
+        for field in [
+            "discovery",
+            "top_sessions",
+            "total_sessions",
+            "total_hits",
+            "top_sessions_truncated",
+            "redaction",
+        ] {
+            assert!(
+                data_required
+                    .iter()
+                    .any(|required| required.as_str() == Some(field)),
+                "analytics incidents schema omits required field {field}"
+            );
+        }
+        assert_eq!(
+            schema["properties"]["data"]["properties"]["redaction"]["properties"]["hash_strategy"]
+                ["const"],
+            "blake3_256_v1"
+        );
+        assert_eq!(
+            schema["properties"]["data"]["properties"]["top_sessions"]["items"]["properties"]["suggested_command"]
+                ["properties"]["argv"]["type"],
+            "array"
+        );
+    }
+
+    #[test]
     fn b7tb0_runtime_and_cache_outcome_schemas_are_discoverable() {
         let schemas = build_response_schemas();
         assert!(
@@ -85500,7 +85829,10 @@ fn try_load_indexed_conversation_from_db_with_source(
     if !db_path.exists() {
         return None;
     }
-    let storage = crate::storage::sqlite::FrankenStorage::open(db_path).ok()?;
+    // `cass view` is an inspection surface. Archive fallback must therefore use
+    // the read-only connection lane and must never run migrations or schema
+    // repair merely because an incident-summary pointer was followed.
+    let storage = crate::storage::sqlite::FrankenStorage::open_readonly(db_path).ok()?;
     let source_path = source_path.to_string_lossy();
     let source_id = canonical_followup_source_id(source_id);
     if let Some(source_id) = source_id.as_deref() {
@@ -100914,6 +101246,7 @@ mod subcommand_robot_output_tests {
                 vec!["cass", "sessions", "--json"],
                 vec!["cass", "timeline", "--json"],
                 vec!["cass", "analytics", "status", "--json"],
+                vec!["cass", "analytics", "incidents", "--json"],
                 vec![
                     "cass",
                     "pages",
@@ -100949,6 +101282,7 @@ mod subcommand_robot_output_tests {
                         | AnalyticsCommand::Tokens { common, .. }
                         | AnalyticsCommand::Tools { common, .. }
                         | AnalyticsCommand::AnalyticsModels { common, .. }
+                        | AnalyticsCommand::Incidents { common, .. }
                         | AnalyticsCommand::Rebuild { common, .. }
                         | AnalyticsCommand::Validate { common, .. },
                     ) => resolve_subcommand_structured_format(&cli, common.json),

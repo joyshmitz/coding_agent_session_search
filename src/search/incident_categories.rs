@@ -1,6 +1,6 @@
-// Dead-code tolerated module-wide: this incident-mining category schema
-// lands ahead of the bounded discovery (.10.2) and privacy-audit (.10.5)
-// passes that classify mined candidates, and the robot-docs update (.11.3).
+// The live miner uses classification and stable ids; descriptor lookups and
+// the `Other` forward-compatibility branch remain contract/test surfaces that
+// intentionally are not all called by production dispatch yet.
 #![allow(dead_code)]
 
 //! Incident-mining category schema (bead
@@ -321,6 +321,158 @@ pub(crate) fn category_def(id: &str) -> Option<&'static IncidentCategoryDef> {
     CATEGORIES.iter().find(|d| d.id == id)
 }
 
+fn has_cass_anchor(text: &str) -> bool {
+    [
+        "cass ",
+        "cass_",
+        "coding-agent-search",
+        "coding_agent_search",
+        "agent_search.db",
+        "frankensqlite",
+        "frankensearch",
+        "fts_messages",
+    ]
+    .iter()
+    .any(|anchor| text.contains(anchor))
+}
+
+fn strong_signals(category: IncidentCategory) -> &'static [&'static str] {
+    match category {
+        IncidentCategory::CassStatusHealth => &["health_class", "recommended_action"],
+        IncidentCategory::IndexStaleMissing => {
+            &["index_freshness", "not_initialized", "err.kind=openread"]
+        }
+        IncidentCategory::IndexStallProgress => &["last_progress_at_ms", "no forward progress"],
+        IncidentCategory::SearchZeroWorkspace => &["zero_result_diagnosis", "candidate_workspaces"],
+        IncidentCategory::QuarantineOom => &[
+            "quarantined_conversations",
+            "index-ingest-out-of-memory",
+            "ingest_oom",
+        ],
+        IncidentCategory::StorageBusyCorrupt => &[],
+        IncidentCategory::RemoteSyncAuth => &[],
+        IncidentCategory::Semantic => &["semantic_fallback_lexical", "fallback_mode"],
+        IncidentCategory::WatchSalvageIssues => {
+            &["drop_close", "deferred_authoritative_db_rebuild"]
+        }
+        IncidentCategory::HostPressure => &[],
+        IncidentCategory::DependencyAttribution => &[
+            "pin_state",
+            "upstream_fix_possibly_missing",
+            "known_issue_ids",
+        ],
+        IncidentCategory::Other => &[],
+    }
+}
+
+fn contains_any(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
+}
+
+fn matches_anchored_category(category: IncidentCategory, text: &str) -> bool {
+    match category {
+        IncidentCategory::StorageBusyCorrupt => {
+            contains_any(
+                text,
+                &[
+                    "database",
+                    "sqlite",
+                    "frankensqlite",
+                    "wal",
+                    "openread",
+                    "integrity",
+                ],
+            ) && contains_any(
+                text,
+                &["locked", "busy", "corrupt", "integrity", "wal", "openread"],
+            )
+        }
+        IncidentCategory::RemoteSyncAuth => {
+            contains_any(
+                text,
+                &["ssh", "rsync", "remote sync", "source sync", "host key"],
+            ) && contains_any(
+                text,
+                &[
+                    "permission denied",
+                    "auth",
+                    "timeout",
+                    "failed",
+                    "unreachable",
+                    "host key",
+                ],
+            )
+        }
+        IncidentCategory::Semantic => {
+            contains_any(text, &["semantic", "model", "vector", "embedder", "hybrid"])
+                && contains_any(
+                    text,
+                    &[
+                        "missing",
+                        "unavailable",
+                        "stale",
+                        "backfill",
+                        "fallback",
+                        "failed",
+                        "error",
+                    ],
+                )
+        }
+        IncidentCategory::WatchSalvageIssues => contains_any(
+            text,
+            &[
+                "exit code 9",
+                "drop_close",
+                "salvage",
+                "deferred_authoritative_db_rebuild",
+                "watch crash",
+                "watch restart",
+            ],
+        ),
+        IncidentCategory::DependencyAttribution => {
+            contains_any(text, &["frankensqlite", "frankensearch"])
+                && contains_any(
+                    text,
+                    &[
+                        "pinned",
+                        "pin state",
+                        "upstream",
+                        "known issue",
+                        "regression",
+                    ],
+                )
+        }
+        _ => CATEGORIES
+            .iter()
+            .find(|definition| definition.category == category)
+            .is_some_and(|definition| {
+                definition
+                    .detection_signals
+                    .iter()
+                    .any(|signal| text.contains(&signal.to_ascii_lowercase()))
+            }),
+    }
+}
+
+/// Classify one bounded message fragment into zero or more canonical incident
+/// categories. Stable category order is preserved. Generic coding words such as
+/// "model", "auth", "busy", and "timeout" require a CASS-specific anchor in
+/// the same message; strong structured markers classify on their own.
+pub(crate) fn classify_text(text: &str) -> Vec<IncidentCategory> {
+    let normalized = text.to_ascii_lowercase();
+    let anchored = has_cass_anchor(&normalized);
+    CATEGORIES
+        .iter()
+        .filter(|definition| {
+            strong_signals(definition.category)
+                .iter()
+                .any(|signal| normalized.contains(signal))
+                || (anchored && matches_anchored_category(definition.category, &normalized))
+        })
+        .map(|definition| definition.category)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,5 +615,75 @@ mod tests {
                 .unwrap()
                 .starts_with("cass ")
         );
+    }
+
+    #[test]
+    fn classifier_matches_multiple_categories_once_in_stable_order() {
+        let found = classify_text(
+            "cass health_class=degraded recommended_action=repair; \
+             semantic_fallback_lexical model missing model missing; database is locked busy",
+        );
+        assert_eq!(
+            found,
+            vec![
+                IncidentCategory::CassStatusHealth,
+                IncidentCategory::StorageBusyCorrupt,
+                IncidentCategory::Semantic,
+            ]
+        );
+    }
+
+    #[test]
+    fn classifier_rejects_unanchored_generic_application_discussion() {
+        assert!(
+            classify_text("our app model auth timeout busy status rebuild is flaky").is_empty(),
+            "generic coding conversation must not become a CASS incident"
+        );
+    }
+
+    #[test]
+    fn classifier_requires_category_specific_failure_context() {
+        assert!(
+            classify_text("cass uses frankensqlite and frankensearch").is_empty(),
+            "dependency names alone are not an attribution incident"
+        );
+        assert!(
+            classify_text("cass completed the model and vector migration").is_empty(),
+            "healthy semantic discussion is not an incident"
+        );
+        assert!(
+            classify_text("cass command timed out while rendering a report").is_empty(),
+            "a generic timeout is not remote authentication failure"
+        );
+    }
+
+    #[test]
+    fn classifier_accepts_anchored_compound_failure_signals() {
+        assert_eq!(
+            classify_text("cass remote sync over ssh failed: permission denied"),
+            vec![IncidentCategory::RemoteSyncAuth]
+        );
+        assert_eq!(
+            classify_text("cass frankensqlite pinned revision may miss upstream fix"),
+            vec![IncidentCategory::DependencyAttribution]
+        );
+    }
+
+    #[test]
+    fn classifier_accepts_report_derived_strong_markers_without_anchor() {
+        assert_eq!(
+            classify_text("index-ingest-out-of-memory quarantined_conversations=1"),
+            vec![IncidentCategory::QuarantineOom]
+        );
+        assert_eq!(
+            classify_text("deferred_authoritative_db_rebuild drop_close"),
+            vec![IncidentCategory::WatchSalvageIssues]
+        );
+    }
+
+    #[test]
+    fn classifier_empty_and_unknown_inputs_have_no_false_category() {
+        assert!(classify_text("").is_empty());
+        assert!(classify_text("ordinary refactor completed successfully").is_empty());
     }
 }

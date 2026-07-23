@@ -220,7 +220,7 @@ pub(crate) struct SupportBundleInputs {
 pub(crate) fn default_redaction_policy() -> RedactionPolicy {
     RedactionPolicy {
         private_text: PrivateTextPolicy::SuppressAll,
-        hash: HashStrategy::Fingerprint64,
+        hash: HashStrategy::Blake3_256V1,
         allow_full_paths: false,
     }
 }
@@ -310,7 +310,7 @@ pub(crate) fn build_support_bundle(
         }
     }
 
-    if matches!(policy.hash, HashStrategy::Fingerprint64) {
+    if matches!(policy.hash, HashStrategy::Blake3_256V1) {
         fields_hashed.push("content_fingerprints".into());
     }
 

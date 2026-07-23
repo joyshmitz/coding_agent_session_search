@@ -1,6 +1,6 @@
-// Dead-code tolerated module-wide: this incident redaction layer lands ahead
-// of the bounded discovery (.10.2) that produces raw evidence and the robot
-// surfaces that emit the redacted summary.
+// The live miner uses the suppress-all policy. Richer opt-in policies remain
+// contract/test surfaces until a CLI explicitly exposes them, so their stable
+// enum branches are intentionally retained without pretending flags exist.
 #![allow(dead_code)]
 
 //! Redaction provenance and privacy audit for incident mining (bead
@@ -20,10 +20,8 @@
 //! guarantees no raw prompt/tool payload appears in the serialized output —
 //! the property the tests enforce. Categories/privacy tiers reuse
 //! [`crate::search::incident_categories`]. All enums serialize as snake_case;
-//! the content fingerprint is a stable, non-cryptographic dedup id (never the
-//! raw text).
-
-use std::hash::{Hash, Hasher};
+//! the content fingerprint is a stable, domain-separated BLAKE3-256 dedup id
+//! (never the raw text).
 
 use serde::{Deserialize, Serialize};
 
@@ -46,9 +44,9 @@ pub(crate) enum PrivateTextPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum HashStrategy {
-    /// A stable 64-bit non-cryptographic content fingerprint (hex). Used for
+    /// Domain-separated BLAKE3-256 fingerprint, version 1. Used for bounded
     /// dedup/correlation only — never reversible to the raw text.
-    Fingerprint64,
+    Blake3_256V1,
     /// No fingerprint emitted.
     None,
 }
@@ -66,7 +64,7 @@ impl Default for RedactionPolicy {
     fn default() -> Self {
         Self {
             private_text: PrivateTextPolicy::SuppressAll,
-            hash: HashStrategy::Fingerprint64,
+            hash: HashStrategy::Blake3_256V1,
             allow_full_paths: false,
         }
     }
@@ -115,12 +113,38 @@ pub(crate) struct RedactionManifest {
     pub opt_in_flags: Vec<String>,
 }
 
-/// Stable non-cryptographic 64-bit fingerprint of `text`, as hex. Never the
-/// raw text; safe to surface.
-fn fingerprint64(text: &str) -> String {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut h);
-    format!("{:016x}", h.finish())
+/// Policy-level manifest for the live default robot surface. Unlike the
+/// per-evidence manifest returned by [`redact`], this remains truthful for an
+/// empty corpus and advertises no richer-evidence flags unless the consuming
+/// CLI actually implements them.
+pub(crate) fn default_robot_manifest() -> RedactionManifest {
+    RedactionManifest {
+        private_text_policy: PrivateTextPolicy::SuppressAll,
+        hash_strategy: HashStrategy::Blake3_256V1,
+        fields_emitted: vec![
+            "category".to_string(),
+            "hit_count".to_string(),
+            "content_fingerprints".to_string(),
+            "evidence_paths".to_string(),
+            "suggested_command".to_string(),
+        ],
+        fields_suppressed: vec![
+            "raw_prompt_text".to_string(),
+            "raw_tool_payload".to_string(),
+            "raw_snippet".to_string(),
+        ],
+        opt_in_flags: Vec::new(),
+    }
+}
+
+/// Stable, domain-separated BLAKE3-256 fingerprint of `text`, as hex. Never
+/// the raw text; safe to surface and stable across Rust/toolchain versions.
+fn content_fingerprint(text: &str) -> String {
+    const DOMAIN: &[u8] = b"cass-incident-content-fingerprint-v1\0";
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(DOMAIN);
+    hasher.update(text.as_bytes());
+    hasher.finalize().to_hex().to_string()
 }
 
 /// Mask a snippet: bound length and replace long alphanumeric runs (possible
@@ -144,7 +168,8 @@ fn masked_snippet(text: &str, max_chars: usize) -> String {
 
 fn basename(path: &str) -> String {
     path.trim_end_matches('/')
-        .rsplit('/')
+        .trim_end_matches('\\')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or(path)
         .to_string()
@@ -162,14 +187,14 @@ pub(crate) fn redact(
 
     // Content fingerprint over the concatenated raw evidence (never the text).
     let content_fingerprint = match policy.hash {
-        HashStrategy::Fingerprint64 => {
+        HashStrategy::Blake3_256V1 => {
             let raw = format!(
                 "{}\u{1f}{}",
                 evidence.raw_prompt_text.as_deref().unwrap_or(""),
                 evidence.raw_tool_payload.as_deref().unwrap_or("")
             );
             emitted.push("content_fingerprint".to_string());
-            Some(fingerprint64(&raw))
+            Some(content_fingerprint(&raw))
         }
         HashStrategy::None => None,
     };
@@ -262,8 +287,8 @@ mod tests {
             "\"suppress_all\""
         );
         assert_eq!(
-            serde_json::to_string(&HashStrategy::Fingerprint64).unwrap(),
-            "\"fingerprint64\""
+            serde_json::to_string(&HashStrategy::Blake3_256V1).unwrap(),
+            "\"blake3_256_v1\""
         );
     }
 
@@ -290,7 +315,7 @@ mod tests {
         );
         // A fingerprint is emitted (and is not the raw text).
         let fp = redacted.content_fingerprint.unwrap();
-        assert_eq!(fp.len(), 16);
+        assert_eq!(fp.len(), 64);
         assert!(!fp.contains("sk_live"));
     }
 
@@ -373,7 +398,7 @@ mod tests {
     fn manifest_records_policy_hash_and_opt_in_flags() {
         let (_, manifest) = redact(&evidence(), RedactionPolicy::default());
         assert_eq!(manifest.private_text_policy, PrivateTextPolicy::SuppressAll);
-        assert_eq!(manifest.hash_strategy, HashStrategy::Fingerprint64);
+        assert_eq!(manifest.hash_strategy, HashStrategy::Blake3_256V1);
         assert!(manifest.fields_emitted.contains(&"category".to_string()));
         assert!(
             manifest
@@ -413,5 +438,35 @@ mod tests {
         };
         let (redacted, _) = redact(&evidence(), policy);
         assert!(redacted.content_fingerprint.is_none());
+    }
+
+    #[test]
+    fn live_robot_manifest_is_truthful_even_for_an_empty_corpus() {
+        let manifest = default_robot_manifest();
+        assert_eq!(manifest.private_text_policy, PrivateTextPolicy::SuppressAll);
+        assert_eq!(manifest.hash_strategy, HashStrategy::Blake3_256V1);
+        assert!(
+            manifest
+                .fields_suppressed
+                .contains(&"raw_prompt_text".into())
+        );
+        assert_eq!(
+            manifest.fields_emitted,
+            [
+                "category",
+                "hit_count",
+                "content_fingerprints",
+                "evidence_paths",
+                "suggested_command",
+            ]
+            .map(str::to_string)
+        );
+        assert!(manifest.opt_in_flags.is_empty());
+    }
+
+    #[test]
+    fn basename_handles_unix_and_windows_paths() {
+        assert_eq!(basename("/home/dev/session.jsonl"), "session.jsonl");
+        assert_eq!(basename(r"C:\\Users\\dev\\session.jsonl"), "session.jsonl");
     }
 }
