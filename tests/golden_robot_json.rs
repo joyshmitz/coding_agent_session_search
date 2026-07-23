@@ -912,6 +912,58 @@ fn scrub_robot_json(input: &str, test_home: &std::path::Path) -> String {
 
 /// Compare `actual` against the golden at `tests/golden/<name>`. Writes /
 /// overwrites the golden when `UPDATE_GOLDENS=1` is set in the env.
+fn describe_golden_difference(
+    line_number: usize,
+    expected_line: Option<&str>,
+    actual_line: Option<&str>,
+    expected_len: usize,
+    actual_len: usize,
+) -> String {
+    match (expected_line, actual_line) {
+        (Some(expected_line), Some(actual_line)) => {
+            format!("line {line_number}: expected {expected_line:?}, actual {actual_line:?}")
+        }
+        (Some(expected_line), None) => {
+            format!("line {line_number}: expected {expected_line:?}, actual reached end of file")
+        }
+        (None, Some(actual_line)) => {
+            format!("line {line_number}: expected reached end of file, actual {actual_line:?}")
+        }
+        (None, None) => format!(
+            "line contents match, but byte lengths differ (expected {expected_len}, actual {actual_len})"
+        ),
+    }
+}
+
+fn first_golden_difference(expected: &str, actual: &str) -> String {
+    let mut expected_lines = expected.lines();
+    let mut actual_lines = actual.lines();
+
+    for line_number in 1.. {
+        let expected_line = expected_lines.next();
+        let actual_line = actual_lines.next();
+        if expected_line.is_some() && expected_line == actual_line {
+            continue;
+        }
+        return describe_golden_difference(
+            line_number,
+            expected_line,
+            actual_line,
+            expected.len(),
+            actual.len(),
+        );
+    }
+
+    describe_golden_difference(0, None, None, expected.len(), actual.len())
+}
+
+fn strip_one_final_line_ending(input: &str) -> &str {
+    input
+        .strip_suffix("\r\n")
+        .or_else(|| input.strip_suffix('\n'))
+        .unwrap_or(input)
+}
+
 fn assert_golden(name: &str, actual: &str) {
     let golden_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -936,14 +988,17 @@ fn assert_golden(name: &str, actual: &str) {
         )
     });
 
-    if actual != expected {
+    let comparable_expected = strip_one_final_line_ending(&expected);
+    let comparable_actual = strip_one_final_line_ending(actual);
+    if comparable_actual != comparable_expected {
+        let first_difference = first_golden_difference(comparable_expected, comparable_actual);
         // Dump actual next to golden for easy diffing.
         let actual_path = golden_path.with_extension("actual");
         std::fs::write(&actual_path, actual).expect("write .actual file");
         panic!(
             "GOLDEN MISMATCH: {name}\n\n\
              Expected: {}\n\
-             Actual:   {}\n\n\
+             Actual:   {} (first difference: {first_difference})\n\n\
              diff the two files to see the drift, then either:\n\
              \t- fix the code if this was unintentional, or\n\
              \t- regenerate: UPDATE_GOLDENS=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/cass-golden-target cargo test --test golden_robot_json \\\n\
