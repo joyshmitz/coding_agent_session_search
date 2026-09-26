@@ -327,6 +327,28 @@ mod budget_override {
             diagnostics.contains("enrichment_read_budget_exceeded"),
             "{diagnostics}"
         );
+        // 2l1b0.35: the connector diagnostic names the rejected rollout and the
+        // setting that admits it, not an unreadable data directory.
+        let failed: Value = serde_json::from_slice(&output.stdout)?;
+        let connector_diagnostics = failed["indexing_stats"]["connector_diagnostics"]
+            .as_array()
+            .expect("connector diagnostics");
+        assert!(
+            connector_diagnostics.iter().any(|diagnostic| {
+                diagnostic["failure_kind"] == "source-over-read-budget"
+                    && diagnostic["source_path"].as_str() == paths[1].to_str()
+                    && diagnostic["safe_next_action"]
+                        .as_str()
+                        .is_some_and(|action| action.contains(POLICY))
+            }),
+            "{failed}"
+        );
+        assert!(
+            !connector_diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic["failure_kind"] == "unreadable-source"),
+            "{failed}"
+        );
         assert_eq!(receipt(&paths[1])?, before);
 
         // Same archive, no --full: raising the budget must retry the rejected
